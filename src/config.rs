@@ -91,7 +91,9 @@ pub struct QdrantConfig {
     pub collection_realms: String,
 }
 
-fn default_qdrant_url() -> String { "http://localhost:6333".into() }
+fn default_qdrant_url() -> String {
+    std::env::var("QDRANT_URL").unwrap_or_else(|_| "http://localhost:6333".into())
+}
 fn default_memories() -> String { "memories".into() }
 fn default_quantized() -> String { "quantized".into() }
 fn default_realms() -> String { "realms".into() }
