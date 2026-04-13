@@ -1,19 +1,23 @@
 services:
   qdrant:
     image: qdrant/qdrant:latest
-    ports:
-      - "6333:6333"
-      - "6334:6334"
+    # Port mapping removed — memex8 connects via Docker internal network (http://qdrant:6333)
+    # Uncomment below if you need direct host access to Qdrant
+    # ports:
+    #   - "6333:6333"
+    #   - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     environment:
       QDRANT__SERVICE__GRPC_PORT: 6334
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      # Qdrant container has no curl/wget — use /healthz endpoint via bash
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   memex8:
     build: .
