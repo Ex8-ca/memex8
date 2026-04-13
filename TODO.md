@@ -37,10 +37,11 @@
 - [x] **Tag suggestions** — endpoint to list most-used tags across memories
 
 ### 5. Chunker: Better Markdown Parsing
-- [ ] **Use pulldown-cmark AST** — parse headings properly (H1-H6 hierarchy), detect code blocks, tables, lists
+- [x] **Use pulldown-cmark AST** — parse headings properly (H1-H6 hierarchy), detect code blocks, tables, lists
   - Preserve code blocks as single chunks (don't split in the middle of code)
   - Track parent heading chain (H1 > H2 > H3) for context
   - File: `src/engine/chunker.rs`
+  - 7 passing tests
 
 ### 6. Import with Vector Reuse
 - [x] **`--reuse-vectors` flag** — for imported JSON, skip re-embedding

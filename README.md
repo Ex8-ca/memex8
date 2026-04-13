@@ -23,13 +23,13 @@
 │                      Engine                             │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐  │
 │  │ Embedder │ │ Chunker  │ │ Realms   │ │  Slumber  │  │
-│  │Ollama/Open│ │ Markdown │ │Auto-clus.│ │Maintenan. │  │
+│  │Ollama/Open│ │pulldown-c│ │Auto-clus.│ │Maintenan. │  │
 │  └────┬─────┘ └──────────┘ └────┬─────┘ └─────┬─────┘  │
-├───────┴──────────────────────────┴─────────────┴────────┤
+├───────┴──────────────────────────┴──────────────┴────────┤
 │                    Qdrant Storage                        │
 │  ┌──────────┐  ┌──────────┐  ┌───────────────────────┐  │
 │  │ memories │  │  realms  │  │ memories_quantized    │  │
-│  │ (vector) │  │(metadata)│  │ (TurboQuant vectors)  │  │
+│  │ (vector) │  │(centroid)│  │ (TurboQuant vectors)  │  │
 │  └──────────┘  └──────────┘  └───────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -38,9 +38,9 @@
 
 ### Core
 - **Vector Memory** — Semantic search across all memories using embeddings
-- **Auto-Discovered Realms** — Memories self-organize into knowledge clusters via cosine similarity
-- **TurboQuant Compression** — Near-optimal vector quantization ([arXiv:2504.19874](https://arxiv.org/abs/2504.19874)) for efficient storage during slumber mode
-- **Slumber Mode** — Idle-time maintenance: re-cluster, summarize, compress, prune stale memories
+- **Auto-Discovered Realms** — Memories self-organize into knowledge clusters via cosine similarity; realms auto-split via k-means when they grow too large
+- **TurboQuant Compression** — Near-optimal vector quantization ([arXiv:2504.19874](https://arxiv.org/abs/2504.19874)): 3.5-bit → 7.6x compression with ~0.90 cosine similarity at 768d
+- **Slumber Mode** — Background maintenance with cron + idle triggers: deduplicate, compress, re-cluster, split/merge realms, prune stale memories, write MEMEX8.md files
 - **Augment, Don't Replace** — Writes `MEMEX8.md` back to project directories for model context pickup
 
 ### Embedding Flexibility
@@ -50,7 +50,7 @@
 
 ### Integrations
 - **MCP Server** — JSON-RPC 2.0 over stdio, works with any MCP-compatible agent
-- **REST API** — Full CRUD + search via HTTP with WebSocket support
+- **REST API** — Full CRUD + search with authentication, tag filtering, and pagination
 - **OpenClaw** — Webhook hooks for auto-ingesting conversation summaries and skill outputs
 - **Hermes Agent** — MCP server integration with 11 memory tools
 - **pi.dev** — TypeScript extension for the pi coding agent
@@ -77,6 +77,7 @@ Commands:
   slumber        Slumber management
   serve          Start REST API + WebSocket server
   mcp            Start MCP server
+  daemon         Start background daemon (cron + idle scheduler)
   integration    Generate integration configuration
   stats          Show system statistics
   export         Export all memories as JSON
@@ -92,7 +93,7 @@ Commands:
 
 ### Build
 ```bash
-git clone https://github.com/user/memex8.git
+git clone https://github.com/marcus20232023/memex8.git
 cd memex8
 cargo build --release
 ```
@@ -128,6 +129,9 @@ docker run -d -p 6333:6333 -v qdrant_data:/qdrant/storage qdrant/qdrant
 
 # Start the MCP server (for Hermes/parsing agents)
 ./target/release/memex8 mcp
+
+# Start the background daemon (cron + idle slumber)
+./target/release/memex8 daemon
 ```
 
 ## Docker Compose
@@ -205,6 +209,43 @@ memex8 integration openclaw
 memex8 integration pi > ~/.pi/agent/extensions/memex8.ts
 ```
 
+## REST API
+
+The REST API runs on `http://localhost:8080` by default. All endpoints except `/health` are protected by Bearer token authentication when `MEMEX8_API_KEY` is set.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/memories` | Store a new memory |
+| `POST` | `/api/v1/memories/search` | Search with optional tags, pagination |
+| `GET`  | `/api/v1/memories/recall` | Get high-importance memories |
+| `POST` | `/api/v1/memories/ingest` | Ingest file or directory |
+| `GET`  | `/api/v1/memories/tags` | Get tag suggestions |
+| `GET`  | `/api/v1/memories/{id}` | Get memory by ID |
+| `DELETE` | `/api/v1/memories/{id}` | Delete a memory |
+| `POST` | `/api/v1/memories/{id}/upvote` | Upvote a memory |
+| `POST` | `/api/v1/memories/{id}/archive` | Archive a memory |
+| `GET`  | `/api/v1/realms` | List all realms |
+| `POST` | `/api/v1/realms` | Create a realm |
+| `GET`  | `/api/v1/realms/{name}` | Show realm details |
+| `GET`  | `/api/v1/slumber/status` | Slumber status |
+| `POST` | `/api/v1/slumber/trigger` | Trigger slumber |
+| `GET`  | `/api/v1/stats` | System statistics |
+| `GET`  | `/api/v1/health` | Health check (no auth) |
+
+### Authentication
+```bash
+curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
+  http://localhost:8080/api/v1/memories/search \
+  -d '{"query": "async Rust"}'
+```
+
+### Search with Tags and Pagination
+```bash
+curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
+  http://localhost:8080/api/v1/memories/search \
+  -d '{"query": "Rust", "tags": ["backend"], "offset": 10, "limit": 20}'
+```
+
 ## Architecture
 
 ```
@@ -214,7 +255,7 @@ memex8/
 │   ├── config.rs            # TOML configuration
 │   ├── lib.rs               # Library exports
 │   ├── api/                 # REST API (Axum 0.8)
-│   │   ├── server.rs        # HTTP server setup
+│   │   ├── server.rs        # HTTP server setup + auth
 │   │   ├── auth.rs          # Bearer token middleware
 │   │   ├── error.rs         # Error handling
 │   │   └── routes/          # Route handlers
@@ -224,10 +265,11 @@ memex8/
 │   ├── engine/              # Core logic
 │   │   ├── mod.rs           # Engine orchestrator
 │   │   ├── embedder.rs      # Embedding abstraction
-│   │   ├── chunker.rs       # Markdown chunking
+│   │   ├── chunker.rs       # AST-based markdown chunking (pulldown-cmark)
 │   │   ├── ingester.rs      # File/directory ingestion
 │   │   ├── realms.rs        # Realm management
-│   │   ├── slumber.rs       # Background maintenance
+│   │   ├── slumber.rs       # Background maintenance pipeline
+│   │   ├── scheduler.rs     # Cron + idle trigger daemon
 │   │   ├── quantizer.rs     # TurboQuant compression
 │   │   ├── compressor.rs    # AAAK-style summarization
 │   │   ├── search.rs        # Search orchestration
@@ -257,30 +299,49 @@ memex8/
 
 ### Ingestion Pipeline
 ```
-.md file → Chunker (H2 sections) → Embedder (Ollama/OpenAI) → 
-Realm Assignment (cosine similarity) → Qdrant Store
+.md file → Chunker (pulldown-cmark AST) → Embedder (Ollama/OpenAI) →
+Realm Assignment (cosine similarity vs centroids) → Qdrant Store
 ```
+
+### Chunker Strategies
+- **section** (default) — Split at H2 headings, preserve code blocks/tables
+- **h1** — Split at H1 only (larger chunks)
+- **h3** — Split at H3 (smaller chunks)
+- **paragraph** — Split at paragraph boundaries
+- **file** — One chunk per file
 
 ### Search Pipeline
 ```
-Query → Embedder → Qdrant Vector Search → Rank by Score + Importance → Results
+Query → Embedder → Qdrant Vector Search → Rank by Score → Filter by tags/realm → Paginate → Results
 ```
 
 ### Recall Pipeline
 ```
-All Memories → Score(importance × recency × access_count) → Top N → Results
+All Memories → Score(importance × recency × access_count) → Sort → Top N → Results
 ```
 
 ### Slumber Mode (Background Maintenance)
 ```
-Trigger (idle/cron) → 
-  1. TurboQuant compress vectors → store in quantized collection
-  2. Re-cluster realms by semantic similarity
-  3. Merge small/similar realms
-  4. Summarize memory clusters (AAAK-style)
-  5. Prune stale, low-importance memories
-  6. Update MEMEX8.md files
+Trigger (idle timeout / cron) →
+  1. Deduplicate (hash-based, keep highest importance)
+  2. TurboQuant compress vectors → store in quantized collection
+  3. Recompute realm centroids from actual memory vectors
+  4. Split large realms via k-means (k=2)
+  5. Prune flagging (age × importance × access scoring)
+  6. Update MEMEX8.md files per directory
 ```
+
+### TurboQuant Compression
+
+Based on [arXiv:2504.19874](https://arxiv.org/abs/2504.19874): random orthogonal rotation + Lloyd-Max scalar quantization on the induced Beta distribution.
+
+| Bits | Cosine (768d) | MSE | Packed Size | Compression |
+|------|---------------|-----|-------------|-------------|
+| 2.0 | 0.79 | 0.0005 | 192 B | 14.5x |
+| 2.5 | 0.81 | 0.0005 | 288 B | 10.0x |
+| 3.0 | 0.81 | 0.0005 | 288 B | 10.0x |
+| 3.5 | 0.90 | 0.0003 | 384 B | 7.6x |
+| 4.0 | 0.93 | 0.0002 | 384 B | 7.6x |
 
 ## License
 
