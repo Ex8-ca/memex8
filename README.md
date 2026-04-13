@@ -132,8 +132,8 @@ cp .env.example .env
 # Start memex8 + Qdrant
 docker compose up -d
 
-# Check logs
-docker compose logs -f memex8
+# Open the web UI
+open http://localhost:8080
 ```
 
 Use the binary for CLI commands even when the server runs in Docker:
@@ -160,7 +160,7 @@ docker run -d -p 6333:6333 -v qdrant_data:/qdrant/storage qdrant/qdrant
 # Check connectivity
 ./target/release/memex8 doctor
 
-# Start the REST API + MCP server
+# Start the REST API + MCP server (serves web UI at http://localhost:8080)
 ./target/release/memex8 serve
 
 # Or start the background daemon (cron + idle slumber)
@@ -172,18 +172,6 @@ Then use CLI commands normally:
 ```bash
 ./target/release/memex8 ingest ./my-notes/
 ./target/release/memex8 search "async Rust patterns"
-
-## Docker Compose
-
-```bash
-cp .env.example .env
-# Add your API keys to .env
-
-# Start memex8 + Qdrant
-docker compose up -d
-
-# With local Ollama embeddings
-docker compose --profile local-embeddings up -d
 ```
 
 ## Configuration
@@ -441,7 +429,8 @@ memex8/
 │   │   ├── openclaw.rs      # OpenClaw webhook config
 │   │   ├── hermes.rs        # Hermes MCP config
 │   │   └── pi.rs            # pi.dev extension
-│   └── web/                 # Web UI (future)
+│   └── web/                 # Web UI (cards, 3D graph, search, upvote)
+├── web-dist/                # Web UI static assets (embedded in binary)
 ├── docker-compose.yml       # Qdrant + memex8 + optional Ollama
 ├── Dockerfile               # Multi-stage Rust build
 ├── Cargo.toml
