@@ -102,76 +102,37 @@ Commands:
 ## Quick Start
 
 ### Prerequisites
-- Rust 1.82+
-- Docker & Docker Compose (for Qdrant)
+- Docker & Docker Compose
 
-### Build
+### 1. Clone and configure
 ```bash
 git clone https://github.com/marcus20232023/memex8.git
 cd memex8
-cargo build --release
-```
-
-### Setup
-```bash
-# Copy config files
-cp config.example.toml config.toml
 cp .env.example .env
-
-# Edit with your settings
+# Edit .env and set your OPENAI_API_KEY
 nano .env
 ```
 
-### Option A: Docker Compose (Recommended)
-
-Everything comes up together — memex8 + Qdrant in one command:
-
+### 2. Start everything
 ```bash
-cp .env.example .env
-
-# Start memex8 + Qdrant
 docker compose up -d
-
-# Open the web UI
-open http://localhost:8080
 ```
 
-Use the binary for CLI commands even when the server runs in Docker:
+That's it. memex8 + Qdrant are running.
 
-```bash
-# Ingest files (CLI talks to Docker container)
-./target/release/memex8 ingest ./my-notes/
-
-# Search
-./target/release/memex8 search "async Rust patterns"
-
-# Install the binary to ~/.memex8 for easier access
-./scripts/install.sh
+### 3. Open the web UI
+```
+http://localhost:8080
 ```
 
-### Option B: Local Binary (No Docker)
+Enter your `MEMEX8_API_KEY` when prompted (it's saved in localStorage).
 
-Run everything from the binary — you'll need Qdrant running separately:
-
-```bash
-# Start Qdrant first
-docker run -d -p 6333:6333 -v qdrant_data:/qdrant/storage qdrant/qdrant
-
-# Check connectivity
-./target/release/memex8 doctor
-
-# Start the REST API + MCP server (serves web UI at http://localhost:8080)
-./target/release/memex8 serve
-
-# Or start the background daemon (cron + idle slumber)
-./target/release/memex8 daemon
-```
-
-Then use CLI commands normally:
+### 4. (Optional) Install local binary
+For stdio MCP with Claude Code/Opencode, or CLI commands:
 
 ```bash
-./target/release/memex8 ingest ./my-notes/
-./target/release/memex8 search "async Rust patterns"
+cargo build --release
+./scripts/setup-docker.sh  # helper script for Docker setup
 ```
 
 ## Configuration
@@ -214,61 +175,60 @@ All integrations use the MCP protocol — memex8 acts as an MCP server that agen
 | `memex8_slumber_status` | Slumber pipeline status |
 | `memex8_graph_search` | Graph-based memory retrieval |
 
-### Claude Code
+### Integration: Two Modes
 
-Claude Code supports MCP servers via `.mcp.json` (project-level) or `~/.claude.json` (global). It connects via stdio — Claude launches `~/.memex8/bin/memex8 mcp` as a subprocess.
+memex8 supports two integration modes depending on your setup:
+
+| Mode | Transport | Best for |
+|------|-----------|----------|
+| **stdio MCP** | Binary spawns as subprocess | Local binary installs |
+| **REST API** | HTTP calls to `http://localhost:8080` | Docker, any language, any agent |
+
+### Docker Setup (Recommended — REST API)
+
+When memex8 runs in Docker, all agents connect via the REST API:
 
 ```bash
-# Build memex8 binary
-cargo build --release
+# memex8 is already running at http://localhost:8080
+curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "how to deploy", "limit": 5}' \
+  http://localhost:8080/api/v1/memories/search
+```
 
-# Add as a project-local MCP server
+**For Claude Code / Opencode**: Use custom tools that call the REST API, or use the pi.dev extension which wraps all memory operations as REST calls.
+
+**For pi.dev**: Generate the extension and point it at the Docker endpoint:
+
+```bash
+docker compose exec memex8 memex8 integration pi > ~/.pi/agent/extensions/memex8.ts
+# Edit BASE_URL = "http://localhost:8080" in the generated file
+```
+
+### Local Binary (stdio MCP)
+
+If you installed memex8 locally with `./scripts/install.sh`, agents use stdio MCP:
+
+```bash
+# Claude Code
 claude mcp add -s project memex8 -- ~/.memex8/bin/memex8 mcp
 
-# Or add globally (all projects)
-claude mcp add -s user memex8 -- ~/.memex8/bin/memex8 mcp
-```
-
-Or manually edit `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "memex8": {
-      "command": "~/.memex8/bin/memex8",
-      "args": ["mcp"],
-      "env": {
-        "MEMEX8_API_KEY": "your-api-key"
-      }
-    }
-  }
-}
-```
-
-**What happens**: When Claude Code starts, it launches `~/.memex8/bin/memex8 mcp` as a subprocess connected over stdin/stdout. Claude can then call `memex8_search` to pull relevant project context before writing code.
-
-### Opencode
-
-Opencode uses the same stdio MCP pattern:
-
-```bash
+# Opencode
 opencode mcp add memex8 -- ~/.memex8/bin/memex8 mcp
+
+# Hermes Agent (~/.hermes/config.yaml)
+mcp_servers:
+  memex8:
+    transport: stdio
+    command: ~/.memex8/bin/memex8
+    args: ["mcp"]
 ```
 
-Or in your Opencode config:
-
-```json
-{
-  "mcpServers": {
-    "memex8": {
-      "command": "~/.memex8/bin/memex8",
-      "args": ["mcp"]
-    }
-  }
-}
+Or use the generators:
+```bash
+memex8 integration hermes   # outputs YAML config
+memex8 integration pi       # outputs TypeScript extension
 ```
-
-**What happens**: Opencode connects to memex8 via stdio on startup. All 11 memory tools become available.
 
 ### Hermes Agent
 
