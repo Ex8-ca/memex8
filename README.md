@@ -204,7 +204,7 @@ All integrations use the MCP protocol — memex8 acts as an MCP server that agen
 
 ### Claude Code
 
-Claude Code supports MCP servers via `.mcp.json` (project-level) or `~/.claude.json` (global).
+Claude Code supports MCP servers via `.mcp.json` (project-level) or `~/.claude.json` (global). It connects via stdio — Claude launches `memex8 mcp` as a subprocess.
 
 ```bash
 # Build memex8 first
@@ -233,11 +233,11 @@ Or manually edit `.mcp.json`:
 }
 ```
 
-**What happens**: When Claude Code starts, it launches `memex8 mcp` as a subprocess connected over stdin/stdout. Claude can then call `memex8_search` to pull relevant project context before writing code — no manual context injection needed.
+**What happens**: When Claude Code starts, it launches `memex8 mcp` as a subprocess connected over stdin/stdout. Claude can then call `memex8_search` to pull relevant project context before writing code.
 
 ### Opencode
 
-Opencode uses the same MCP stdio pattern:
+Opencode uses the same stdio MCP pattern:
 
 ```bash
 opencode mcp add memex8 -- ~/memex8/target/release/memex8 mcp
@@ -256,7 +256,7 @@ Or in your Opencode config:
 }
 ```
 
-**What happens**: Opencode connects to memex8 via stdio on startup. All 11 memory tools become available — the agent can search existing project knowledge before making decisions.
+**What happens**: Opencode connects to memex8 via stdio on startup. All 11 memory tools become available.
 
 ### Hermes Agent
 

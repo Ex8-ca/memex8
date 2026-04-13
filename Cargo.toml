@@ -22,6 +22,9 @@ clap = { version = "4", features = ["derive", "env"] }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
+# HTTP types (to avoid axum version conflicts)
+http = "1"
+
 # Web framework
 axum = { version = "0.8", features = ["ws", "macros"] }
 tower = "0.5"
@@ -79,6 +82,7 @@ subtle = "2"
 
 # Async streams (SSE transport)
 futures = "0.3"
+async-stream = "0.3"
 
 # Static file serving (embedded web UI)
 include_dir = "0.7"

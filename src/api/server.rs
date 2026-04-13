@@ -6,12 +6,12 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 pub struct AppState {
-    pub engine: Engine,
+    pub engine: Arc<Engine>,
     pub config: AppConfig,
 }
 
 pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()> {
-    let engine = Engine::new(config.clone()).await?;
+    let engine = Arc::new(Engine::new(config.clone()).await?);
     let state = Arc::new(AppState { engine, config });
 
     let has_key = state.config.api_key().is_some();
@@ -24,6 +24,9 @@ pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()>
     let app = if has_key {
         Router::new()
             .nest("/api/v1", api_routes())
+            .route("/mcp", axum::routing::get(crate::mcp::http::sse_handler))
+            // NOTE: POST /mcp/messages is blocked by axum 0.7 vs 0.8 version conflict
+            // from qdrant-client's tonic dependency. Use stdio MCP or REST API instead.
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 crate::api::auth::auth_middleware,
@@ -34,6 +37,7 @@ pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()>
     } else {
         Router::new()
             .nest("/api/v1", api_routes())
+            .route("/mcp", axum::routing::get(crate::mcp::http::sse_handler))
             .layer(CorsLayer::permissive())
             .layer(TraceLayer::new_for_http())
             .with_state(state)
