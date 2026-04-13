@@ -13,7 +13,7 @@ RUN touch src/main.rs src/lib.rs
 RUN cargo build --release
 
 # Runtime
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl && \
