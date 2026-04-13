@@ -63,9 +63,13 @@
   - Graph traversal API
 
 ### 10. Web UI
-- [ ] React SPA with card view, search, realm management
-- [ ] 3D force-directed graph (Three.js)
-- [ ] Embed in binary with `include_dir`
+- [x] Single-page web UI embedded in the binary
+  - Cards view with search, upvote, importance, realm tags
+  - 3D force-directed knowledge graph (Three.js) with realm coloring
+  - Realms view with click-to-filter
+  - Memory detail modal
+  - Responsive dark theme
+  - No build step — served from `web-dist/index.html` or compiled-in
 
 ### 11. Testing
 - [ ] Chunker tests (section, paragraph, file strategies with real markdown)

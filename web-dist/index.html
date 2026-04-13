@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>memex8 — Memory Browser</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/renderers/CSS2DRenderer.js"></script>
+    <style>
+        :root {
+            --bg: #0f0f0f;
+            --surface: #1a1a1a;
+            --surface-hover: #252525;
+            --border: #333;
+            --text: #e0e0e0;
+            --text-muted: #888;
+            --accent: #6366f1;
+            --accent-hover: #818cf8;
+            --green: #22c55e;
+            --red: #ef4444;
+            --yellow: #eab308;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+        }
+
+        /* Header */
+        .header {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 1rem 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .header h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .header h1 span {
+            color: var(--accent);
+        }
+
+        .search-box {
+            display: flex;
+            gap: 0.5rem;
+            flex: 1;
+            max-width: 500px;
+            margin: 0 2rem;
+        }
+
+        .search-box input {
+            flex: 1;
+            padding: 0.5rem 1rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: 0.875rem;
+        }
+
+        .search-box input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        .search-box button {
+            padding: 0.5rem 1rem;
+            background: var(--accent);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+        }
+
+        .search-box button:hover { background: var(--accent-hover); }
+
+        .nav-tabs {
+            display: flex;
+            gap: 0.25rem;
+        }
+
+        .nav-tab {
+            padding: 0.5rem 1rem;
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 0.875rem;
+        }
+
+        .nav-tab:hover { color: var(--text); background: var(--surface-hover); }
+        .nav-tab.active { color: var(--accent); border-color: var(--accent); }
+
+        /* Stats bar */
+        .stats-bar {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 0.5rem 2rem;
+            display: flex;
+            gap: 2rem;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .stats-bar span { color: var(--text); font-weight: 600; }
+
+        /* Main content */
+        .main { padding: 1.5rem 2rem; }
+        .view { display: none; }
+        .view.active { display: block; }
+
+        /* Card view */
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 1rem;
+        }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+            transition: border-color 0.2s;
+        }
+
+        .card:hover { border-color: var(--accent); }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 0.5rem;
+        }
+
+        .card-heading {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .card-realm {
+            font-size: 0.7rem;
+            padding: 0.15rem 0.5rem;
+            background: rgba(99, 102, 241, 0.15);
+            color: var(--accent);
+            border-radius: 99px;
+            white-space: nowrap;
+        }
+
+        .card-content {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            max-height: 120px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 0.75rem;
+            white-space: pre-wrap;
+        }
+
+        .card-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .card-meta {
+            display: flex;
+            gap: 1rem;
+        }
+
+        .upvote-btn {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+            padding: 0.25rem 0.5rem;
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 0.75rem;
+        }
+
+        .upvote-btn:hover {
+            border-color: var(--green);
+            color: var(--green);
+        }
+
+        .upvote-btn.upvoted {
+            border-color: var(--green);
+            color: var(--green);
+            background: rgba(34, 197, 94, 0.1);
+        }
+
+        .importance-bar {
+            width: 60px;
+            height: 4px;
+            background: var(--border);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .importance-fill {
+            height: 100%;
+            background: var(--accent);
+            border-radius: 2px;
+        }
+
+        /* Graph view */
+        #graph-container {
+            width: 100%;
+            height: calc(100vh - 120px);
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+        }
+
+        #graph-container canvas { display: block; }
+
+        .graph-legend {
+            position: absolute;
+            bottom: 1rem;
+            left: 1rem;
+            background: rgba(15, 15, 15, 0.9);
+            padding: 0.75rem 1rem;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            font-size: 0.75rem;
+            z-index: 10;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .legend-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        /* Realms view */
+        .realms-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 1rem;
+        }
+
+        .realm-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.25rem;
+        }
+
+        .realm-card h3 {
+            font-size: 1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .realm-card p {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .realm-count {
+            display: inline-block;
+            background: rgba(99, 102, 241, 0.15);
+            color: var(--accent);
+            padding: 0.15rem 0.5rem;
+            border-radius: 99px;
+            font-size: 0.7rem;
+            margin-top: 0.5rem;
+        }
+
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-muted);
+        }
+
+        /* Memory detail modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 200;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal-overlay.active { display: flex; }
+
+        .modal {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            max-width: 700px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+
+        .modal h2 {
+            font-size: 1.1rem;
+            margin-bottom: 1rem;
+        }
+
+        .modal pre {
+            background: var(--bg);
+            padding: 1rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .modal-close {
+            float: right;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 1.25rem;
+        }
+
+        .modal-close:hover { color: var(--text); }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .header { flex-direction: column; gap: 1rem; }
+            .search-box { margin: 0; max-width: none; }
+            .cards { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1><span>🧠</span> memex8</h1>
+        <div class="search-box">
+            <input type="text" id="search-input" placeholder="Search memories..." />
+            <button onclick="doSearch()">Search</button>
+        </div>
+        <div class="nav-tabs">
+            <button class="nav-tab active" data-view="cards">Cards</button>
+            <button class="nav-tab" data-view="graph">Graph</button>
+            <button class="nav-tab" data-view="realms">Realms</button>
+        </div>
+    </div>
+
+    <div class="stats-bar" id="stats-bar">
+        Memories: <span id="stat-memories">—</span>
+        Realms: <span id="stat-realms">—</span>
+        Provider: <span id="stat-provider">—</span>
+        Slumber: <span id="stat-slumber">—</span>
+    </div>
+
+    <div class="main">
+        <!-- Cards View -->
+        <div class="view active" id="view-cards">
+            <div class="cards" id="cards-container">
+                <div class="loading">Loading memories...</div>
+            </div>
+        </div>
+
+        <!-- Graph View -->
+        <div class="view" id="view-graph">
+            <div id="graph-container" style="position: relative;">
+                <div class="graph-legend" id="graph-legend"></div>
+            </div>
+        </div>
+
+        <!-- Realms View -->
+        <div class="view" id="view-realms">
+            <div class="realms-grid" id="realms-container">
+                <div class="loading">Loading realms...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Memory Detail Modal -->
+    <div class="modal-overlay" id="modal-overlay">
+        <div class="modal">
+            <button class="modal-close" onclick="closeModal()">✕</button>
+            <h2 id="modal-title"></h2>
+            <pre id="modal-content"></pre>
+            <div id="modal-meta" style="margin-top: 1rem; font-size: 0.8rem; color: var(--text-muted);"></div>
+        </div>
+    </div>
+
+    <script>
+        // ─── Config ──────────────────────────────────────────────
+        const BASE_URL = window.location.origin;
+        const API_KEY = ''; // Set via environment or prompt
+
+        // ─── State ───────────────────────────────────────────────
+        let allMemories = [];
+        let allRealms = [];
+        let stats = null;
+
+        // ─── Navigation ──────────────────────────────────────────
+        document.querySelectorAll('.nav-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById(`view-${tab.dataset.view}`).classList.add('active');
+
+                if (tab.dataset.view === 'graph') {
+                    initGraph();
+                }
+            });
+        });
+
+        // ─── API Helpers ─────────────────────────────────────────
+        async function api(path) {
+            const headers = {};
+            if (API_KEY) headers['Authorization'] = `Bearer ${API_KEY}`;
+            const resp = await fetch(`${BASE_URL}/api/v1${path}`, { headers });
+            if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+            return resp.json();
+        }
+
+        // ─── Load Data ───────────────────────────────────────────
+        async function loadAll() {
+            try {
+                // Load stats
+                stats = await api('/stats');
+                document.getElementById('stat-memories').textContent = stats.total_memories || 0;
+                document.getElementById('stat-realms').textContent = stats.total_realms || 0;
+                document.getElementById('stat-provider').textContent = stats.embedding_provider || '—';
+                document.getElementById('stat-slumber').textContent = stats.slumber_state || '—';
+
+                // Load memories (recall top 100 by importance)
+                const recallData = await api('/memories/recall?limit=100');
+                allMemories = recallData.results || [];
+                renderCards(allMemories);
+
+                // Load realms
+                allRealms = await api('/realms');
+                renderRealms(allRealms);
+
+                // Render graph if visible
+                if (document.getElementById('view-graph').classList.contains('active')) {
+                    initGraph();
+                }
+            } catch (e) {
+                console.error('Failed to load data:', e);
+                document.getElementById('cards-container').innerHTML =
+                    `<div class="loading" style="color: var(--red);">Failed to connect to memex8 server.<br><small>${e.message}</small></div>`;
+            }
+        }
+
+        // ─── Cards ───────────────────────────────────────────────
+        function renderCards(memories) {
+            const container = document.getElementById('cards-container');
+
+            if (!memories || memories.length === 0) {
+                container.innerHTML = '<div class="loading">No memories found.</div>';
+                return;
+            }
+
+            container.innerHTML = memories.map(m => `
+                <div class="card" onclick="showMemory('${m.id}')">
+                    <div class="card-header">
+                        <div class="card-heading">${escapeHtml(m.heading || m.content.substring(0, 60))}</div>
+                        <div class="card-realm">${escapeHtml(m.realm_name || 'general')}</div>
+                    </div>
+                    <div class="card-content">${escapeHtml(m.content)}</div>
+                    <div class="card-footer">
+                        <div class="card-meta">
+                            <span>↑ ${m.upvotes || 0}</span>
+                            <span>score: ${(m.score || m.importance || 0).toFixed(2)}</span>
+                            <div class="importance-bar">
+                                <div class="importance-fill" style="width: ${(m.importance || 0) * 100}%"></div>
+                            </div>
+                        </div>
+                        <button class="upvote-btn ${m.upvotes > 0 ? 'upvoted' : ''}"
+                                onclick="event.stopPropagation(); upvote('${m.id}', this)">
+                            ▲ Upvote
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // ─── Upvote ──────────────────────────────────────────────
+        async function upvote(id, btn) {
+            try {
+                await api(`/memories/${id}/upvote`);
+                btn.classList.add('upvoted');
+                btn.textContent = '▲ Upvoted';
+
+                // Update local state
+                const mem = allMemories.find(m => m.id === id);
+                if (mem) {
+                    mem.upvotes = (mem.upvotes || 0) + 1;
+                    mem.importance = Math.min((mem.importance || 0) + 0.1, 1.0);
+                }
+            } catch (e) {
+                console.error('Upvote failed:', e);
+            }
+        }
+
+        // ─── Search ──────────────────────────────────────────────
+        async function doSearch() {
+            const query = document.getElementById('search-input').value.trim();
+            if (!query) {
+                renderCards(allMemories);
+                return;
+            }
+
+            try {
+                const results = await api('/memories/search', {
+                    method: 'POST',
+                    headers: API_KEY ? { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query, limit: 50 })
+                });
+
+                // Switch to cards view
+                document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+                document.querySelector('[data-view="cards"]').classList.add('active');
+                document.getElementById('view-cards').classList.add('active');
+
+                renderCards(results.results || []);
+            } catch (e) {
+                console.error('Search failed:', e);
+            }
+        }
+
+        document.getElementById('search-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') doSearch();
+        });
+
+        // ─── Memory Detail ───────────────────────────────────────
+        function showMemory(id) {
+            const mem = allMemories.find(m => m.id === id);
+            if (!mem) return;
+
+            document.getElementById('modal-title').textContent = mem.heading || 'Memory';
+            document.getElementById('modal-content').textContent = mem.content;
+            document.getElementById('modal-meta').innerHTML = `
+                <strong>Realm:</strong> ${mem.realm_name || 'general'} ·
+                <strong>Importance:</strong> ${(mem.importance || 0).toFixed(2)} ·
+                <strong>Upvotes:</strong> ${mem.upvotes || 0} ·
+                <strong>Ingested:</strong> ${mem.ingested_at || '—'}
+            `;
+            document.getElementById('modal-overlay').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('modal-overlay').classList.remove('active');
+        }
+
+        document.getElementById('modal-overlay').addEventListener('click', (e) => {
+            if (e.target === e.currentTarget) closeModal();
+        });
+
+        // ─── Realms ──────────────────────────────────────────────
+        function renderRealms(realms) {
+            const container = document.getElementById('realms-container');
+
+            if (!realms || realms.length === 0) {
+                container.innerHTML = '<div class="loading">No realms found.</div>';
+                return;
+            }
+
+            const colors = ['#6366f1', '#22c55e', '#eab308', '#ef4444', '#3b82f6', '#f97316', '#a855f7', '#06b6d4'];
+
+            container.innerHTML = realms.map((r, i) => `
+                <div class="realm-card" onclick="filterByRealm('${r.name || r.id}')">
+                    <h3 style="border-left: 3px solid ${colors[i % colors.length]}; padding-left: 0.5rem;">
+                        ${escapeHtml(r.name || 'Unnamed')}
+                    </h3>
+                    ${r.description ? `<p>${escapeHtml(r.description)}</p>` : ''}
+                    <div class="realm-count">${r.memory_count || 0} memories</div>
+                </div>
+            `).join('');
+        }
+
+        function filterByRealm(realmName) {
+            const filtered = allMemories.filter(m => m.realm_name === realmName);
+            renderCards(filtered);
+
+            // Switch to cards view
+            document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+            document.querySelector('[data-view="cards"]').classList.add('active');
+            document.getElementById('view-cards').classList.add('active');
+        }
+
+        // ─── 3D Graph ───────────────────────────────────────────
+        let graphScene, graphCamera, graphRenderer, graphControls;
+        let graphNodes = [];
+        let graphInitialized = false;
+
+        function initGraph() {
+            if (graphInitialized) return;
+            graphInitialized = true;
+
+            const container = document.getElementById('graph-container');
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+
+            // Scene
+            graphScene = new THREE.Scene();
+            graphScene.background = new THREE.Color(0x0f0f0f);
+
+            // Camera
+            graphCamera = new THREE.PerspectiveCamera(60, width / height, 0.1, 1000);
+            graphCamera.position.set(0, 30, 60);
+
+            // Renderer
+            graphRenderer = new THREE.WebGLRenderer({ antialias: true });
+            graphRenderer.setSize(width, height);
+            container.insertBefore(graphRenderer.domElement, container.firstChild);
+
+            // Controls
+            graphControls = new THREE.OrbitControls(graphCamera, graphRenderer.domElement);
+            graphControls.enableDamping = true;
+            graphControls.dampingFactor = 0.05;
+
+            // Lights
+            const ambient = new THREE.AmbientLight(0x404040, 2);
+            graphScene.add(ambient);
+            const pointLight = new THREE.PointLight(0x6366f1, 1, 100);
+            pointLight.position.set(10, 20, 10);
+            graphScene.add(pointLight);
+
+            // Build graph
+            buildGraph(allMemories, allRealms);
+
+            // Animate
+            function animate() {
+                requestAnimationFrame(animate);
+                graphControls.update();
+                graphRenderer.render(graphScene, graphCamera);
+            }
+            animate();
+
+            // Handle resize
+            window.addEventListener('resize', () => {
+                const w = container.clientWidth;
+                const h = container.clientHeight;
+                graphCamera.aspect = w / h;
+                graphCamera.updateProjectionMatrix();
+                graphRenderer.setSize(w, h);
+            });
+
+            // Build legend
+            buildLegend();
+        }
+
+        function buildGraph(memories, realms) {
+            const realmColors = ['#6366f1', '#22c55e', '#eab308', '#ef4444', '#3b82f6', '#f97316', '#a855f7', '#06b6d4'];
+            const nodePositions = {};
+
+            // Create realm nodes (larger spheres)
+            realms.forEach((realm, i) => {
+                const color = new THREE.Color(realmColors[i % realmColors.length]);
+                const size = 2 + Math.min((realm.memory_count || 0) / 10, 5);
+
+                const geometry = new THREE.SphereGeometry(size, 16, 16);
+                const material = new THREE.MeshPhongMaterial({
+                    color,
+                    transparent: true,
+                    opacity: 0.8,
+                    emissive: color,
+                    emissiveIntensity: 0.3
+                });
+                const mesh = new THREE.Mesh(geometry, material);
+
+                // Position realms in a circle
+                const angle = (i / Math.max(realms.length, 1)) * Math.PI * 2;
+                const radius = 30;
+                mesh.position.set(
+                    Math.cos(angle) * radius,
+                    0,
+                    Math.sin(angle) * radius
+                );
+                mesh.userData = { type: 'realm', name: realm.name, ...realm };
+                graphScene.add(mesh);
+                graphNodes.push(mesh);
+                nodePositions[realm.id] = mesh.position.clone();
+            });
+
+            // Create memory nodes (smaller spheres)
+            memories.forEach((mem, i) => {
+                const realmIdx = realms.findIndex(r => r.id === mem.realm_id || r.name === mem.realm_name);
+                const color = realmIdx >= 0
+                    ? new THREE.Color(realmColors[realmIdx % realmColors.length])
+                    : new THREE.Color(0x888888);
+
+                const size = 0.5 + (mem.importance || 0) * 1.5;
+
+                const geometry = new THREE.SphereGeometry(size, 8, 8);
+                const material = new THREE.MeshPhongMaterial({
+                    color,
+                    transparent: true,
+                    opacity: 0.6 + (mem.importance || 0) * 0.4,
+                    emissive: color,
+                    emissiveIntensity: 0.2
+                });
+                const mesh = new THREE.Mesh(geometry, material);
+
+                // Position near realm with some randomness
+                const realmPos = nodePositions[mem.realm_id];
+                if (realmPos) {
+                    const spread = 15;
+                    mesh.position.set(
+                        realmPos.x + (Math.random() - 0.5) * spread,
+                        (Math.random() - 0.5) * 10,
+                        realmPos.z + (Math.random() - 0.5) * spread
+                    );
+                } else {
+                    const angle = Math.random() * Math.PI * 2;
+                    const radius = 10 + Math.random() * 20;
+                    mesh.position.set(
+                        Math.cos(angle) * radius,
+                        (Math.random() - 0.5) * 10,
+                        Math.sin(angle) * radius
+                    );
+                }
+
+                mesh.userData = { type: 'memory', ...mem };
+                graphScene.add(mesh);
+                graphNodes.push(mesh);
+
+                // Add edge to realm
+                if (realmPos) {
+                    const lineGeo = new THREE.BufferGeometry().setFromPoints([
+                        mesh.position.clone(),
+                        realmPos
+                    ]);
+                    const lineMat = new THREE.LineBasicMaterial({
+                        color,
+                        transparent: true,
+                        opacity: 0.15
+                    });
+                    graphScene.add(new THREE.Line(lineGeo, lineMat));
+                }
+            });
+
+            // Add edges between memories in the same realm (subtle connections)
+            const realmMemories = {};
+            memories.forEach((mem, i) => {
+                const key = mem.realm_id || mem.realm_name;
+                if (!realmMemories[key]) realmMemories[key] = [];
+                realmMemories[key].push(graphNodes.find(n => n.userData.type === 'memory' && n.userData.id === mem.id));
+            });
+
+            Object.values(realmMemories).forEach(nodes => {
+                for (let i = 0; i < Math.min(nodes.length, 5); i++) {
+                    for (let j = i + 1; j < Math.min(nodes.length, 5); j++) {
+                        if (nodes[i] && nodes[j]) {
+                            const lineGeo = new THREE.BufferGeometry().setFromPoints([
+                                nodes[i].position.clone(),
+                                nodes[j].position.clone()
+                            ]);
+                            const lineMat = new THREE.LineBasicMaterial({
+                                color: 0x333333,
+                                transparent: true,
+                                opacity: 0.08
+                            });
+                            graphScene.add(new THREE.Line(lineGeo, lineMat));
+                        }
+                    }
+                }
+            });
+        }
+
+        function buildLegend() {
+            const legend = document.getElementById('graph-legend');
+            const colors = ['#6366f1', '#22c55e', '#eab308', '#ef4444', '#3b82f6', '#f97316', '#a855f7', '#06b6d4'];
+            legend.innerHTML = allRealms.map((r, i) => `
+                <div class="legend-item">
+                    <div class="legend-dot" style="background: ${colors[i % colors.length]}"></div>
+                    <span>${escapeHtml(r.name || 'Unnamed')}</span>
+                </div>
+            `).join('');
+        }
+
+        // ─── Utilities ───────────────────────────────────────────
+        function escapeHtml(str) {
+            if (!str) return '';
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // ─── Init ────────────────────────────────────────────────
+        loadAll();
+    </script>
+</body>
+</html>

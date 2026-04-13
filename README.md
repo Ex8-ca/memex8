@@ -57,6 +57,18 @@
 - **Claude Code** — Add memex8 MCP server to Claude Code's MCP config for memory-augmented coding
 - **Opencode** — Add memex8 MCP server to Opencode's config for persistent project context
 
+### Web UI
+
+When `memex8 serve` is running, open **http://localhost:8080** in your browser.
+
+- **Cards view** — Browse memories in a card layout with upvote, importance, and realm info
+- **3D Graph view** — Explore memories as a force-directed graph with realm coloring (orbit, zoom, pan)
+- **Realms view** — See all knowledge realms with memory counts; click a realm to filter cards
+- **Search** — Full semantic search across all memories
+- **Upvote** — Raise the profile/importance of any memory with one click
+
+No build step needed — the web UI is embedded in the binary.
+
 ### CLI
 ```bash
 $ memex8 --help

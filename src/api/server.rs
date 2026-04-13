@@ -25,6 +25,8 @@ pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()>
         Router::new()
             .nest("/api/v1", api_routes())
             .route("/mcp", axum::routing::get(crate::mcp::http::sse_handler))
+            .route("/", axum::routing::get(crate::web::serve_root))
+            .route("/{*path}", axum::routing::get(crate::web::serve_static))
             // NOTE: POST /mcp/messages is blocked by axum 0.7 vs 0.8 version conflict
             // from qdrant-client's tonic dependency. Use stdio MCP or REST API instead.
             .layer(axum::middleware::from_fn_with_state(
@@ -38,6 +40,8 @@ pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()>
         Router::new()
             .nest("/api/v1", api_routes())
             .route("/mcp", axum::routing::get(crate::mcp::http::sse_handler))
+            .route("/", axum::routing::get(crate::web::serve_root))
+            .route("/{*path}", axum::routing::get(crate::web::serve_static))
             .layer(CorsLayer::permissive())
             .layer(TraceLayer::new_for_http())
             .with_state(state)
