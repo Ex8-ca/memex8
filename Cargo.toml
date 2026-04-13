@@ -2,7 +2,7 @@
 name = "memex8"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.94"
 description = "Self-hosted AI memory system with Qdrant, TurboQuant compression, and auto-discovered knowledge realms"
 license = "MIT"
 authors = ["memex8 contributors"]
