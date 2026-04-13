@@ -290,7 +290,7 @@ impl QdrantStore {
             self.client
                 .create_collection(
                     CreateCollectionBuilder::new(REALMS)
-                        .vectors_config(VectorParamsBuilder::new(1_u64, Distance::Cosine))
+                        .vectors_config(VectorParamsBuilder::new(dimensions, Distance::Cosine))
                         .on_disk_payload(true),
                 )
                 .await?;
