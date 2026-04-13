@@ -8,12 +8,12 @@
 
 ## Overview
 
-**memex8** gives AI agents (OpenClaw, Hermes, pi.dev, or any MCP-compatible agent) persistent, searchable memory. Instead of re-reading thousands of files on every session, agents query memex8 for relevant context — fast, semantic, and self-organizing.
+**memex8** gives AI agents (OpenClaw, Hermes, pi.dev, Claude Code, Opencode, or any MCP-compatible agent) persistent, searchable memory. Instead of re-reading thousands of files on every session, agents query memex8 for relevant context — fast, semantic, and self-organizing.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    AI Agent (any MCP)                    │
-│         OpenClaw · Hermes · pi.dev · Custom              │
+│   OpenClaw · Hermes · pi.dev · Claude Code · Opencode   │
 ├─────────────────────────────────────────────────────────┤
 │  MCP/REST API                                            │
 │  ┌─────────┐ ┌──────────┐ ┌──────────┐ ┌─────────────┐ │
@@ -54,6 +54,8 @@
 - **OpenClaw** — Webhook hooks for auto-ingesting conversation summaries and skill outputs
 - **Hermes Agent** — MCP server integration with 11 memory tools
 - **pi.dev** — TypeScript extension for the pi coding agent
+- **Claude Code** — Add memex8 MCP server to Claude Code's MCP config for memory-augmented coding
+- **Opencode** — Add memex8 MCP server to Opencode's config for persistent project context
 
 ### CLI
 ```bash
@@ -89,7 +91,7 @@ Commands:
 
 ### Prerequisites
 - Rust 1.82+
-- Qdrant (Docker or local)
+- Docker & Docker Compose (for Qdrant)
 
 ### Build
 ```bash
@@ -100,22 +102,17 @@ cargo build --release
 
 ### Setup
 ```bash
-# Copy default config
+# Copy config files
 cp config.example.toml config.toml
 cp .env.example .env
 
-# Edit config with your settings
-nano config.toml
-```
-
-### Start Qdrant
-```bash
-docker run -d -p 6333:6333 -v qdrant_data:/qdrant/storage qdrant/qdrant
+# Edit with your settings
+nano .env
 ```
 
 ### Run
 ```bash
-# Check connectivity
+# Check connectivity (Qdrant must be running)
 ./target/release/memex8 doctor
 
 # Ingest a directory of markdown files
@@ -127,12 +124,30 @@ docker run -d -p 6333:6333 -v qdrant_data:/qdrant/storage qdrant/qdrant
 # Start the REST API server
 ./target/release/memex8 serve
 
-# Start the MCP server (for Hermes/parsing agents)
+# Start the MCP server (for Claude Code, Opencode, etc.)
 ./target/release/memex8 mcp
 
 # Start the background daemon (cron + idle slumber)
 ./target/release/memex8 daemon
 ```
+
+### Docker Compose (Recommended)
+Everything comes up together — memex8 + Qdrant + optional Ollama:
+
+```bash
+cp .env.example .env
+
+# Start everything (memex8 + Qdrant)
+docker compose up -d
+
+# Add local embeddings (Ollama)
+docker compose --profile local-embeddings up -d
+
+# Check logs
+docker compose logs -f memex8
+```
+
+No need to install or run Qdrant separately — Docker Compose handles it.
 
 ## Docker Compose
 
