@@ -30,7 +30,7 @@ services:
     environment:
       - MEMEX8_API_KEY=${MEMEX8_API_KEY:-memex8-dev-key}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_URL=http://qdrant:6334
       - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
       - RUST_LOG=info
     depends_on:
