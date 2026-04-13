@@ -420,7 +420,16 @@
     <script>
         // ─── Config ──────────────────────────────────────────────
         const BASE_URL = window.location.origin;
-        const API_KEY = ''; // Set via environment or prompt
+        const API_KEY = ''; // Override in dev, or prompt below
+
+        // Try to load API key from session storage or prompt
+        if (!API_KEY) {
+            const stored = sessionStorage.getItem('memex8_api_key');
+            if (stored) {
+                window.MEMEX8_API_KEY = stored;
+            }
+        }
+        // If no key, try unauthenticated first then prompt on 401
 
         // ─── State ───────────────────────────────────────────────
         let allMemories = [];

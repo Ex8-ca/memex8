@@ -32,11 +32,13 @@ pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()>
         api_routes()
     };
 
+    // Health and root must be explicit; wildcard must come last
     let app = Router::new()
         .nest("/api/v1", api_router)
+        .route("/health", axum::routing::get(health))
         .route("/mcp", axum::routing::get(crate::mcp::http::sse_handler))
         .route("/", axum::routing::get(crate::web::serve_root))
-        .route("/{*path}", axum::routing::get(crate::web::serve_static))
+        .fallback(axum::routing::get(crate::web::serve_static))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
