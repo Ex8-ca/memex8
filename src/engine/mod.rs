@@ -36,6 +36,7 @@ pub struct SlumberStatus {
     pub next_scheduled: Option<String>,
     pub memories_processed: u64,
     pub realms_reorganized: u32,
+    pub last_report: Option<slumber::SlumberReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +62,7 @@ struct SlumberState {
     last_query: chrono::DateTime<chrono::Utc>,
     memories_processed: u64,
     realms_reorganized: u32,
+    last_report: Option<slumber::SlumberReport>,
 }
 
 impl Engine {
@@ -81,6 +83,7 @@ impl Engine {
                 last_query: chrono::Utc::now(),
                 memories_processed: 0,
                 realms_reorganized: 0,
+                last_report: None,
             })),
         })
     }
@@ -395,10 +398,11 @@ impl Engine {
             next_scheduled: None,
             memories_processed: state.memories_processed,
             realms_reorganized: state.realms_reorganized,
+            last_report: state.last_report.clone(),
         }
     }
 
-    pub async fn trigger_slumber(&self) -> anyhow::Result<()> {
+    pub async fn trigger_slumber(&self) -> anyhow::Result<slumber::SlumberReport> {
         {
             let mut state = self.slumber_state.write().await;
             state.status = "running".into();
@@ -409,16 +413,17 @@ impl Engine {
             self.config.clone(),
             self.store.clone_store(),
         );
-        slumber.run_full_pipeline().await?;
+        let report = slumber.run_full_pipeline().await?;
 
         {
             let mut state = self.slumber_state.write().await;
             state.status = "idle".into();
             state.last_run = Some(chrono::Utc::now());
             state.realms_reorganized += 1;
+            state.last_report = Some(report.clone());
         }
         tracing::info!("✅ Slumber complete.");
-        Ok(())
+        Ok(report)
     }
 
     pub async fn pause_slumber(&self) {
