@@ -1,0 +1,698 @@
+use qdrant_client::Qdrant;
+use qdrant_client::Payload;
+use qdrant_client::qdrant::{
+    Condition, Distance, Filter, FieldType, PointStruct, point_id::PointIdOptions,
+    points_selector::PointsSelectorOneOf,
+    ScrollPointsBuilder, SearchPointsBuilder, SetPayloadPointsBuilder, UpsertPointsBuilder,
+    VectorParamsBuilder, PointsIdsList,
+    DeletePointsBuilder, GetPointsBuilder, CountPointsBuilder,
+    CreateCollectionBuilder, CreateFieldIndexCollectionBuilder,
+};
+use serde::{Deserialize, Serialize};
+
+// ─── Data types ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryPoint {
+    pub id: String,
+    pub content: String,
+    pub summary: Option<String>,
+    pub source_file: Option<String>,
+    pub realm_id: Option<String>,
+    pub realm_name: String,
+    pub importance: f32,
+    pub upvotes: u32,
+    pub tags: Vec<String>,
+    pub ingested_at: String,
+    pub last_accessed: String,
+    pub access_count: u32,
+    pub chunk_type: String,
+    pub heading: Option<String>,
+    pub source_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealmPoint {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub centroid: Vec<f32>,
+    pub memory_count: u32,
+    pub is_user_pinned: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    pub id: String,
+    pub score: f32,
+    pub payload: MemoryPoint,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectionStats {
+    pub vector_count: u64,
+    pub size_bytes: u64,
+}
+
+// ─── Store ────────────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct QdrantStore {
+    client: Qdrant,
+}
+
+const MEMORIES: &str = "memories";
+const REALMS: &str = "realms";
+const QUANTIZED: &str = "memories_quantized";
+
+/// Helper: convert PointId to String.
+fn point_id_to_string(id: Option<&qdrant_client::qdrant::PointId>) -> String {
+    match id {
+        Some(pid) => match &pid.point_id_options {
+            Some(PointIdOptions::Num(n)) => n.to_string(),
+            Some(PointIdOptions::Uuid(s)) => s.clone(),
+            None => String::new(),
+        },
+        None => String::new(),
+    }
+}
+
+/// Helper: convert a raw HashMap<String, Value> to serde_json map.
+fn map_to_json(
+    raw: &std::collections::HashMap<String, qdrant_client::qdrant::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let payload = Payload::from(raw.clone());
+    let json_val: serde_json::Value = payload.into();
+    match json_val {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    }
+}
+
+fn map_str(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    map.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+fn map_f32(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> f32 {
+    map.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32
+}
+
+fn map_u32(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> u32 {
+    map.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as u32
+}
+
+fn map_bool(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> bool {
+    map.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn map_tags(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> Vec<String> {
+    map.get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// ─── MemoryPoint helpers ──────────────────────────────────────────────────────
+
+fn memory_to_payload(mem: &MemoryPoint) -> Payload {
+    let json = serde_json::json!({
+        "content": mem.content,
+        "summary": mem.summary,
+        "source_file": mem.source_file,
+        "realm_id": mem.realm_id,
+        "realm_name": mem.realm_name,
+        "importance": mem.importance,
+        "upvotes": mem.upvotes,
+        "tags": mem.tags,
+        "ingested_at": mem.ingested_at,
+        "last_accessed": mem.last_accessed,
+        "access_count": mem.access_count,
+        "chunk_type": mem.chunk_type,
+        "heading": mem.heading,
+        "source_hash": mem.source_hash,
+    });
+    Payload::try_from(json).unwrap_or_default()
+}
+
+fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value>) -> MemoryPoint {
+    MemoryPoint {
+        id: id.to_string(),
+        content: map_str(map, "content").unwrap_or_default(),
+        summary: map_str(map, "summary"),
+        source_file: map_str(map, "source_file"),
+        realm_id: map_str(map, "realm_id"),
+        realm_name: map_str(map, "realm_name").unwrap_or_default(),
+        importance: map_f32(map, "importance"),
+        upvotes: map_u32(map, "upvotes"),
+        tags: map_tags(map, "tags"),
+        ingested_at: map_str(map, "ingested_at").unwrap_or_default(),
+        last_accessed: map_str(map, "last_accessed").unwrap_or_default(),
+        access_count: map_u32(map, "access_count"),
+        chunk_type: map_str(map, "chunk_type").unwrap_or_default(),
+        heading: map_str(map, "heading"),
+        source_hash: map_str(map, "source_hash").unwrap_or_default(),
+    }
+}
+
+// ─── RealmPoint helpers ───────────────────────────────────────────────────────
+
+fn realm_to_payload(realm: &RealmPoint) -> Payload {
+    let centroid_arr: Vec<serde_json::Value> = realm.centroid.iter().map(|v| serde_json::json!(v)).collect();
+    let json = serde_json::json!({
+        "name": realm.name,
+        "description": realm.description,
+        "memory_count": realm.memory_count,
+        "is_user_pinned": realm.is_user_pinned,
+        "centroid": centroid_arr,
+    });
+    Payload::try_from(json).unwrap_or_default()
+}
+
+fn realm_from_payload(
+    id: &str,
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Option<RealmPoint> {
+    let name = map_str(map, "name")?;
+    let centroid = map.get("centroid")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_f64()).map(|v| v as f32).collect())
+        .unwrap_or_default();
+    Some(RealmPoint {
+        id: id.to_string(),
+        name,
+        description: map_str(map, "description"),
+        memory_count: map_u32(map, "memory_count"),
+        is_user_pinned: map_bool(map, "is_user_pinned"),
+        centroid,
+    })
+}
+
+// ─── QdrantStore implementation ───────────────────────────────────────────────
+
+impl QdrantStore {
+    pub async fn new(url: &str) -> anyhow::Result<Self> {
+        tracing::info!("Connecting to Qdrant at {}", url);
+        let client = Qdrant::from_url(url).build()?;
+        Ok(Self { client })
+    }
+
+    pub async fn ensure_collections(&self, dimensions: u32) -> anyhow::Result<()> {
+        tracing::info!("Ensuring Qdrant collections exist ({} dimensions)...", dimensions);
+        let dims = dimensions as u64;
+
+        // ── memories ──
+        if !self.client.collection_exists(MEMORIES).await? {
+            tracing::info!("Creating {} collection", MEMORIES);
+            self.client
+                .create_collection(
+                    CreateCollectionBuilder::new(MEMORIES)
+                        .vectors_config(VectorParamsBuilder::new(dims, Distance::Cosine))
+                        .on_disk_payload(true),
+                )
+                .await?;
+
+            for (field, schema) in &[
+                ("realm_name", FieldType::Keyword),
+                ("tags", FieldType::Keyword),
+                ("chunk_type", FieldType::Keyword),
+                ("importance", FieldType::Float),
+            ] {
+                self.client
+                    .create_field_index(
+                        CreateFieldIndexCollectionBuilder::new(MEMORIES, *field, *schema),
+                    )
+                    .await?;
+            }
+            tracing::info!("  + indexes created for {}", MEMORIES);
+        }
+
+        // ── realms ──
+        if !self.client.collection_exists(REALMS).await? {
+            tracing::info!("Creating {} collection", REALMS);
+            self.client
+                .create_collection(
+                    CreateCollectionBuilder::new(REALMS)
+                        .vectors_config(VectorParamsBuilder::new(1_u64, Distance::Cosine))
+                        .on_disk_payload(true),
+                )
+                .await?;
+            self.client
+                .create_field_index(
+                    CreateFieldIndexCollectionBuilder::new(REALMS, "name", FieldType::Keyword),
+                )
+                .await?;
+        }
+
+        // ── quantized ──
+        if !self.client.collection_exists(QUANTIZED).await? {
+            tracing::info!("Creating {} collection", QUANTIZED);
+            self.client
+                .create_collection(
+                    CreateCollectionBuilder::new(QUANTIZED)
+                        .vectors_config(VectorParamsBuilder::new(dims, Distance::Cosine))
+                        .on_disk_payload(true),
+                )
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    // ── memories CRUD ─────────────────────────────────────────────────────────
+
+    pub async fn store_memory(
+        &self,
+        id: &str,
+        vector: &[f32],
+        content: &str,
+        heading: Option<&str>,
+        source_file: Option<&str>,
+        realm_id: &str,
+        realm_name: &str,
+        source_hash: &str,
+        chunk_type: &str,
+    ) -> anyhow::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mem = MemoryPoint {
+            id: id.to_string(),
+            content: content.to_string(),
+            summary: None,
+            source_file: source_file.map(|s| s.to_string()),
+            realm_id: Some(realm_id.to_string()),
+            realm_name: realm_name.to_string(),
+            importance: 1.0,
+            upvotes: 0,
+            tags: vec![],
+            ingested_at: now.clone(),
+            last_accessed: now,
+            access_count: 0,
+            chunk_type: chunk_type.to_string(),
+            heading: heading.map(|s| s.to_string()),
+            source_hash: source_hash.to_string(),
+        };
+        let payload = memory_to_payload(&mem);
+        let point = PointStruct::new(id.to_string(), vector.to_vec(), payload);
+
+        self.client
+            .upsert_points(UpsertPointsBuilder::new(MEMORIES, vec![point]).wait(true))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_memory(&self, id: &str) -> anyhow::Result<Option<MemoryPoint>> {
+        let resp = self
+            .client
+            .get_points(
+                GetPointsBuilder::new(MEMORIES, vec![id.into()])
+                    .with_payload(true)
+                    .with_vectors(false),
+            )
+            .await?;
+
+        if let Some(point) = resp.result.into_iter().next() {
+            let pid = point_id_to_string(point.id.as_ref());
+            let map = map_to_json(&point.payload);
+            return Ok(Some(memory_from_payload(&pid, &map)));
+        }
+        Ok(None)
+    }
+
+    pub async fn search(
+        &self,
+        query_vector: &[f32],
+        limit: usize,
+        min_score: f32,
+        realm_filter: Option<&str>,
+    ) -> anyhow::Result<Vec<SearchResult>> {
+        let mut builder = SearchPointsBuilder::new(MEMORIES, query_vector, limit as u64)
+            .with_payload(true)
+            .with_vectors(false);
+
+        if let Some(realm) = realm_filter {
+            builder = builder.filter(Filter::must([Condition::matches("realm_name", realm.to_string())]));
+        }
+
+        let resp = self.client.search_points(builder).await?;
+
+        Ok(resp
+            .result
+            .into_iter()
+            .filter(|r| r.score >= min_score)
+            .filter_map(|r| {
+                let pid = point_id_to_string(r.id.as_ref());
+                let map = map_to_json(&r.payload);
+                let mem = memory_from_payload(&pid, &map);
+                Some(SearchResult {
+                    id: mem.id.clone(),
+                    score: r.score,
+                    payload: mem,
+                })
+            })
+            .collect())
+    }
+
+    pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
+        self.client
+            .delete_points(
+                DeletePointsBuilder::new(MEMORIES)
+                    .points(PointsIdsList { ids: vec![id.into()] })
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_upvotes(&self, id: &str, upvotes: u32, importance: f32) -> anyhow::Result<()> {
+        let payload: Payload = serde_json::json!({
+            "upvotes": upvotes,
+            "importance": importance,
+        })
+        .try_into()
+        .unwrap_or_default();
+
+        self.client
+            .set_payload(
+                SetPayloadPointsBuilder::new(MEMORIES, payload)
+                    .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
+                        ids: vec![id.into()],
+                    }))
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn track_access(&self, id: &str) -> anyhow::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let payload: Payload = serde_json::json!({
+            "last_accessed": now,
+        })
+        .try_into()
+        .unwrap_or_default();
+
+        self.client
+            .set_payload(
+                SetPayloadPointsBuilder::new(MEMORIES, payload)
+                    .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
+                        ids: vec![id.into()],
+                    }))
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn scroll_all_memories(&self) -> anyhow::Result<Vec<MemoryPoint>> {
+        let mut memories = Vec::new();
+        let mut offset: Option<String> = None;
+
+        loop {
+            let mut builder = ScrollPointsBuilder::new(MEMORIES).limit(500).with_payload(true);
+            if let Some(ref off) = offset {
+                builder = builder.offset(off.clone());
+            }
+
+            let resp = self.client.scroll(builder).await?;
+            for point in resp.result {
+                let pid = point_id_to_string(point.id.as_ref());
+                let map = map_to_json(&point.payload);
+                memories.push(memory_from_payload(&pid, &map));
+            }
+
+            if resp.next_page_offset.is_none() {
+                break;
+            }
+            offset = resp.next_page_offset.map(|p| point_id_to_string(Some(&p)));
+        }
+
+        Ok(memories)
+    }
+
+    pub async fn count_memories(&self) -> anyhow::Result<u64> {
+        let resp = self.client.count(CountPointsBuilder::new(MEMORIES)).await?;
+        Ok(resp.result.map(|r| r.count as u64).unwrap_or(0))
+    }
+
+    pub async fn delete_by_realm(&self, realm_id: &str) -> anyhow::Result<()> {
+        let filter = Filter::must([Condition::matches("realm_id", realm_id.to_string())]);
+        self.client
+            .delete_points(
+                DeletePointsBuilder::new(MEMORIES)
+                    .points(PointsSelectorOneOf::Filter(filter))
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn search_by_tags(
+        &self,
+        query_vector: &[f32],
+        tags: &[String],
+        limit: usize,
+    ) -> anyhow::Result<Vec<SearchResult>> {
+        let filter = Filter::must(tags.iter().map(|t| Condition::matches("tags", t.clone())));
+
+        let resp = self
+            .client
+            .search_points(
+                SearchPointsBuilder::new(MEMORIES, query_vector, limit as u64)
+                    .filter(filter)
+                    .with_payload(true)
+                    .with_vectors(false),
+            )
+            .await?;
+
+        Ok(resp
+            .result
+            .into_iter()
+            .filter_map(|r| {
+                let pid = point_id_to_string(r.id.as_ref());
+                let map = map_to_json(&r.payload);
+                let mem = memory_from_payload(&pid, &map);
+                Some(SearchResult {
+                    id: mem.id.clone(),
+                    score: r.score,
+                    payload: mem,
+                })
+            })
+            .collect())
+    }
+
+    // ── realms CRUD ───────────────────────────────────────────────────────────
+
+    pub async fn list_realms(&self) -> anyhow::Result<Vec<RealmPoint>> {
+        let mut realms = Vec::new();
+        let mut offset: Option<String> = None;
+
+        loop {
+            let mut builder = ScrollPointsBuilder::new(REALMS).limit(100).with_payload(true);
+            if let Some(ref off) = offset {
+                builder = builder.offset(off.clone());
+            }
+
+            let resp = self.client.scroll(builder).await?;
+            for point in resp.result {
+                let pid = point_id_to_string(point.id.as_ref());
+                let map = map_to_json(&point.payload);
+                if let Some(realm) = realm_from_payload(&pid, &map) {
+                    realms.push(realm);
+                }
+            }
+
+            if resp.next_page_offset.is_none() {
+                break;
+            }
+            offset = resp.next_page_offset.map(|p| point_id_to_string(Some(&p)));
+        }
+
+        Ok(realms)
+    }
+
+    pub async fn get_realm(&self, id: &str) -> anyhow::Result<Option<RealmPoint>> {
+        let resp = self
+            .client
+            .get_points(
+                GetPointsBuilder::new(REALMS, vec![id.into()])
+                    .with_payload(true)
+                    .with_vectors(false),
+            )
+            .await?;
+
+        if let Some(point) = resp.result.into_iter().next() {
+            let pid = point_id_to_string(point.id.as_ref());
+            let map = map_to_json(&point.payload);
+            return Ok(realm_from_payload(&pid, &map));
+        }
+        Ok(None)
+    }
+
+    pub async fn find_realm_by_name(&self, name: &str) -> anyhow::Result<Option<RealmPoint>> {
+        let filter = Filter::must([Condition::matches("name", name.to_string())]);
+        let resp = self
+            .client
+            .scroll(
+                ScrollPointsBuilder::new(REALMS)
+                    .filter(filter)
+                    .limit(1)
+                    .with_payload(true),
+            )
+            .await?;
+
+        if let Some(point) = resp.result.into_iter().next() {
+            let pid = point_id_to_string(point.id.as_ref());
+            let map = map_to_json(&point.payload);
+            return Ok(realm_from_payload(&pid, &map));
+        }
+        Ok(None)
+    }
+
+    pub async fn store_realm(
+        &self,
+        id: &str,
+        centroid: &[f32],
+        name: &str,
+        description: Option<&str>,
+        is_user_pinned: bool,
+    ) -> anyhow::Result<()> {
+        let count = self.count_memories_in_realm(id).await?;
+        let realm = RealmPoint {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: description.map(|s| s.to_string()),
+            memory_count: count,
+            is_user_pinned,
+            centroid: centroid.to_vec(),
+        };
+
+        if let Some(existing) = self.find_realm_by_name(name).await? {
+            let centroid_arr: Vec<serde_json::Value> = centroid.iter().map(|v| serde_json::json!(v)).collect();
+            let payload: Payload = serde_json::json!({
+                "memory_count": count,
+                "is_user_pinned": is_user_pinned,
+                "centroid": centroid_arr,
+            })
+            .try_into()
+            .unwrap_or_default();
+            self.client
+                .set_payload(
+                    SetPayloadPointsBuilder::new(REALMS, payload)
+                        .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
+                            ids: vec![existing.id.into()],
+                        }))
+                        .wait(true),
+                )
+                .await?;
+            return Ok(());
+        }
+
+        let payload = realm_to_payload(&realm);
+        let point = PointStruct::new(id.to_string(), centroid.to_vec(), payload);
+        self.client
+            .upsert_points(UpsertPointsBuilder::new(REALMS, vec![point]).wait(true))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_realm(&self, id: &str) -> anyhow::Result<()> {
+        self.client
+            .delete_points(
+                DeletePointsBuilder::new(REALMS)
+                    .points(PointsIdsList { ids: vec![id.into()] })
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn count_memories_in_realm(&self, realm_id: &str) -> anyhow::Result<u32> {
+        let filter = Filter::must([Condition::matches("realm_id", realm_id.to_string())]);
+        let resp = self
+            .client
+            .count(CountPointsBuilder::new(MEMORIES).filter(filter))
+            .await?;
+        Ok(resp.result.map(|r| r.count).unwrap_or(0) as u32)
+    }
+
+    pub async fn update_realm_counts(&self) -> anyhow::Result<()> {
+        let realms = self.list_realms().await?;
+        for realm in realms {
+            let count = self.count_memories_in_realm(&realm.id).await?;
+            let payload: Payload = serde_json::json!({ "memory_count": count })
+                .try_into()
+                .unwrap_or_default();
+            self.client
+                .set_payload(
+                    SetPayloadPointsBuilder::new(REALMS, payload)
+                        .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
+                            ids: vec![realm.id.into()],
+                        }))
+                        .wait(true),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    // ── quantized (slumber) ───────────────────────────────────────────────────
+
+    pub async fn store_quantized(
+        &self,
+        id: &str,
+        vector: &[f32],
+        payload: &MemoryPoint,
+    ) -> anyhow::Result<()> {
+        let point = PointStruct::new(id.to_string(), vector.to_vec(), memory_to_payload(payload));
+        self.client
+            .upsert_points(UpsertPointsBuilder::new(QUANTIZED, vec![point]).wait(true))
+            .await?;
+        Ok(())
+    }
+
+    // ── stats ─────────────────────────────────────────────────────────────────
+
+    pub async fn get_collection_stats(&self, collection: &str) -> anyhow::Result<CollectionStats> {
+        let info = self.client.collection_info(collection).await?;
+        let vectors_count = info
+            .result
+            .map(|r| r.points_count)
+            .unwrap_or(Some(0))
+            .unwrap_or(0);
+
+        Ok(CollectionStats {
+            vector_count: vectors_count,
+            size_bytes: 0,
+        })
+    }
+
+    pub fn clone_store(&self) -> Self {
+        self.clone()
+    }
+
+    /// Update arbitrary payload fields on a memory point.
+    pub async fn update_memory_payload(
+        &self,
+        id: &str,
+        payload: Payload,
+    ) -> anyhow::Result<()> {
+        self.client
+            .set_payload(
+                SetPayloadPointsBuilder::new(MEMORIES, payload)
+                    .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
+                        ids: vec![id.into()],
+                    }))
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn count_realms(&self) -> anyhow::Result<u64> {
+        let resp = self.client.count(CountPointsBuilder::new(REALMS)).await?;
+        Ok(resp.result.map(|r| r.count as u64).unwrap_or(0))
+    }
+}

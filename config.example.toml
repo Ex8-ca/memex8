@@ -1,0 +1,59 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+mcp_port = 8081
+
+[auth]
+api_key_env = "MEMEX8_API_KEY"
+
+[embedding]
+provider = "ollama"            # "ollama" | "openai"
+model = "nomic-embed-text"
+dimensions = 768
+
+[embedding.ollama]
+url = "http://ollama:11434"
+
+[embedding.openai]
+api_key_env = "OPENAI_API_KEY"
+model = "text-embedding-3-small"
+dimensions = 1536
+
+[qdrant]
+url = "http://qdrant:6333"
+collection_memories = "memories"
+collection_quantized = "quantized"
+collection_realms = "realms"
+
+[ingest]
+default_chunk_by = "section"   # "section" | "paragraph" | "file"
+max_chunk_tokens = 2000
+poll_interval = "5m"
+
+[realms]
+auto_discover = true
+similarity_threshold = 0.75
+split_threshold = 100
+merge_threshold = 0.3
+
+[slumber]
+idle_timeout = "10m"
+cron_ingest = "*/5 * * * *"
+quantize_bit_width = 3.5
+auto_archive_days = 90
+prune_threshold = 0.1
+
+[slumber.summarize]
+enabled = true
+max_cluster_size = 20
+preserve_originals = true
+confidence_threshold = 0.8
+
+[memex8_md]
+enabled = true
+max_memories = 20
+update_on_slumber = true
+
+[web]
+enabled = true
+theme = "dark"

@@ -1,0 +1,53 @@
+use crate::config::AppConfig;
+use crate::engine::Engine;
+use axum::Router;
+use std::sync::Arc;
+use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
+
+pub struct AppState {
+    pub engine: Engine,
+    pub config: AppConfig,
+}
+
+pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()> {
+    let engine = Engine::new(config.clone()).await?;
+    let state = Arc::new(AppState { engine, config });
+
+    let app = Router::new()
+        .nest("/api/v1", api_routes())
+        .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
+
+    let addr = format!("{}:{}", host, port);
+    tracing::info!("🧠 memex8 server starting on {}", addr);
+
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+fn api_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/memories", axum::routing::post(crate::api::routes::memories::store))
+        .route("/memories/search", axum::routing::post(crate::api::routes::memories::search))
+        .route("/memories/recall", axum::routing::get(crate::api::routes::memories::recall))
+        .route("/memories/ingest", axum::routing::post(crate::api::routes::memories::ingest))
+        .route("/memories/{id}", axum::routing::get(crate::api::routes::memories::get))
+        .route("/memories/{id}", axum::routing::delete(crate::api::routes::memories::delete))
+        .route("/memories/{id}/upvote", axum::routing::post(crate::api::routes::memories::upvote))
+        .route("/memories/{id}/archive", axum::routing::post(crate::api::routes::memories::archive))
+        .route("/realms", axum::routing::get(crate::api::routes::realms::list))
+        .route("/realms", axum::routing::post(crate::api::routes::realms::create))
+        .route("/realms/{id}", axum::routing::get(crate::api::routes::realms::show))
+        .route("/slumber/status", axum::routing::get(crate::api::routes::slumber::status))
+        .route("/slumber/trigger", axum::routing::post(crate::api::routes::slumber::trigger))
+        .route("/stats", axum::routing::get(crate::api::routes::stats::stats))
+        .route("/health", axum::routing::get(health))
+}
+
+async fn health() -> &'static str {
+    "OK"
+}

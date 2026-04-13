@@ -1,0 +1,98 @@
+[package]
+name = "memex8"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Self-hosted AI memory system with Qdrant, TurboQuant compression, and auto-discovered knowledge realms"
+license = "MIT"
+authors = ["memex8 contributors"]
+readme = "README.md"
+repository = "https://github.com/user/memex8"
+keywords = ["memory", "qdrant", "vector", "ai", "embeddings"]
+categories = ["command-line-utilities", "database", "web-programming"]
+
+[[bin]]
+name = "memex8"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Web framework
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "auth"] }
+
+# HTTP client (for embedding providers)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Qdrant client
+qdrant-client = "1.12"
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Async trait
+async-trait = "0.1"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Markdown parsing
+pulldown-cmark = "0.12"
+
+# Text processing
+unicode-segmentation = "1"
+
+# Mathematics / ML
+ndarray = "0.16"
+rand = "0.8"
+rand_distr = "0.4"
+
+# File watching
+notify = { version = "7", features = ["macos_kqueue"] }
+
+# Cron scheduling
+cron = "0.15"
+
+# MCP protocol
+serde_repr = "0.1"
+
+# Error handling
+anyhow = "1"
+
+# Async streams (SSE transport)
+futures = "0.3"
+
+# Static file serving (embedded web UI)
+include_dir = "0.7"
+
+# SHA hashing (for file change detection)
+sha2 = "0.10"
+
+# TOML config with merge
+config = "0.14"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1

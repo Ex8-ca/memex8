@@ -1,0 +1,9 @@
+.dockerignore
+Dockerfile
+docker-compose.yml
+target/
+.git/
+web/node_modules/
+web/dist/
+*.md
+LICENSE
