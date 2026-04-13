@@ -69,7 +69,11 @@ struct SlumberState {
 
 impl Engine {
     pub async fn new(config: AppConfig) -> anyhow::Result<Self> {
-        let store = QdrantStore::new(&config.qdrant.url).await?;
+        // Override Qdrant URL from env var (set by docker-compose)
+        let qdrant_url = std::env::var("QDRANT_URL")
+            .unwrap_or_else(|_| config.qdrant.url.clone());
+        tracing::info!("Using Qdrant URL: {}", qdrant_url);
+        let store = QdrantStore::new(&qdrant_url).await?;
         store.ensure_collections(config.embedding_dimensions()).await?;
         tracing::info!(
             "Engine initialized: {} embeddings, {}d",
