@@ -56,6 +56,11 @@ pub struct Engine {
     store: QdrantStore,
     slumber_state: Arc<RwLock<SlumberState>>,
     last_activity: Arc<RwLock<tokio::time::Instant>>,
+    /// Resolved embedding config (from env vars, overriding config.toml)
+    embed_provider: String,
+    embed_model: String,
+    embed_dimensions: u32,
+    openai_key: Option<String>,
 }
 
 struct SlumberState {
@@ -74,12 +79,32 @@ impl Engine {
             .unwrap_or_else(|_| config.qdrant.url.clone());
         tracing::info!("Using Qdrant URL: {}", qdrant_url);
         let store = QdrantStore::new(&qdrant_url).await?;
-        store.ensure_collections(config.embedding_dimensions()).await?;
-        tracing::info!(
-            "Engine initialized: {} embeddings, {}d",
-            config.embedding.provider,
-            config.embedding.dimensions
-        );
+
+        // Determine active embedding provider from env vars (set by docker-compose .env)
+        let provider = std::env::var("EMBEDDING_PROVIDER")
+            .unwrap_or_else(|_| config.embedding.provider.clone());
+        let model = std::env::var("EMBEDDING_MODEL")
+            .unwrap_or_else(|_| config.embedding.model.clone());
+        let dimensions = std::env::var("EMBEDDING_DIMENSIONS")
+            .ok().and_then(|d| d.parse().ok())
+            .unwrap_or(config.embedding.dimensions);
+
+        // If using OpenAI but no key in config, try env var
+        let openai_key = std::env::var("OPENAI_API_KEY")
+            .ok().or_else(|| config.openai_api_key());
+        if provider == "openai" {
+            if openai_key.is_none() {
+                return Err(anyhow::anyhow!(
+                    "OpenAI embedding provider selected but OPENAI_API_KEY is not set. \
+                     Add OPENAI_API_KEY=sk-... to your .env file or set EMBEDDING_PROVIDER=ollama."
+                ));
+            }
+            tracing::info!("Using OpenAI embeddings: {} ({}d)", model, dimensions);
+        } else {
+            tracing::info!("Using Ollama embeddings: {} ({}d)", model, dimensions);
+        }
+
+        store.ensure_collections(dimensions).await?;
         Ok(Self {
             config,
             store,
@@ -92,6 +117,10 @@ impl Engine {
                 last_report: None,
             })),
             last_activity: Arc::new(RwLock::new(tokio::time::Instant::now())),
+            embed_provider: provider,
+            embed_model: model,
+            embed_dimensions: dimensions,
+            openai_key,
         })
     }
 
@@ -105,6 +134,21 @@ impl Engine {
         *self.last_activity.write().await = tokio::time::Instant::now();
     }
 
+    /// Create an embedder using the resolved config (from env vars).
+    fn make_embedder(&self) -> anyhow::Result<Box<dyn embedder::Embedder>> {
+        let mut cfg = self.config.clone();
+        cfg.embedding.provider = self.embed_provider.clone();
+        cfg.embedding.model = self.embed_model.clone();
+        cfg.embedding.dimensions = self.embed_dimensions;
+        if self.embed_provider == "openai" {
+            if let Some(ref key) = self.openai_key {
+                // Temporarily set the env var so create_embedder can find it
+                std::env::set_var("OPENAI_API_KEY", key);
+            }
+        }
+        embedder::create_embedder(&cfg)
+    }
+
     pub async fn ingest_path(
         &self,
         path: &str,
@@ -115,7 +159,7 @@ impl Engine {
         let chunks = ingester.ingest_path(path, chunk_by).await?;
         tracing::info!("Ingested {} chunks from {}", chunks.len(), path);
 
-        let embedder = embedder::create_embedder(&self.config)?;
+        let embedder = self.make_embedder()?;
         let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
         let vectors = embedder.embed_batch(&texts).await?;
 
@@ -232,7 +276,7 @@ impl Engine {
         offset: usize,
         min_score: f32,
     ) -> anyhow::Result<Vec<MemoryResult>> {
-        let embedder = embedder::create_embedder(&self.config)?;
+        let embedder = self.make_embedder()?;
         let query_vector = embedder.embed(query).await?;
 
         // If tags filter requested, use tag-aware search
@@ -410,7 +454,7 @@ impl Engine {
 
     pub async fn edit_memory(&self, id: &str, new_content: &str) -> anyhow::Result<()> {
         // Re-embed the new content and update the point
-        let embedder = embedder::create_embedder(&self.config)?;
+        let embedder = self.make_embedder()?;
         let vector = embedder.embed(new_content).await?;
 
         let existing = self.get_memory(id).await?;
@@ -486,8 +530,8 @@ impl Engine {
             total_memories: mem_stats.vector_count,
             total_realms: realms.len() as u32,
             storage_bytes: mem_stats.size_bytes,
-            embedding_provider: self.config.embedding.provider.clone(),
-            embedding_model: self.config.embedding.model.clone(),
+            embedding_provider: self.embed_provider.clone(),
+            embedding_model: self.embed_model.clone(),
             embedding_dimensions: self.config.embedding.dimensions,
             slumber_state: slumber.state,
         })
@@ -500,7 +544,7 @@ impl Engine {
         realm_hint: Option<&str>,
         source: Option<&str>,
     ) -> anyhow::Result<String> {
-        let embedder = embedder::create_embedder(&self.config)?;
+        let embedder = self.make_embedder()?;
         let vector = embedder.embed(content).await?;
 
         let id = uuid::Uuid::new_v4().to_string();
@@ -545,7 +589,7 @@ impl Engine {
     ) -> anyhow::Result<Vec<serde_json::Value>> {
         // TODO: implement knowledge graph traversal
         // For now, fall back to semantic search and wrap results
-        let embedder = embedder::create_embedder(&self.config)?;
+        let embedder = self.make_embedder()?;
         let query_vector = embedder.embed(entity).await?;
         let results = self.store.search(&query_vector, 10, 0.3, None).await?;
 
@@ -602,7 +646,7 @@ impl Engine {
         let memories: Vec<crate::storage::qdrant::MemoryPoint> = serde_json::from_str(&content)?;
         let count = memories.len();
 
-        let embedder = embedder::create_embedder(&self.config)?;
+        let embedder = self.make_embedder()?;
         for mem in &memories {
             let vector = embedder.embed(&mem.content).await?;
             let realm_id = mem.realm_id.as_deref().unwrap_or("");
