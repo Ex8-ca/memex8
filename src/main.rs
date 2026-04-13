@@ -180,6 +180,9 @@ enum Commands {
     Import {
         /// Input file path
         path: String,
+        /// Reuse stored vectors instead of re-embedding (requires export with vectors)
+        #[arg(long, default_value = "true")]
+        reuse_vectors: bool,
     },
 
     /// Diagnose connectivity issues
@@ -302,7 +305,7 @@ async fn main() -> anyhow::Result<()> {
             min_score,
         } => {
             let engine = engine::Engine::new(config).await?;
-            let results = engine.search(&query, realm.as_deref(), limit, min_score).await?;
+            let results = engine.search(&query, realm.as_deref(), None, limit, 0, min_score).await?;
             for (i, result) in results.iter().enumerate() {
                 println!(
                     "{}. [{}] {:.2} — {}",
@@ -479,10 +482,14 @@ async fn main() -> anyhow::Result<()> {
             engine.export(&path).await?;
             println!("📤 Exported to: {}", path);
         }
-        Commands::Import { path } => {
+        Commands::Import { path, reuse_vectors } => {
             let engine = engine::Engine::new(config).await?;
-            let count = engine.import(&path).await?;
-            println!("📥 Imported {} memories from: {}", count, path);
+            let count = engine.import(&path, reuse_vectors).await?;
+            if reuse_vectors {
+                println!("📥 Imported {} memories from: {} (vectors reused)", count, path);
+            } else {
+                println!("📥 Imported {} memories from: {} (re-embedded)", count, path);
+            }
         }
         Commands::Doctor => {
             println!("🩺 memex8 doctor — running diagnostics...\n");

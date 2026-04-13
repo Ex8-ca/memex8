@@ -13,7 +13,7 @@ pub mod search;
 pub mod slumber;
 
 use crate::config::AppConfig;
-use crate::storage::qdrant::QdrantStore;
+use crate::storage::qdrant::{MemoryPoint, MemoryWithVector, QdrantStore};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -223,13 +223,31 @@ impl Engine {
         &self,
         query: &str,
         realm: Option<&str>,
+        tags: Option<&[String]>,
         limit: usize,
+        offset: usize,
         min_score: f32,
     ) -> anyhow::Result<Vec<MemoryResult>> {
         let embedder = embedder::create_embedder(&self.config)?;
         let query_vector = embedder.embed(query).await?;
 
-        let results = self.store.search(&query_vector, limit, min_score, realm).await?;
+        // If tags filter requested, use tag-aware search
+        let results = if let Some(tags) = tags {
+            if tags.is_empty() {
+                self.store.search(&query_vector, limit + offset, min_score, realm).await?
+            } else {
+                self.store.search_by_tags(&query_vector, tags, limit + offset).await?
+                    .into_iter()
+                    .filter(|r| r.score >= min_score)
+                    .filter(|r| realm.map_or(true, |re| r.payload.realm_name == re))
+                    .collect()
+            }
+        } else {
+            self.store.search(&query_vector, limit + offset, min_score, realm).await?
+        };
+
+        // Apply pagination
+        let results: Vec<_> = results.into_iter().skip(offset).take(limit).collect();
 
         {
             let mut state = self.slumber_state.write().await;
@@ -289,6 +307,11 @@ impl Engine {
                 access_count: m.access_count,
             })
             .collect())
+    }
+
+    /// Get the most commonly used tags.
+    pub async fn get_tag_suggestions(&self, limit: usize) -> anyhow::Result<Vec<(String, u32)>> {
+        self.store.get_tag_suggestions(limit).await
     }
 
     pub async fn list_realms(&self) -> anyhow::Result<Vec<crate::storage::qdrant::RealmPoint>> {
@@ -538,14 +561,40 @@ impl Engine {
     }
 
     pub async fn export(&self, path: &str) -> anyhow::Result<()> {
-        let memories = self.store.scroll_all_memories().await?;
+        // Export with vectors so they can be reused on import
+        let memories = self.store.scroll_all_memories_with_vectors().await?;
         let json = serde_json::to_string_pretty(&memories)?;
         std::fs::write(path, json)?;
         Ok(())
     }
 
-    pub async fn import(&self, path: &str) -> anyhow::Result<usize> {
+    pub async fn import(&self, path: &str, reuse_vectors: bool) -> anyhow::Result<usize> {
         let content = std::fs::read_to_string(path)?;
+
+        if reuse_vectors {
+            // Try to import with vectors first
+            if let Ok(memories) = serde_json::from_str::<Vec<MemoryWithVector>>(&content) {
+                let count = memories.len();
+                for m in &memories {
+                    let realm_id = m.memory.realm_id.as_deref().unwrap_or("");
+                    self.store.store_memory(
+                        &m.memory.id,
+                        &m.vector,
+                        &m.memory.content,
+                        m.memory.heading.as_deref(),
+                        m.memory.source_file.as_deref(),
+                        realm_id,
+                        &m.memory.realm_name,
+                        &m.memory.source_hash,
+                        &m.memory.chunk_type,
+                    ).await?;
+                }
+                tracing::info!("Imported {} memories with vectors from {}", count, path);
+                return Ok(count);
+            }
+        }
+
+        // Fallback: import without vectors, re-embed
         let memories: Vec<crate::storage::qdrant::MemoryPoint> = serde_json::from_str(&content)?;
         let count = memories.len();
 

@@ -54,6 +54,7 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/memories/search", axum::routing::post(crate::api::routes::memories::search))
         .route("/memories/recall", axum::routing::get(crate::api::routes::memories::recall))
         .route("/memories/ingest", axum::routing::post(crate::api::routes::memories::ingest))
+        .route("/memories/tags", axum::routing::get(crate::api::routes::memories::tags))
         .route("/memories/{id}", axum::routing::get(crate::api::routes::memories::get))
         .route("/memories/{id}", axum::routing::delete(crate::api::routes::memories::delete))
         .route("/memories/{id}/upvote", axum::routing::post(crate::api::routes::memories::upvote))

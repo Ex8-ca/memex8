@@ -28,32 +28,25 @@
 
 ## 🟡 Medium Priority
 
-### 4. API Authentication
-The middleware skeleton exists but isn't wired.
+### 4. Search Enhancements
+- [x] **Filter by tags** — `?tags=tag1,tag2` on search endpoint
+  - Qdrant tag filter wired through engine → API → CLI
+  - `GET /api/v1/memories/tags` endpoint for tag suggestions
+- [x] **Paginated results** — `offset` parameter on search and recall
+  - SearchResponse and RecallResponse include total/limit/offset
+- [x] **Tag suggestions** — endpoint to list most-used tags across memories
 
-- [ ] **Bearer token auth** — validate `Authorization: Bearer <key>` on all routes
-  - File: `src/api/auth.rs` — implement actual key comparison
-  - File: `src/api/server.rs` — add `.layer(auth_middleware)` to routes
-  - Add `.route("/health", ...)` as excluded path
-
-### 5. Search Enhancements
-- [ ] **Filter by tags** — add `?tags=tag1,tag2` query param to search
-  - Already supported in Qdrant (tag index exists), just need API wiring
-- [ ] **Paginated results** — add `offset` parameter
-- [ ] **Tag suggestions** — endpoint to list most-used tags across memories
-
-### 6. Chunker: Better Markdown Parsing
-Current chunker uses simple line-by-line parsing. Would be more robust with `pulldown-cmark`.
-
+### 5. Chunker: Better Markdown Parsing
 - [ ] **Use pulldown-cmark AST** — parse headings properly (H1-H6 hierarchy), detect code blocks, tables, lists
   - Preserve code blocks as single chunks (don't split in the middle of code)
   - Track parent heading chain (H1 > H2 > H3) for context
   - File: `src/engine/chunker.rs`
 
-### 7. Import with Vector Reuse
-- [ ] **`--reuse-vectors` flag** — for imported JSON, skip re-embedding if vectors are stored
-  - Add `vector: Option<Vec<f32>>` to `MemoryPoint` export format
-  - File: `src/engine/mod.rs` — `import()` method
+### 6. Import with Vector Reuse
+- [x] **`--reuse-vectors` flag** — for imported JSON, skip re-embedding
+  - `MemoryWithVector` with Serialize/Deserialize for export format
+  - `export` now includes vectors; `import --reuse-vectors` skips embedding
+  - Falls back to re-embedding if format doesn't include vectors
 
 ## 🟢 Low Priority
 
@@ -112,7 +105,8 @@ Current chunker uses simple line-by-line parsing. Would be more robust with `pul
 - [x] Import/Export (JSON)
 
 ### Interfaces
-- [x] REST API (Axum 0.8, 16 routes, CORS, tracing)
+- [x] REST API (Axum 0.8, 18 routes including tags endpoint, paginated search/recall)
+- [x] API authentication (Bearer token, constant-time comparison, /health exempt)
 - [x] MCP server (JSON-RPC 2.0 stdio, 11 tools, graceful fallback)
 - [x] Integration generators (Hermes MCP config, OpenClaw webhooks, pi.dev extension)
 - [x] Doctor diagnostics (Qdrant, Ollama/OpenAI, config)

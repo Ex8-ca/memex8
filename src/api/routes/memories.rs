@@ -16,7 +16,9 @@ pub struct StoreRequest {
 pub struct SearchRequest {
     pub query: String,
     pub limit: Option<usize>,
+    pub offset: Option<usize>,
     pub realm: Option<String>,
+    pub tags: Option<Vec<String>>,
     pub min_score: Option<f32>,
 }
 
@@ -52,14 +54,33 @@ pub async fn store(
 pub async fn search(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SearchRequest>,
-) -> Result<Json<Vec<crate::engine::MemoryResult>>, crate::api::error::ApiError> {
+) -> Result<Json<SearchResponse>, crate::api::error::ApiError> {
+    let limit = req.limit.unwrap_or(10);
+    let offset = req.offset.unwrap_or(0);
+    let tags_ref = req.tags.clone();
     let results = state.engine.search(
         &req.query,
         req.realm.as_deref(),
-        req.limit.unwrap_or(10),
+        tags_ref.as_deref().map(|t| t.as_ref()),
+        limit,
+        offset,
         req.min_score.unwrap_or(0.3),
     ).await?;
-    Ok(Json(results))
+    let total = results.len();
+    Ok(Json(SearchResponse {
+        results,
+        total,
+        limit,
+        offset,
+    }))
+}
+
+#[derive(Serialize)]
+pub struct SearchResponse {
+    pub results: Vec<crate::engine::MemoryResult>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
 }
 
 pub async fn get(
@@ -81,17 +102,56 @@ pub async fn delete(
 pub async fn recall(
     State(state): State<Arc<AppState>>,
     Query(params): Query<RecallParams>,
-) -> Result<Json<Vec<crate::engine::MemoryResult>>, crate::api::error::ApiError> {
-    let results = state.engine.recall(
-        params.limit.unwrap_or(10),
+) -> Result<Json<RecallResponse>, crate::api::error::ApiError> {
+    let limit = params.limit.unwrap_or(10);
+    let offset = params.offset.unwrap_or(0);
+    let all_results = state.engine.recall(
+        limit + offset,
         params.realm.as_deref(),
     ).await?;
-    Ok(Json(results))
+    let total = all_results.len();
+    let results: Vec<_> = all_results.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(RecallResponse {
+        results,
+        total,
+        limit,
+        offset,
+    }))
+}
+
+#[derive(Serialize)]
+pub struct RecallResponse {
+    pub results: Vec<crate::engine::MemoryResult>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+/// Get tag suggestions (most commonly used tags).
+pub async fn tags(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<TagParams>,
+) -> Result<Json<Vec<TagSuggestion>>, crate::api::error::ApiError> {
+    let limit = params.limit.unwrap_or(20);
+    let tags = state.engine.get_tag_suggestions(limit).await?;
+    Ok(Json(tags.into_iter().map(|(tag, count)| TagSuggestion { tag, count }).collect()))
+}
+
+#[derive(Deserialize)]
+pub struct TagParams {
+    pub limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct TagSuggestion {
+    pub tag: String,
+    pub count: u32,
 }
 
 #[derive(Deserialize)]
 pub struct RecallParams {
     pub limit: Option<usize>,
+    pub offset: Option<usize>,
     pub realm: Option<String>,
 }
 

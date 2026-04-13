@@ -115,7 +115,7 @@ async fn handle_tool_call(engine: &Engine, params: &serde_json::Value) -> anyhow
             let realm = arguments.get("realm").and_then(|v| v.as_str());
             let min_score = arguments.get("min_score").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
 
-            let results = engine.search(query, realm, limit, min_score).await?;
+            let results = engine.search(query, realm, None, limit, 0, min_score).await?;
             Ok(format_results(results))
         }
         "memex8_store" => {

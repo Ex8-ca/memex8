@@ -40,7 +40,9 @@ pub struct MemoryPointWithVector {
 }
 
 /// Memory with vector — the public API for slumber compression.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemoryWithVector {
+    #[serde(flatten)]
     pub memory: MemoryPoint,
     pub vector: Vec<f32>,
 }
@@ -558,6 +560,21 @@ impl QdrantStore {
                 })
             })
             .collect())
+    }
+
+    /// Search for tag suggestions — returns the most common tags.
+    pub async fn get_tag_suggestions(&self, limit: usize) -> anyhow::Result<Vec<(String, u32)>> {
+        let all = self.scroll_all_memories().await?;
+        let mut tag_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        for mem in &all {
+            for tag in &mem.tags {
+                *tag_counts.entry(tag.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut tags: Vec<_> = tag_counts.into_iter().collect();
+        tags.sort_by(|a, b| b.1.cmp(&a.1));
+        tags.truncate(limit);
+        Ok(tags)
     }
 
     // ── realms CRUD ───────────────────────────────────────────────────────────
