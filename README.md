@@ -184,19 +184,10 @@ auto_archive_days = 90
 
 ## Integrations
 
-### Hermes Agent
+All integrations use the MCP protocol — memex8 acts as an MCP server that agents connect to via stdio.
 
-```bash
-memex8 integration hermes
-# Output:
-# mcp_servers:
-#   memex8:
-#     transport: stdio
-#     command: memex8
-#     args: ["mcp"]
-```
+### Available MCP Tools
 
-Available MCP tools:
 | Tool | Description |
 |------|-------------|
 | `memex8_search` | Semantic search across memories |
@@ -211,17 +202,123 @@ Available MCP tools:
 | `memex8_slumber_status` | Slumber pipeline status |
 | `memex8_graph_search` | Graph-based memory retrieval |
 
-### OpenClaw
+### Claude Code
+
+Claude Code supports MCP servers via `.mcp.json` (project-level) or `~/.claude.json` (global).
+
+```bash
+# Build memex8 first
+cd ~/memex8 && cargo build --release
+
+# Add as a project-local MCP server
+claude mcp add -s project memex8 -- ~/memex8/target/release/memex8 mcp
+
+# Or add globally (all projects)
+claude mcp add -s user memex8 -- ~/memex8/target/release/memex8 mcp
+```
+
+Or manually edit `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "memex8": {
+      "command": "/home/marc/memex8/target/release/memex8",
+      "args": ["mcp"],
+      "env": {
+        "MEMEX8_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+**What happens**: When Claude Code starts, it launches `memex8 mcp` as a subprocess connected over stdin/stdout. Claude can then call `memex8_search` to pull relevant project context before writing code — no manual context injection needed.
+
+### Opencode
+
+Opencode uses the same MCP stdio pattern:
+
+```bash
+opencode mcp add memex8 -- ~/memex8/target/release/memex8 mcp
+```
+
+Or in your Opencode config:
+
+```json
+{
+  "mcpServers": {
+    "memex8": {
+      "command": "/home/marc/memex8/target/release/memex8",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**What happens**: Opencode connects to memex8 via stdio on startup. All 11 memory tools become available — the agent can search existing project knowledge before making decisions.
+
+### Hermes Agent
+
+Hermes uses a YAML-based MCP config (typically `~/.hermes/config.yaml`):
+
+```yaml
+mcp_servers:
+  memex8:
+    transport: stdio
+    command: /home/marc/memex8/target/release/memex8
+    args:
+      - mcp
+```
+
+Or use the built-in generator:
+
+```bash
+memex8 integration hermes
+# Copy the output into ~/.hermes/config.yaml
+```
+
+Restart Hermes after adding the config.
+
+**What happens**: Hermes connects to memex8 on startup. During conversations, Hermes calls `memex8_search` to pull relevant context from your knowledge base, or `memex8_store` to save important findings for future sessions.
+
+### OpenClaw (Webhooks)
+
+OpenClaw integrates via webhooks — when conversations end or skills execute, OpenClaw POSTs summaries to memex8's REST API for auto-ingestion:
 
 ```bash
 memex8 integration openclaw
-# Outputs webhook configuration for on_conversation_end and on_skill_executed hooks
+# Outputs webhook config for your OpenClaw workspace
 ```
+
+**What happens**: After every conversation, OpenClaw sends a summary to memex8, which ingests it as a new memory. Context builds automatically over time — no manual intervention needed.
 
 ### pi.dev
 
+pi.dev uses TypeScript extensions:
+
 ```bash
 memex8 integration pi > ~/.pi/agent/extensions/memex8.ts
+```
+
+**What happens**: pi.dev loads the extension on startup, registering 4 memory tools (`search`, `store`, `recall`, `ingest`). The coding agent queries memex8 before making architectural decisions.
+
+### REST API (Custom Integrations)
+
+For any agent that doesn't support MCP:
+
+```bash
+# Search
+curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "how to deploy", "limit": 5}' \
+  http://localhost:8080/api/v1/memories/search
+
+# Store
+curl -X POST -H "Authorization: Bearer $MEMEX8_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "# Deployment\nUse docker compose..."}' \
+  http://localhost:8080/api/v1/memories
 ```
 
 ## REST API
