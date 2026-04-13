@@ -186,7 +186,94 @@ impl SlumberEngine {
         }
 
         tracing::info!("  Updated {} realm centroids, {} realms total, {} merge candidates", centroids_updated, realms.len(), merges);
-        Ok(realms.len())
+
+        // Check for realm splits (large realms)
+        let splits = self.split_large_realms(&realms).await?;
+
+        tracing::info!("  {} splits performed", splits);
+        Ok(realms.len() + splits)
+    }
+
+    // ─── Phase 3b: Split Large Realms ────────────────────────────────────────
+
+    /// Split realms that exceed the split_threshold using k-means (k=2).
+    async fn split_large_realms(&self, realms: &[crate::storage::qdrant::RealmPoint]) -> anyhow::Result<usize> {
+        let threshold = self.config.realms.split_threshold;
+        let mut splits = 0;
+
+        for realm in realms {
+            if realm.is_user_pinned {
+                continue;
+            }
+            if realm.memory_count < threshold {
+                continue;
+            }
+
+            tracing::info!("  Splitting realm '{}' ({} memories, threshold={})", realm.name, realm.memory_count, threshold);
+
+            // Get all memories with vectors for this realm
+            let all = self.store.scroll_all_memories_with_vectors().await?;
+            let realm_vectors: Vec<_> = all
+                .iter()
+                .filter(|m| m.memory.realm_id.as_deref() == Some(&realm.id))
+                .map(|m| m.vector.clone())
+                .collect();
+
+            if realm_vectors.len() < 10 {
+                continue; // Too few to split meaningfully
+            }
+
+            // Run k-means with k=2
+            let (c1, c2, assignments) = kmeans_split_2(&realm_vectors, 20);
+
+            let count_a = assignments.iter().filter(|&&a| !a).count();
+            let count_b = assignments.iter().filter(|&&a| a).count();
+
+            // Both clusters need at least 5 memories
+            if count_a < 5 || count_b < 5 {
+                tracing::info!("  Skipping split: cluster sizes {} and {} too small", count_a, count_b);
+                continue;
+            }
+
+            // Create two new realms
+            let id_a = uuid::Uuid::new_v4().to_string();
+            let id_b = uuid::Uuid::new_v4().to_string();
+            let name_a = format!("{}-a", realm.name);
+            let name_b = format!("{}-b", realm.name);
+
+            self.store.store_realm(&id_a, &c1, &name_a, None, false).await?;
+            self.store.store_realm(&id_b, &c2, &name_b, None, false).await?;
+
+            // Reassign memories to new realms
+            let realm_mems: Vec<_> = all
+                .iter()
+                .filter(|m| m.memory.realm_id.as_deref() == Some(&realm.id))
+                .collect();
+
+            for (i, mem) in realm_mems.iter().enumerate() {
+                let new_realm_id = if assignments[i] { &id_b } else { &id_a };
+                let new_realm_name = if assignments[i] { &name_b } else { &name_a };
+
+                let payload: qdrant_client::Payload = serde_json::json!({
+                    "realm_id": new_realm_id,
+                    "realm_name": new_realm_name,
+                })
+                .try_into()
+                .unwrap_or_default();
+                self.store.update_memory_payload(&mem.memory.id, payload).await?;
+            }
+
+            // Delete old realm
+            self.store.delete_realm(&realm.id).await?;
+
+            tracing::info!(
+                "  Split '{}' → '{}' ({}) + '{}' ({})",
+                realm.name, name_a, count_a, name_b, count_b
+            );
+            splits += 1;
+        }
+
+        Ok(splits)
     }
 
     // ─── Phase 4: Prune Flagging ─────────────────────────────────────────────
@@ -332,4 +419,83 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     } else {
         dot / (norm_a * norm_b)
     }
+}
+
+/// K-means with k=2 for splitting a realm into two.
+fn kmeans_split_2(vectors: &[Vec<f32>], max_iter: usize) -> (Vec<f32>, Vec<f32>, Vec<bool>) {
+    let dims = vectors[0].len();
+    let n = vectors.len();
+
+    // Initialize centroids: first vector and farthest from first
+    let mut c1 = vectors[0].clone();
+    let mut best_dist = -1.0f32;
+    let mut farthest_idx = 1;
+    for (i, v) in vectors.iter().enumerate().skip(1) {
+        let d = cosine_similarity(&c1, v);
+        if d < best_dist || best_dist < 0.0 {
+            best_dist = d;
+            farthest_idx = i;
+        }
+    }
+    let mut c2 = vectors[farthest_idx].clone();
+
+    let mut assignments = vec![false; n];
+
+    for _iter in 0..max_iter {
+        // Assign each vector to nearest centroid
+        let mut changed = false;
+        for (i, v) in vectors.iter().enumerate() {
+            let d1 = cosine_similarity(&c1, v);
+            let d2 = cosine_similarity(&c2, v);
+            let new_assignment = d2 > d1; // higher cosine = closer
+            if assignments[i] != new_assignment {
+                changed = true;
+            }
+            assignments[i] = new_assignment;
+        }
+
+        if !changed {
+            break;
+        }
+
+        // Recompute centroids
+        let mut sum1 = vec![0.0f32; dims];
+        let mut count1 = 0usize;
+        let mut sum2 = vec![0.0f32; dims];
+        let mut count2 = 0usize;
+
+        for (i, v) in vectors.iter().enumerate() {
+            if assignments[i] {
+                for (j, x) in v.iter().enumerate() {
+                    sum2[j] += x;
+                }
+                count2 += 1;
+            } else {
+                for (j, x) in v.iter().enumerate() {
+                    sum1[j] += x;
+                }
+                count1 += 1;
+            }
+        }
+
+        if count1 > 0 {
+            for x in sum1.iter_mut() {
+                *x /= count1 as f32;
+            }
+            c1 = sum1;
+        }
+        if count2 > 0 {
+            for x in sum2.iter_mut() {
+                *x /= count2 as f32;
+            }
+            c2 = sum2;
+        }
+
+        // If one cluster is empty, stop
+        if count1 == 0 || count2 == 0 {
+            break;
+        }
+    }
+
+    (c1, c2, assignments)
 }

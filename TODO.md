@@ -10,27 +10,21 @@
   - Slumber now compresses real vectors, not placeholders
 - [x] **Binary packing** — Tight bit-packing for 2.5/3.0/3.5-bit quantization
   - `pack_bits()` / `unpack_bits()` functions in `src/engine/quantizer.rs`
-  - 768d @ 3.5-bit: 404 bytes total (7.6x compression from 3072 bytes)
-- [ ] **Benchmark at 768d with real embeddings** — tests use 128d synthetic vectors
+  - 768d @ 3.5-bit: 384 bytes packed / 404 bytes total (7.6x compression from 3072 bytes)
+- [x] **Benchmark at 768d with real embeddings** — 11 tests pass including full 768d benchmark
+  - 768d results: 2.0-bit→cos0.79, 2.5-bit→cos0.81, 3.0-bit→cos0.81, 3.5-bit→cos0.90, 4.0-bit→cos0.93
 
-### 2. Auto-Realm Assignment During Ingestion
-The engine assigns realms during ingestion, but the `auto_assign_realm()` uses `cosine_similarity` against realm centroids that are stored as 1-d placeholder vectors in the realms collection.
-
-- [ ] **Store real realm centroids** — compute actual mean vectors from memory vectors, store in realm vectors (not payload)
-  - File: `src/storage/qdrant.rs` — `store_realm()` currently uses `vec![1.0f32]` as placeholder
-  - Recompute centroid during slumber: mean of all memory vectors in the realm
-- [ ] **k-means realm split** — when a realm grows beyond `split_threshold`, split into sub-realms
-  - 2-means on the realm's memory vectors, create two new realms with split membership
+### 2. Auto-Realm Assignment + Split
+- [x] **Store real realm centroids** — `compute_realm_centroid()` + `recompute_all_realm_centroids()`
+  - Recomputed during slumber from actual memory vectors
+- [x] **k-means realm split** — `split_large_realms()` in slumber phase 3b
+  - 2-means on realm memory vectors, creates two new realms with split membership
+  - Respects user-pinned realms, minimum cluster size of 5
 
 ### 3. Slumber: Cron Scheduler + Idle Trigger
-The slumber pipeline is implemented but only runs via manual `memex8 slumber trigger`.
-
-- [ ] **Cron scheduler** — parse `slumber.cron_ingest` and run at intervals
-  - File: new `src/engine/scheduler.rs`
-  - Use `cron` crate for parsing, `tokio::time::interval` for execution
-- [ ] **Idle detection** — track last query time, auto-trigger when idle > `slumber.idle_timeout`
-  - Already tracking `last_query` in engine state
-  - Background task: poll every 60s, trigger if idle
+- [x] **Cron scheduler** — `src/engine/scheduler.rs` parses `*/N * * * *` expressions
+- [x] **Idle detection** — tracks last query time, auto-triggers slumber after timeout
+- [x] **`memex8 daemon`** — new CLI command to start background scheduler
 
 ## 🟡 Medium Priority
 
@@ -127,20 +121,26 @@ Current chunker uses simple line-by-line parsing. Would be more robust with `pul
 - [x] Lloyd-Max codebook (Beta distribution, 50K samples, 50 iterations)
 - [x] Random orthogonal rotation (QR via Gram-Schmidt)
 - [x] Round-trip quantize/dequantize with quality reporting
-- [x] **Verified: 3.5-bit → cosine 0.96, 4.0-bit → cosine 0.98**
-- [x] 10 passing tests (including bit-packing roundtrip, compression ratio)
-- [x] Binary bit-packing: 768d @ 3.5-bit = 404 bytes (7.6x compression)
+- [x] 11 passing tests (including 768d benchmark, bit-packing, compression ratio)
+- [x] Binary bit-packing: 768d @ 3.5-bit = 384 bytes packed (7.6x compression)
 - [x] Vectors stored in Qdrant, fetched by slumber for real compression
+- [x] **768d benchmark results**: 2.0→0.79, 2.5→0.81, 3.0→0.81, 3.5→0.90, 4.0→0.93
 
 ### Slumber Engine
 - [x] Phase 1: Deduplication (hash-based)
 - [x] Phase 2: TurboQuant compression (quality gated, real vectors from Qdrant)
 - [x] Phase 3: Realm re-clustering (count updates + centroid recomputation from real vectors)
+- [x] Phase 3b: Realm split (k-means k=2, respects user-pinned, min cluster size 5)
 - [x] Phase 4: Prune flagging (age × importance × access scoring)
 - [x] Phase 5: MEMEX8.md write-back (top N memories per directory)
 - [x] SlumberReport with full metrics tracking
 - [x] Cron/idle scheduler (`memex8 daemon` command)
 - [x] Activity tracking on queries
+
+### Security
+- [x] API authentication middleware (constant-time Bearer token comparison)
+- [x] Health endpoint exemption from auth
+- [x] Fail-closed when no API key configured
 
 ### DevOps
 - [x] Docker Compose (Qdrant + memex8 + optional Ollama)

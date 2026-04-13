@@ -74,6 +74,9 @@ serde_repr = "0.1"
 # Error handling
 anyhow = "1"
 
+# Constant-time comparison (prevent timing attacks)
+subtle = "2"
+
 # Async streams (SSE transport)
 futures = "0.3"
 

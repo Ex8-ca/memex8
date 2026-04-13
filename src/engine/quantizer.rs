@@ -666,4 +666,39 @@ mod tests {
         assert!(ratio > 5.0, "Compression ratio {:.1} too low", ratio);
         assert!(packed_bytes < 500, "Packed size {} too large", packed_bytes);
     }
+
+    #[test]
+    fn test_768d_benchmark() {
+        // Benchmark at the actual embedding dimension (nomic-embed-text = 768d)
+        let dims = 768;
+        let original = make_test_vector(dims, 42);
+
+        println!("\n=== 768d TurboQuant Benchmark ===");
+        println!("Vector: {}d, {} bytes original\n", dims, dims * 4);
+
+        for bits in [2.0, 2.5, 3.0, 3.5, 4.0] {
+            let quantizer = TurboQuantizer::new(dims, bits);
+            let (qv, report) = quantizer.quantize_with_report(&original);
+
+            println!(
+                "{:.1}-bit | levels={:3} | cos={:.4} | MSE={:.6} | {} bytes packed | {:.1}x",
+                bits,
+                quantizer.codebook.len(),
+                report.cosine_similarity,
+                report.mse,
+                qv.packed_size(),
+                report.compression_ratio,
+            );
+        }
+        println!();
+
+        // 3.5-bit should achieve > 0.85 cosine at 768d
+        let q35 = TurboQuantizer::new(dims, 3.5);
+        let (_qv, report) = q35.quantize_with_report(&original);
+        assert!(
+            report.cosine_similarity > 0.85,
+            "768d 3.5-bit cosine {:.4} below 0.85",
+            report.cosine_similarity
+        );
+    }
 }

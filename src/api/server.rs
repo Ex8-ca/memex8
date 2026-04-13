@@ -14,11 +14,30 @@ pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()>
     let engine = Engine::new(config.clone()).await?;
     let state = Arc::new(AppState { engine, config });
 
-    let app = Router::new()
-        .nest("/api/v1", api_routes())
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+    let has_key = state.config.api_key().is_some();
+    if has_key {
+        tracing::info!("🔐 API authentication enabled");
+    } else {
+        tracing::warn!("⚠️  No MEMEX8_API_KEY set — API is publicly accessible");
+    }
+
+    let app = if has_key {
+        Router::new()
+            .nest("/api/v1", api_routes())
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::api::auth::auth_middleware,
+            ))
+            .layer(CorsLayer::permissive())
+            .layer(TraceLayer::new_for_http())
+            .with_state(state)
+    } else {
+        Router::new()
+            .nest("/api/v1", api_routes())
+            .layer(CorsLayer::permissive())
+            .layer(TraceLayer::new_for_http())
+            .with_state(state)
+    };
 
     let addr = format!("{}:{}", host, port);
     tracing::info!("🧠 memex8 server starting on {}", addr);
