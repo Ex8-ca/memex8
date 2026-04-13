@@ -35,6 +35,8 @@ pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()>
     // Health and root must be explicit; wildcard must come last
     let app = Router::new()
         .nest("/api/v1", api_router)
+        .route("/webhooks/conversation", axum::routing::post(crate::api::routes::webhook::conversation_end))
+        .route("/webhooks/skill", axum::routing::post(crate::api::routes::webhook::skill_executed))
         .route("/health", axum::routing::get(health))
         .route("/mcp", axum::routing::get(crate::mcp::http::sse_handler))
         .route("/", axum::routing::get(crate::web::serve_root))
@@ -69,6 +71,8 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/slumber/status", axum::routing::get(crate::api::routes::slumber::status))
         .route("/slumber/trigger", axum::routing::post(crate::api::routes::slumber::trigger))
         .route("/stats", axum::routing::get(crate::api::routes::stats::stats))
+        .route("/webhooks/conversation", axum::routing::post(crate::api::routes::webhook::conversation_end))
+        .route("/webhooks/skill", axum::routing::post(crate::api::routes::webhook::skill_executed))
         .route("/health", axum::routing::get(health))
 }
 
