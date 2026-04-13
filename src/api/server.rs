@@ -21,31 +21,25 @@ pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()>
         tracing::warn!("⚠️  No MEMEX8_API_KEY set — API is publicly accessible");
     }
 
-    let app = if has_key {
-        Router::new()
-            .nest("/api/v1", api_routes())
-            .route("/mcp", axum::routing::get(crate::mcp::http::sse_handler))
-            .route("/", axum::routing::get(crate::web::serve_root))
-            .route("/{*path}", axum::routing::get(crate::web::serve_static))
-            // NOTE: POST /mcp/messages is blocked by axum 0.7 vs 0.8 version conflict
-            // from qdrant-client's tonic dependency. Use stdio MCP or REST API instead.
+    // Auth only on /api/v1 — web UI, health, and MCP are public
+    let api_router = if has_key {
+        api_routes()
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 crate::api::auth::auth_middleware,
             ))
-            .layer(CorsLayer::permissive())
-            .layer(TraceLayer::new_for_http())
-            .with_state(state)
     } else {
-        Router::new()
-            .nest("/api/v1", api_routes())
-            .route("/mcp", axum::routing::get(crate::mcp::http::sse_handler))
-            .route("/", axum::routing::get(crate::web::serve_root))
-            .route("/{*path}", axum::routing::get(crate::web::serve_static))
-            .layer(CorsLayer::permissive())
-            .layer(TraceLayer::new_for_http())
-            .with_state(state)
+        api_routes()
     };
+
+    let app = Router::new()
+        .nest("/api/v1", api_router)
+        .route("/mcp", axum::routing::get(crate::mcp::http::sse_handler))
+        .route("/", axum::routing::get(crate::web::serve_root))
+        .route("/{*path}", axum::routing::get(crate::web::serve_static))
+        .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
 
     let addr = format!("{}:{}", host, port);
     tracing::info!("🧠 memex8 server starting on {}", addr);
