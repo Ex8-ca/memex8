@@ -204,17 +204,17 @@ All integrations use the MCP protocol — memex8 acts as an MCP server that agen
 
 ### Claude Code
 
-Claude Code supports MCP servers via `.mcp.json` (project-level) or `~/.claude.json` (global). It connects via stdio — Claude launches `memex8 mcp` as a subprocess.
+Claude Code supports MCP servers via `.mcp.json` (project-level) or `~/.claude.json` (global). It connects via stdio — Claude launches `~/.memex8/bin/memex8 mcp` as a subprocess.
 
 ```bash
-# Build memex8 first
-cd ~/memex8 && cargo build --release
+# Build memex8 binary
+cargo build --release
 
 # Add as a project-local MCP server
-claude mcp add -s project memex8 -- ~/memex8/target/release/memex8 mcp
+claude mcp add -s project memex8 -- ~/.memex8/bin/memex8 mcp
 
 # Or add globally (all projects)
-claude mcp add -s user memex8 -- ~/memex8/target/release/memex8 mcp
+claude mcp add -s user memex8 -- ~/.memex8/bin/memex8 mcp
 ```
 
 Or manually edit `.mcp.json`:
@@ -223,7 +223,7 @@ Or manually edit `.mcp.json`:
 {
   "mcpServers": {
     "memex8": {
-      "command": "/home/marc/memex8/target/release/memex8",
+      "command": "~/.memex8/bin/memex8",
       "args": ["mcp"],
       "env": {
         "MEMEX8_API_KEY": "your-api-key"
@@ -233,14 +233,14 @@ Or manually edit `.mcp.json`:
 }
 ```
 
-**What happens**: When Claude Code starts, it launches `memex8 mcp` as a subprocess connected over stdin/stdout. Claude can then call `memex8_search` to pull relevant project context before writing code.
+**What happens**: When Claude Code starts, it launches `~/.memex8/bin/memex8 mcp` as a subprocess connected over stdin/stdout. Claude can then call `memex8_search` to pull relevant project context before writing code.
 
 ### Opencode
 
 Opencode uses the same stdio MCP pattern:
 
 ```bash
-opencode mcp add memex8 -- ~/memex8/target/release/memex8 mcp
+opencode mcp add memex8 -- ~/.memex8/bin/memex8 mcp
 ```
 
 Or in your Opencode config:
@@ -249,7 +249,7 @@ Or in your Opencode config:
 {
   "mcpServers": {
     "memex8": {
-      "command": "/home/marc/memex8/target/release/memex8",
+      "command": "~/.memex8/bin/memex8",
       "args": ["mcp"]
     }
   }
@@ -266,7 +266,7 @@ Hermes uses a YAML-based MCP config (typically `~/.hermes/config.yaml`):
 mcp_servers:
   memex8:
     transport: stdio
-    command: /home/marc/memex8/target/release/memex8
+    command: ~/.memex8/bin/memex8
     args:
       - mcp
 ```
@@ -293,17 +293,35 @@ memex8 integration openclaw
 
 **What happens**: After every conversation, OpenClaw sends a summary to memex8, which ingests it as a new memory. Context builds automatically over time — no manual intervention needed.
 
-### pi.dev
+### pi.dev (Docker)
 
-pi.dev uses TypeScript extensions:
+When memex8 runs in Docker, pi.dev connects to the REST API — **no local binary needed**.
+
+1. Start memex8: `docker compose up -d`
+2. Generate the extension (the container has the binary):
+
+```bash
+docker compose exec memex8 memex8 integration pi > ~/.pi/agent/extensions/memex8.ts
+```
+
+3. Edit the generated `memex8.ts` and set the base URL:
+
+```typescript
+const BASE_URL = "http://localhost:8080";  // Docker exposes port 8080
+const API_KEY = process.env.MEMEX8_API_KEY || "";
+```
+
+**What happens**: pi.dev loads the extension on startup. All 4 memory tools (`search`, `store`, `recall`, `ingest`) call the Docker container's REST API at `http://localhost:8080`. The coding agent can query memex8 before making architectural decisions — no local binary, no stdio subprocess.
+
+### pi.dev (Local Binary)
+
+If you installed the local binary:
 
 ```bash
 memex8 integration pi > ~/.pi/agent/extensions/memex8.ts
 ```
 
-**What happens**: pi.dev loads the extension on startup, registering 4 memory tools (`search`, `store`, `recall`, `ingest`). The coding agent queries memex8 before making architectural decisions.
-
-### REST API (Custom Integrations)
+The generated extension defaults to `http://localhost:8080` — works whether memex8 runs in Docker or as a local `memex8 serve` process.
 
 For any agent that doesn't support MCP:
 
