@@ -7,6 +7,7 @@ use qdrant_client::qdrant::{
     VectorParamsBuilder, PointsIdsList,
     DeletePointsBuilder, GetPointsBuilder, CountPointsBuilder,
     CreateCollectionBuilder, CreateFieldIndexCollectionBuilder,
+    vectors_output::VectorsOptions,
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +30,19 @@ pub struct MemoryPoint {
     pub chunk_type: String,
     pub heading: Option<String>,
     pub source_hash: String,
+}
+
+/// Memory with its embedding vector (internal use only, not serialized).
+#[derive(Debug, Clone)]
+pub struct MemoryPointWithVector {
+    pub memory: MemoryPoint,
+    pub vector: Option<Vec<f32>>,
+}
+
+/// Memory with vector — the public API for slumber compression.
+pub struct MemoryWithVector {
+    pub memory: MemoryPoint,
+    pub vector: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +89,44 @@ fn point_id_to_string(id: Option<&qdrant_client::qdrant::PointId>) -> String {
         },
         None => String::new(),
     }
+}
+
+/// Extract dense vector from a RetrievedPoint.
+fn extract_vector(point: &qdrant_client::qdrant::RetrievedPoint) -> Option<Vec<f32>> {
+    point.vectors.as_ref().and_then(|v| {
+        v.vectors_options.as_ref().and_then(|opts| match opts {
+            VectorsOptions::Vector(vec_out) => {
+                // Try the newer vector field first, fall back to deprecated data
+                vec_out.vector.as_ref().and_then(|v| match v {
+                    qdrant_client::qdrant::vector_output::Vector::Dense(d) => {
+                        Some(d.data.iter().map(|x| *x as f32).collect())
+                    }
+                    qdrant_client::qdrant::vector_output::Vector::Sparse(_s) => None,
+                    qdrant_client::qdrant::vector_output::Vector::MultiDense(_m) => None,
+                })
+                .or_else(|| {
+                    // Fallback to deprecated data field
+                    if !vec_out.data.is_empty() {
+                        Some(vec_out.data.iter().map(|x| *x as f32).collect())
+                    } else {
+                        None
+                    }
+                })
+            }
+            VectorsOptions::Vectors(named) => {
+                // Get first named vector
+                named.vectors.values().next().and_then(|v| {
+                    v.vector.as_ref().and_then(|v| match v {
+                        qdrant_client::qdrant::vector_output::Vector::Dense(d) => {
+                            Some(d.data.iter().map(|x| *x as f32).collect())
+                        }
+                        qdrant_client::qdrant::vector_output::Vector::Sparse(_s) => None,
+                        qdrant_client::qdrant::vector_output::Vector::MultiDense(_m) => None,
+                    })
+                })
+            }
+        })
+    })
 }
 
 /// Helper: convert a raw HashMap<String, Value> to serde_json map.
@@ -407,11 +459,31 @@ impl QdrantStore {
     }
 
     pub async fn scroll_all_memories(&self) -> anyhow::Result<Vec<MemoryPoint>> {
+        let results = self.scroll_memories_internal(false).await?;
+        Ok(results.into_iter().map(|m| m.memory).collect())
+    }
+
+    /// Scroll all memories WITH their embedding vectors.
+    /// Used by slumber for TurboQuant compression.
+    pub async fn scroll_all_memories_with_vectors(&self) -> anyhow::Result<Vec<MemoryWithVector>> {
+        let raw = self.scroll_memories_internal(true).await?;
+        Ok(raw.into_iter().filter_map(|m| {
+            m.vector.map(|v| MemoryWithVector {
+                memory: m.memory,
+                vector: v,
+            })
+        }).collect())
+    }
+
+    async fn scroll_memories_internal(&self, with_vectors: bool) -> anyhow::Result<Vec<MemoryPointWithVector>> {
         let mut memories = Vec::new();
         let mut offset: Option<String> = None;
 
         loop {
             let mut builder = ScrollPointsBuilder::new(MEMORIES).limit(500).with_payload(true);
+            if with_vectors {
+                builder = builder.with_vectors(true);
+            }
             if let Some(ref off) = offset {
                 builder = builder.offset(off.clone());
             }
@@ -420,13 +492,18 @@ impl QdrantStore {
             for point in resp.result {
                 let pid = point_id_to_string(point.id.as_ref());
                 let map = map_to_json(&point.payload);
-                memories.push(memory_from_payload(&pid, &map));
+                let vector = extract_vector(&point);
+
+                memories.push(MemoryPointWithVector {
+                    memory: memory_from_payload(&pid, &map),
+                    vector,
+                });
             }
 
             if resp.next_page_offset.is_none() {
                 break;
             }
-            offset = resp.next_page_offset.map(|p| point_id_to_string(Some(&p)));
+            offset = resp.next_page_offset.as_ref().map(|p| point_id_to_string(Some(p)));
         }
 
         Ok(memories)
@@ -694,5 +771,65 @@ impl QdrantStore {
     pub async fn count_realms(&self) -> anyhow::Result<u64> {
         let resp = self.client.count(CountPointsBuilder::new(REALMS)).await?;
         Ok(resp.result.map(|r| r.count as u64).unwrap_or(0))
+    }
+
+    /// Compute the mean vector (centroid) for all memories in a realm.
+    pub async fn compute_realm_centroid(&self, realm_id: &str) -> anyhow::Result<Option<Vec<f32>>> {
+        let all = self.scroll_all_memories_with_vectors().await?;
+        let realm_memories: Vec<_> = all
+            .into_iter()
+            .filter(|m| m.memory.realm_id.as_deref() == Some(realm_id))
+            .collect();
+
+        if realm_memories.is_empty() {
+            return Ok(None);
+        }
+
+        let dims = realm_memories[0].vector.len();
+        let mut centroid = vec![0.0f32; dims];
+        for mem in &realm_memories {
+            for (i, &v) in mem.vector.iter().enumerate() {
+                centroid[i] += v;
+            }
+        }
+        for x in centroid.iter_mut() {
+            *x /= realm_memories.len() as f32;
+        }
+
+        Ok(Some(centroid))
+    }
+
+    /// Recompute centroids for all realms and update their vectors.
+    pub async fn recompute_all_realm_centroids(&self) -> anyhow::Result<usize> {
+        let realms = self.list_realms().await?;
+        let mut updated = 0;
+
+        for realm in &realms {
+            if let Some(centroid) = self.compute_realm_centroid(&realm.id).await? {
+                // Update the realm's vector in Qdrant
+                let payload: Payload = serde_json::json!({
+                    "name": realm.name,
+                    "memory_count": realm.memory_count,
+                    "is_user_pinned": realm.is_user_pinned,
+                    "description": realm.description,
+                })
+                .try_into()
+                .unwrap_or_default();
+
+                let point = qdrant_client::qdrant::PointStruct::new(
+                    realm.id.clone(),
+                    centroid,
+                    payload,
+                );
+                self.client
+                    .upsert_points(
+                        UpsertPointsBuilder::new(REALMS, vec![point]).wait(true),
+                    )
+                    .await?;
+                updated += 1;
+            }
+        }
+
+        Ok(updated)
     }
 }

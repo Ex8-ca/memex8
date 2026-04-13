@@ -29,6 +29,8 @@ impl SlumberEngine {
 
         // Phase 1: Deduplicate near-identical memories
         tracing::info!("💤 Slumber phase 1: Deduplication");
+        let all = self.store.scroll_all_memories().await?;
+        report.memories_scanned = all.len();
         report.deduplicated = self.deduplicate().await?;
 
         // Phase 2: TurboQuant compression
@@ -68,7 +70,6 @@ impl SlumberEngine {
     /// Keeps the one with higher importance (upvotes + recency).
     async fn deduplicate(&self) -> anyhow::Result<usize> {
         let all = self.store.scroll_all_memories().await?;
-        let n = all.len();
         let mut removed = 0;
         let dedup_threshold = 0.95f32;
 
@@ -106,46 +107,54 @@ impl SlumberEngine {
 
     /// Compress all memories using TurboQuant and store in the quantized collection.
     async fn turboquant_compress(&self) -> anyhow::Result<usize> {
-        let all = self.store.scroll_all_memories().await?;
+        let all = self.store.scroll_all_memories_with_vectors().await?;
         let bit_width = self.config.slumber.quantize_bit_width;
         let dims = self.config.embedding.dimensions as usize;
 
+        if all.is_empty() {
+            tracing::info!("  No memories to quantize");
+            return Ok(0);
+        }
+
         let quantizer = TurboQuantizer::new(dims, bit_width);
         let mut quantized = 0;
+        let mut total_cosine = 0.0f32;
 
-        for mem in &all {
-            // For now, use a placeholder vector (zeros) since we don't have
-            // the original vectors stored. In production, we'd fetch with vectors=true.
-            // The real flow would be:
-            //   1. Fetch memory with original vector
-            //   2. Quantize
-            //   3. Store in quantized collection
-            //   4. Optionally delete original to save space
-            let placeholder = vec![0.0f32; dims];
-            let qv = quantizer.quantize(&placeholder);
+        for mem_with_vec in &all {
+            let qv = quantizer.quantize(&mem_with_vec.vector);
             let reconstructed = quantizer.dequantize(&qv);
 
             // Verify reconstruction quality
-            let cosine = cosine_similarity(&placeholder, &reconstructed);
-            if cosine > 0.5 {
-                // Only store if quality is acceptable
-                self.store.store_quantized(&mem.id, &reconstructed, mem).await?;
+            let cosine = cosine_similarity(&mem_with_vec.vector, &reconstructed);
+            total_cosine += cosine;
+
+            // Only store if quality is acceptable
+            if cosine > 0.7 {
+                self.store.store_quantized(&mem_with_vec.memory.id, &reconstructed, &mem_with_vec.memory).await?;
                 quantized += 1;
+            } else {
+                tracing::warn!(
+                    "  Low quality quantization for {}: cosine={:.3}",
+                    mem_with_vec.memory.id, cosine
+                );
             }
         }
 
+        let avg_cosine = if quantized > 0 { total_cosine / quantized as f32 } else { 0.0 };
         tracing::info!(
-            "  Quantized {} memories at {:.1} bits/channel",
-            quantized,
-            bit_width
+            "  Quantized {} / {} memories at {:.1} bits (avg cosine={:.3})",
+            quantized, all.len(), bit_width, avg_cosine
         );
         Ok(quantized)
     }
 
     // ─── Phase 3: Re-cluster Realms ──────────────────────────────────────────
 
-    /// Update realm memory counts and check for merge opportunities.
+    /// Update realm memory counts and recompute centroids.
     async fn recluster_realms(&self) -> anyhow::Result<usize> {
+        // Recompute realm centroids from actual memory vectors
+        let centroids_updated = self.store.recompute_all_realm_centroids().await?;
+
         // Update counts for all realms
         self.store.update_realm_counts().await?;
 
@@ -176,7 +185,7 @@ impl SlumberEngine {
             }
         }
 
-        tracing::info!("  Updated {} realm counts, {} merge candidates", realms.len(), merges);
+        tracing::info!("  Updated {} realm centroids, {} realms total, {} merge candidates", centroids_updated, realms.len(), merges);
         Ok(realms.len())
     }
 
@@ -226,7 +235,6 @@ impl SlumberEngine {
         let max_memories = self.config.memex8_md.max_memories as usize;
         let mut written = 0;
 
-        // Group memories by source directory
         let all = self.store.scroll_all_memories().await?;
         let mut by_dir: std::collections::HashMap<String, Vec<&MemoryPoint>> =
             std::collections::HashMap::new();

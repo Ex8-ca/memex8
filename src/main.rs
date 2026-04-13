@@ -157,6 +157,9 @@ enum Commands {
         port: Option<u16>,
     },
 
+    /// Start background daemon (cron + idle slumber scheduler)
+    Daemon,
+
     /// Generate integration configuration
     Integration {
         /// Target platform: openclaw, hermes, or pi
@@ -441,13 +444,22 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Mcp { transport, port } => {
             match transport.as_str() {
-                "stdio" => mcp::server::run_stdio(config).await?,
+                "stdio" => mcp::server::run_stdio(config.clone()).await?,
                 "sse" => {
                     let p = port.unwrap_or(config.server.mcp_port);
-                    mcp::server::run_sse(config, p).await?;
+                    mcp::server::run_sse(config.clone(), p).await?;
                 }
                 _ => anyhow::bail!("Unknown MCP transport: {}", transport),
             }
+        }
+        Commands::Daemon => {
+            let engine = std::sync::Arc::new(engine::Engine::new(config.clone()).await?);
+            tracing::info!("🧠 memex8 daemon starting...");
+            let scheduler = engine::scheduler::Scheduler::new(engine.clone(), config.clone());
+            let activity_handle = engine.activity_handle();
+
+            // Run the scheduler loop (blocks until shutdown)
+            scheduler.run().await?;
         }
         Commands::Integration { platform } => {
             match platform.as_str() {

@@ -22,11 +22,34 @@ pub struct TurboQuantizer {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuantizedVector {
-    pub indices: Vec<u8>,
+    /// Packed indices (bit-packed for 2.5/3.0/3.5-bit quantization).
+    /// Each index is `ceil(bit_width)` bits wide.
+    pub packed: Vec<u8>,
     pub bit_width: f32,
     pub dimensions: usize,
     pub rotation_seed: u64,
     pub norm: f32,
+}
+
+/// Bit-width in bits per index, rounded up to whole bytes.
+impl QuantizedVector {
+    /// Number of bytes used for packed indices.
+    pub fn packed_size(&self) -> usize {
+        let bits_per_index = self.bit_width.ceil() as usize;
+        let total_bits = self.dimensions * bits_per_index;
+        (total_bits + 7) / 8 // round up to bytes
+    }
+
+    /// Total storage including metadata (norm + seed + dims + bit_width).
+    pub fn total_size(&self) -> usize {
+        self.packed_size() + 4 + 8 + 4 + 4 // norm(4) + seed(8) + dims(4) + bit_width(4)
+    }
+
+    /// Compression ratio compared to storing as f32.
+    pub fn compression_ratio(&self) -> f32 {
+        let original = self.dimensions * 4; // f32 = 4 bytes
+        original as f32 / self.total_size() as f32
+    }
 }
 
 /// Quantization quality report.
@@ -74,7 +97,7 @@ impl TurboQuantizer {
         let norm = vector_norm(vector);
         if norm == 0.0 {
             return QuantizedVector {
-                indices: vec![0; self.dimensions],
+                packed: vec![0; self.dimensions],
                 bit_width: self.bit_width,
                 dimensions: self.dimensions,
                 rotation_seed: self.rotation_seed,
@@ -93,8 +116,12 @@ impl TurboQuantizer {
             .map(|&coord| self.nearest_codebook_index(coord) as u8)
             .collect();
 
+        // Bit-pack the indices
+        let bits_per_index = self.bit_width.ceil() as usize;
+        let packed = pack_bits(&indices, bits_per_index, self.dimensions);
+
         QuantizedVector {
-            indices,
+            packed,
             bit_width: self.bit_width,
             dimensions: self.dimensions,
             rotation_seed: self.rotation_seed,
@@ -104,9 +131,12 @@ impl TurboQuantizer {
 
     /// Reconstruct approximate vector from quantized representation.
     pub fn dequantize(&self, qv: &QuantizedVector) -> Vec<f32> {
+        // Unpack indices from bit-packed format
+        let bits_per_index = qv.bit_width.ceil() as usize;
+        let indices = unpack_bits(&qv.packed, bits_per_index, qv.dimensions);
+
         // Map indices to codebook values
-        let rotated: Vec<f32> = qv
-            .indices
+        let rotated: Vec<f32> = indices
             .iter()
             .map(|&idx| self.codebook.get(idx as usize).copied().unwrap_or(0.0))
             .collect();
@@ -126,7 +156,7 @@ impl TurboQuantizer {
         let mse = mean_squared_error(vector, &reconstructed);
         let cosine = cosine_similarity(vector, &reconstructed);
         let original_bytes = vector.len() * 4;
-        let compressed_bytes = qv.indices.len() + 12;
+        let compressed_bytes = qv.total_size();
 
         let report = QuantReport {
             bit_width: self.bit_width,
@@ -353,6 +383,57 @@ fn find_nearest(sorted: &[f32], value: f32) -> usize {
     }
 }
 
+/// Pack `n` indices into a byte array, using `bits_per_index` bits each.
+/// Indices must be in range [0, 2^bits_per_index).
+fn pack_bits(indices: &[u8], bits_per_index: usize, n: usize) -> Vec<u8> {
+    let total_bits = n * bits_per_index;
+    let total_bytes = (total_bits + 7) / 8;
+    let mut packed = vec![0u8; total_bytes];
+
+    for (i, &idx) in indices.iter().enumerate().take(n) {
+        let bit_offset = i * bits_per_index;
+        let byte_offset = bit_offset / 8;
+        let bit_in_byte = bit_offset % 8;
+        let value = idx as u32;
+
+        for b in 0..bits_per_index.min(8) {
+            let bit = (value >> b) & 1;
+            let target_byte = byte_offset + (bit_in_byte + b) / 8;
+            let target_bit = (bit_in_byte + b) % 8;
+            if target_byte < packed.len() {
+                packed[target_byte] |= (bit as u8) << target_bit;
+            }
+        }
+    }
+
+    packed
+}
+
+/// Unpack indices from a bit-packed byte array.
+fn unpack_bits(packed: &[u8], bits_per_index: usize, n: usize) -> Vec<u8> {
+    let mut indices = vec![0u8; n];
+
+    for i in 0..n {
+        let bit_offset = i * bits_per_index;
+        let byte_offset = bit_offset / 8;
+        let bit_in_byte = bit_offset % 8;
+        let mut value = 0u32;
+
+        for b in 0..bits_per_index.min(8) {
+            let source_byte = byte_offset + (bit_in_byte + b) / 8;
+            let source_bit = (bit_in_byte + b) % 8;
+            if source_byte < packed.len() {
+                let bit = (packed[source_byte] >> source_bit) & 1;
+                value |= (bit as u32) << b;
+            }
+        }
+
+        indices[i] = value as u8;
+    }
+
+    indices
+}
+
 // ─── Gamma Distribution Sampling ─────────────────────────────────────────────
 
 fn sample_gamma(alpha: f32, rng: &mut impl rand::Rng) -> f32 {
@@ -540,5 +621,49 @@ mod tests {
             );
             prev_cosine = report.cosine_similarity;
         }
+    }
+
+    #[test]
+    fn test_pack_unpack_roundtrip() {
+        // Test 3-bit packing
+        let indices: Vec<u8> = (0..100).map(|i| (i % 8) as u8).collect();
+        let packed = pack_bits(&indices, 3, 100);
+        let unpacked = unpack_bits(&packed, 3, 100);
+        assert_eq!(indices, unpacked, "3-bit pack/unpack mismatch");
+
+        // Test 4-bit packing
+        let indices: Vec<u8> = (0..100).map(|i| (i % 16) as u8).collect();
+        let packed = pack_bits(&indices, 4, 100);
+        let unpacked = unpack_bits(&packed, 4, 100);
+        assert_eq!(indices, unpacked, "4-bit pack/unpack mismatch");
+
+        // Test 8-bit packing (should be identity)
+        let indices: Vec<u8> = (0..100).map(|i| (i % 256) as u8).collect();
+        let packed = pack_bits(&indices, 8, 100);
+        let unpacked = unpack_bits(&packed, 8, 100);
+        assert_eq!(indices, unpacked, "8-bit pack/unpack mismatch");
+    }
+
+    #[test]
+    fn test_compression_ratio() {
+        let dims = 768;
+        let quantizer = TurboQuantizer::new(dims, 3.5);
+        let original = make_test_vector(dims, 42);
+        let qv = quantizer.quantize(&original);
+
+        let ratio = qv.compression_ratio();
+        let packed_bytes = qv.packed_size();
+        let total_bytes = qv.total_size();
+
+        println!(
+            "768d @ 3.5-bit: {} bytes (packed) / {} bytes (total) / {:.1}x compression",
+            packed_bytes, total_bytes, ratio
+        );
+
+        // 768 * 3.5 = 2688 bits = 336 bytes + 20 metadata = 356 bytes
+        // Original: 768 * 4 = 3072 bytes
+        // Ratio: 3072 / 356 = 8.6x
+        assert!(ratio > 5.0, "Compression ratio {:.1} too low", ratio);
+        assert!(packed_bytes < 500, "Packed size {} too large", packed_bytes);
     }
 }

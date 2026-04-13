@@ -1,5 +1,5 @@
-pub mod compressor;
 pub mod chunker;
+pub mod compressor;
 pub mod doctor;
 pub mod embedder;
 pub mod graph;
@@ -8,6 +8,7 @@ pub mod memex8_md;
 pub mod providers;
 pub mod quantizer;
 pub mod realms;
+pub mod scheduler;
 pub mod search;
 pub mod slumber;
 
@@ -54,6 +55,7 @@ pub struct Engine {
     config: AppConfig,
     store: QdrantStore,
     slumber_state: Arc<RwLock<SlumberState>>,
+    last_activity: Arc<RwLock<tokio::time::Instant>>,
 }
 
 struct SlumberState {
@@ -85,7 +87,18 @@ impl Engine {
                 realms_reorganized: 0,
                 last_report: None,
             })),
+            last_activity: Arc::new(RwLock::new(tokio::time::Instant::now())),
         })
+    }
+
+    /// Handle to reset the idle activity timer (used by scheduler).
+    pub fn activity_handle(&self) -> Arc<RwLock<tokio::time::Instant>> {
+        self.last_activity.clone()
+    }
+
+    /// Reset the idle activity timer (call after each query).
+    async fn touch_activity(&self) {
+        *self.last_activity.write().await = tokio::time::Instant::now();
     }
 
     pub async fn ingest_path(
@@ -222,6 +235,7 @@ impl Engine {
             let mut state = self.slumber_state.write().await;
             state.last_query = chrono::Utc::now();
         }
+        self.touch_activity().await;
 
         Ok(results.into_iter().map(|r| MemoryResult {
             id: r.payload.id,
