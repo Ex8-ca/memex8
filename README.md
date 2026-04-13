@@ -110,44 +110,56 @@ cp .env.example .env
 nano .env
 ```
 
-### Run
-```bash
-# Check connectivity (Qdrant must be running)
-./target/release/memex8 doctor
+### Option A: Docker Compose (Recommended)
 
-# Ingest a directory of markdown files
-./target/release/memex8 ingest ./my-notes/
-
-# Search your memories
-./target/release/memex8 search "async Rust patterns"
-
-# Start the REST API server
-./target/release/memex8 serve
-
-# Start the MCP server (for Claude Code, Opencode, etc.)
-./target/release/memex8 mcp
-
-# Start the background daemon (cron + idle slumber)
-./target/release/memex8 daemon
-```
-
-### Docker Compose (Recommended)
-Everything comes up together — memex8 + Qdrant + optional Ollama:
+Everything comes up together — memex8 + Qdrant in one command:
 
 ```bash
 cp .env.example .env
 
-# Start everything (memex8 + Qdrant)
+# Start memex8 + Qdrant
 docker compose up -d
-
-# Add local embeddings (Ollama)
-docker compose --profile local-embeddings up -d
 
 # Check logs
 docker compose logs -f memex8
 ```
 
-No need to install or run Qdrant separately — Docker Compose handles it.
+Use the binary for CLI commands even when the server runs in Docker:
+
+```bash
+# Ingest files (CLI talks to Docker container)
+./target/release/memex8 ingest ./my-notes/
+
+# Search
+./target/release/memex8 search "async Rust patterns"
+
+# Install the binary to ~/.memex8 for easier access
+./scripts/install.sh
+```
+
+### Option B: Local Binary (No Docker)
+
+Run everything from the binary — you'll need Qdrant running separately:
+
+```bash
+# Start Qdrant first
+docker run -d -p 6333:6333 -v qdrant_data:/qdrant/storage qdrant/qdrant
+
+# Check connectivity
+./target/release/memex8 doctor
+
+# Start the REST API + MCP server
+./target/release/memex8 serve
+
+# Or start the background daemon (cron + idle slumber)
+./target/release/memex8 daemon
+```
+
+Then use CLI commands normally:
+
+```bash
+./target/release/memex8 ingest ./my-notes/
+./target/release/memex8 search "async Rust patterns"
 
 ## Docker Compose
 
