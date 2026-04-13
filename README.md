@@ -175,60 +175,93 @@ All integrations use the MCP protocol — memex8 acts as an MCP server that agen
 | `memex8_slumber_status` | Slumber pipeline status |
 | `memex8_graph_search` | Graph-based memory retrieval |
 
+### Integration: Auto-Ingest via Webhooks
+
+When agents like OpenClaw or Hermes run conversations, memex8 can auto-ingest the context via webhooks — no manual intervention needed.
+
+#### OpenClaw (Webhooks)
+
+```bash
+./scripts/integrate-openclaw.sh
+```
+
+This configures OpenClaw to POST to memex8 on:
+- **Conversation end** — stores the conversation summary as a memory
+- **Skill execution** — stores skill input/output for future reference
+
+**What gets stored:**
+```json
+{
+  "summary": "User asked about deploying to Docker...",
+  "source": "openclaw",
+  "platform": "openclaw"
+}
+```
+
+#### Hermes-Agent (Webhooks)
+
+```bash
+./scripts/integrate-hermes.sh
+```
+
+This adds a webhook to Hermes' config that POSTs conversation summaries to memex8 after each session.
+
+**What gets stored:**
+```json
+{
+  "summary": "Heres what we discussed...",
+  "source": "hermes",
+  "platform": "hermes"
+}
+```
+
+#### How It Works
+
+```
+Agent (OpenClaw/Hermes)
+  │
+  │  POST /api/v1/webhooks/conversation
+  │  { "summary": "...", "source": "hermes" }
+  ▼
+memex8 Engine
+  │
+  ├─→ Chunk (if needed)
+  ├─→ Embed (OpenAI/Ollama)
+  ├─→ Auto-assign realm
+  └─→ Store in Qdrant
+        │
+        ▼
+    Slumber Mode (later)
+      ├─→ Deduplicate
+      ├─→ Compress (TurboQuant)
+      └─→ Re-cluster realms
+```
+
+#### Manual Webhook Test
+
+```bash
+# Test conversation webhook
+curl -X POST http://localhost:8080/api/v1/webhooks/conversation \
+  -H "Authorization: Bearer $MEMEX8_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"summary": "Test conversation", "source": "manual", "platform": "test"}'
+
+# Test skill webhook
+curl -X POST http://localhost:8080/api/v1/webhooks/skill \
+  -H "Authorization: Bearer $MEMEX8_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"skill_name": "search", "status": "success", "input": {}, "output": {}}'
+```
+
 ### Integration: Two Modes
 
-memex8 supports two integration modes depending on your setup:
+memex8 supports two integration modes:
 
 | Mode | Transport | Best for |
 |------|-----------|----------|
-| **stdio MCP** | Binary spawns as subprocess | Local binary installs |
-| **REST API** | HTTP calls to `http://localhost:8080` | Docker, any language, any agent |
-
-### Docker Setup (Recommended — REST API)
-
-When memex8 runs in Docker, all agents connect via the REST API:
-
-```bash
-# memex8 is already running at http://localhost:8080
-curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "how to deploy", "limit": 5}' \
-  http://localhost:8080/api/v1/memories/search
-```
-
-**For Claude Code / Opencode**: Use custom tools that call the REST API, or use the pi.dev extension which wraps all memory operations as REST calls.
-
-**For pi.dev**: Generate the extension and point it at the Docker endpoint:
-
-```bash
-docker compose exec memex8 memex8 integration pi > ~/.pi/agent/extensions/memex8.ts
-# Edit BASE_URL = "http://localhost:8080" in the generated file
-```
-
-### Local Binary (stdio MCP)
-
-If you installed memex8 locally with `./scripts/install.sh`, agents use stdio MCP:
-
-```bash
-# Claude Code
-claude mcp add -s project memex8 -- ~/.memex8/bin/memex8 mcp
-
-# Opencode
-opencode mcp add memex8 -- ~/.memex8/bin/memex8 mcp
-
-# Hermes Agent (~/.hermes/config.yaml)
-mcp_servers:
-  memex8:
-    transport: stdio
-    command: ~/.memex8/bin/memex8
-    args: ["mcp"]
-```
-
-Or use the generators:
-```bash
-memex8 integration hermes   # outputs YAML config
-memex8 integration pi       # outputs TypeScript extension
-```
+| **Webhooks** | POST to `/api/v1/webhooks/*` | Auto-ingest from agents |
+| **REST API** | HTTP calls to `/api/v1/*` | Manual queries, custom tools |
+| **stdio MCP** | Binary subprocess | Local binary installs |
 
 ### Hermes Agent
 
