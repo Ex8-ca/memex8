@@ -25,7 +25,6 @@ services:
       - "8080:8080"    # REST API + Web UI
       - "8081:8081"    # MCP SSE endpoint
     volumes:
-      - ./config.toml:/etc/memex8/config.toml:ro
       - ./watch_dirs:/watch          # Mount directories to watch
       - memex8_data:/var/lib/memex8  # Internal state, cache
     environment:
