@@ -1,0 +1,7 @@
+name: memex8
+version: 1.0.0
+description: "memex8 — self-hosted AI memory system with Qdrant, TurboQuant compression, and auto-discovered knowledge realms."
+pip_dependencies:
+  - requests
+requires_env:
+  - MEMEX8_API_KEY
