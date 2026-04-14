@@ -160,7 +160,7 @@ enum Commands {
     /// Start background daemon (cron + idle slumber scheduler)
     Daemon,
 
-    /// Generate integration configuration
+    /// Show integration config for an AI agent (copy-paste into agent config)
     Integration {
         /// Target platform: openclaw, hermes, or pi
         platform: String,
@@ -465,9 +465,13 @@ async fn main() -> anyhow::Result<()> {
             scheduler.run().await?;
         }
         Commands::Integration { platform } => {
+            let base_url = std::env::var("MEMEX8_URL")
+                .unwrap_or_else(|_| format!("http://localhost:{}", config.server.port));
+            let api_key = config.api_key().unwrap_or_else(|| "YOUR_API_KEY".into());
+
             match platform.as_str() {
-                "openclaw" => integrations::openclaw::print_hooks(&config)?,
-                "hermes" => integrations::hermes::print_mcp_config(&config)?,
+                "openclaw" => integrations::openclaw::configure(&config, &base_url, &api_key)?,
+                "hermes" => integrations::hermes::configure(&config, &base_url, &api_key)?,
                 "pi" => integrations::pi::generate_extension(&config)?,
                 _ => anyhow::bail!("Unknown platform: {}. Use: openclaw, hermes, pi", platform),
             }

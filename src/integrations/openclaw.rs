@@ -1,42 +1,44 @@
 use crate::config::AppConfig;
 
-/// Print OpenClaw webhook hook configuration
-pub fn print_hooks(config: &AppConfig) -> anyhow::Result<()> {
-    let base_url = format!("http://localhost:{}", config.server.port);
-    let api_key = config.api_key().unwrap_or_else(|| "YOUR_API_KEY".into());
-
-    println!("# OpenClaw Hook Configuration");
-    println!("# Add to your OpenClaw workspace config\n");
-
+/// Print the webhook config users paste into their OpenClaw config.
+pub fn configure(
+    _config: &AppConfig,
+    base_url: &str,
+    api_key: &str,
+) -> anyhow::Result<()> {
+    println!("🦞 Add this to your OpenClaw config:");
+    println!();
     println!("hooks:");
     println!("  on_conversation_end:");
     println!("    - type: webhook");
-    println!("      url: {}/api/v1/memories", base_url);
+    println!("      url: {}/api/v1/webhooks/conversation", base_url);
     println!("      method: POST");
     println!("      headers:");
     println!("        Authorization: \"Bearer {}\"", api_key);
     println!("        Content-Type: application/json");
     println!("      body_template: |");
     println!("        {{{{");
-    println!("          \"content\": \"{{{{conversation_summary}}}}\",");
-    println!("          \"tags\": [\"conversation\", \"{{{{platform}}}}\"],");
-    println!("          \"source\": \"openclaw\"");
+    println!("          \"summary\": \"{{{{{{{{conversation_summary}}}}}}}}\",");
+    println!("          \"source\": \"openclaw\",");
+    println!("          \"platform\": \"{{{{{{{{platform_name}}}}}}}}\"");
     println!("        }}}}");
     println!();
-
     println!("  on_skill_executed:");
     println!("    - type: webhook");
-    println!("      url: {}/api/v1/memories", base_url);
+    println!("      url: {}/api/v1/webhooks/skill", base_url);
     println!("      method: POST");
     println!("      headers:");
     println!("        Authorization: \"Bearer {}\"", api_key);
     println!("        Content-Type: application/json");
     println!("      body_template: |");
     println!("        {{{{");
-    println!("          \"content\": \"# {{skill_name}}\\n{{{{skill_output}}}}\",");
-    println!("          \"tags\": [\"skill\", \"{{{{skill_category}}}}\"],");
-    println!("          \"source\": \"openclaw\"");
+    println!("          \"skill_name\": \"{{{{{{{{skill_name}}}}}}}}\",");
+    println!("          \"skill_category\": \"{{{{{{{{skill_category}}}}}}}}\",");
+    println!("          \"status\": \"{{{{{{{{skill_status}}}}}}}}\",");
+    println!("          \"input\": {{{{{{{{skill_input}}}}}}}},");
+    println!("          \"output\": {{{{{{{{skill_output}}}}}}}}");
     println!("        }}}}");
-
+    println!();
+    println!("Then restart OpenClaw.");
     Ok(())
 }
