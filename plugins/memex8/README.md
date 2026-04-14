@@ -4,46 +4,39 @@ Self-hosted memory for Hermes using [memex8](https://github.com/marcus20232023/m
 
 ## Installation
 
-### 1. Install the plugin
+### 1. Copy the plugin to Hermes
 
-Copy the `plugins/memex8/` directory into your Hermes plugins folder:
-
-```bash
-# If memex8 is in Docker, the plugin lives inside the container
-# Copy it to your Hermes plugins directory:
-cp -r /path/to/memex8/plugins/memex8 ~/.hermes/plugins/memex8
-```
-
-Or install from GitHub:
+The plugin must go in Hermes' `plugins/memory/` directory (inside the Hermes source tree):
 
 ```bash
-mkdir -p ~/.hermes/plugins
-cd ~/.hermes/plugins
-git clone https://github.com/marcus20232023/memex8.git
-mv memex8/plugins/memex8 .
-rm -rf memex8
+# Find where Hermes is installed
+find ~ -name "hermes" -type f 2>/dev/null | head -5
+# Or check your clone location
+ls ~/hermes-agent/plugins/memory/ 2>/dev/null
+
+# Copy the plugin
+cp -r ~/memex8/plugins/memex8 /path/to/hermes-agent/plugins/memory/
 ```
 
-### 2. Configure
+### 2. Activate in config
 
-Set the environment variable:
+Add to `~/.hermes/config.yaml`:
+
+```yaml
+memory:
+  provider: memex8
+```
+
+### 3. Set environment variables
 
 ```bash
 export MEMEX8_API_KEY=your-api-key
-export MEMEX8_BASE_URL=http://localhost:8080  # optional, defaults to localhost
+export MEMEX8_BASE_URL=http://localhost:8080  # optional
 ```
 
-Or add to `~/.hermes/config.yaml`:
+### 4. Restart Hermes
 
-```yaml
-memex8:
-  api_key: your-api-key
-  base_url: http://localhost:8080
-```
-
-### 3. Restart Hermes
-
-Hermes will auto-detect the plugin and load it as a memory provider.
+Hermes will discover the plugin and show it in memory provider settings.
 
 ## Available Tools
 
@@ -77,4 +70,4 @@ Hermes Agent
 ## Prerequisites
 
 - [memex8](https://github.com/marcus20232023/memex8) running in Docker (`docker compose up -d`)
-- Hermes-Agent with plugin support enabled
+- Hermes-Agent with plugin support
