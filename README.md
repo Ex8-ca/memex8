@@ -218,13 +218,31 @@ curl -X POST http://localhost:8080/api/v1/webhooks/conversation \
 
 ### Integration: Two Modes
 
-memex8 supports two integration modes:
+memex8 supports three integration modes:
 
 | Mode | Transport | Best for |
 |------|-----------|----------|
+| **Hermes Plugin** | Drop-in Python plugin | Native memory provider |
 | **Webhooks** | POST to `/api/v1/webhooks/*` | Auto-ingest from agents |
 | **REST API** | HTTP calls to `/api/v1/*` | Manual queries, custom tools |
-| **stdio MCP** | Binary subprocess | Local binary installs |
+
+#### Hermes-Agent Plugin (Native)
+
+The cleanest integration — memex8 runs as a native memory provider inside Hermes:
+
+```bash
+# Install the plugin
+cp -r plugins/memex8 ~/.hermes/plugins/memex8
+
+# Configure (~/.hermes/config.yaml or env vars)
+export MEMEX8_API_KEY=your-key
+export MEMEX8_BASE_URL=http://localhost:8080
+
+# Restart Hermes — done
+```
+
+Hermes gets 5 new tools: `memex8_search`, `memex8_recall`, `memex8_remember`, `memex8_forget`, `memex8_realms`.
+Conversations are auto-stored. No webhooks needed.
 
 ### Hermes Agent
 
