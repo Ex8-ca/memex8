@@ -177,80 +177,43 @@ All integrations use the MCP protocol — memex8 acts as an MCP server that agen
 
 ### Integration: Auto-Ingest via Webhooks
 
-When agents like OpenClaw or Hermes run conversations, memex8 can auto-ingest the context via webhooks — no manual intervention needed.
+Agents auto-push conversation context to memex8 via webhooks — one command to configure.
 
-#### OpenClaw (Webhooks)
-
-```bash
-./scripts/integrate-openclaw.sh
-```
-
-This configures OpenClaw to POST to memex8 on:
-- **Conversation end** — stores the conversation summary as a memory
-- **Skill execution** — stores skill input/output for future reference
-
-**What gets stored:**
-```json
-{
-  "summary": "User asked about deploying to Docker...",
-  "source": "openclaw",
-  "platform": "openclaw"
-}
-```
-
-#### Hermes-Agent (Webhooks)
+#### OpenClaw
 
 ```bash
-./scripts/integrate-hermes.sh
+memex8 integration openclaw
+# Copy the output → paste into OpenClaw config → restart
 ```
 
-This adds a webhook to Hermes' config that POSTs conversation summaries to memex8 after each session.
+#### Hermes
 
-**What gets stored:**
-```json
-{
-  "summary": "Heres what we discussed...",
-  "source": "hermes",
-  "platform": "hermes"
-}
+```bash
+memex8 integration hermes
+# Copy the output → paste into ~/.hermes/config.yaml → restart
 ```
 
-#### How It Works
+#### What Happens
 
 ```
-Agent (OpenClaw/Hermes)
+Agent finishes conversation
   │
   │  POST /api/v1/webhooks/conversation
   │  { "summary": "...", "source": "hermes" }
   ▼
 memex8 Engine
-  │
-  ├─→ Chunk (if needed)
   ├─→ Embed (OpenAI/Ollama)
   ├─→ Auto-assign realm
   └─→ Store in Qdrant
-        │
-        ▼
-    Slumber Mode (later)
-      ├─→ Deduplicate
-      ├─→ Compress (TurboQuant)
-      └─→ Re-cluster realms
 ```
 
 #### Manual Webhook Test
 
 ```bash
-# Test conversation webhook
 curl -X POST http://localhost:8080/api/v1/webhooks/conversation \
   -H "Authorization: Bearer $MEMEX8_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"summary": "Test conversation", "source": "manual", "platform": "test"}'
-
-# Test skill webhook
-curl -X POST http://localhost:8080/api/v1/webhooks/skill \
-  -H "Authorization: Bearer $MEMEX8_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"skill_name": "search", "status": "success", "input": {}, "output": {}}'
 ```
 
 ### Integration: Two Modes
