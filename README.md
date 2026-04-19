@@ -142,7 +142,9 @@ Commands:
 git clone https://github.com/marcus20232023/memex8.git
 cd memex8
 cp .env.example .env
-# Edit .env and set your OPENAI_API_KEY
+# Edit .env — defaults use Ollama (local, no API key needed)
+# If you prefer OpenAI embeddings, set EMBEDDING_PROVIDER=openai
+# and add your OPENAI_API_KEY
 nano .env
 ```
 
@@ -276,47 +278,63 @@ memex8 supports three integration modes:
 | **Webhooks** | POST to `/api/v1/webhooks/*` | Auto-ingest from agents |
 | **REST API** | HTTP calls to `/api/v1/*` | Manual queries, custom tools |
 
-#### Hermes-Agent Plugin (Native)
+### Hermes Agent (Native Memory Provider Plugin)
 
-The cleanest integration — memex8 runs as a native memory provider inside Hermes:
+The deepest integration — memex8 replaces Hermes' built-in memory system entirely.
 
+**Step 1: Install the plugin**
 ```bash
-# Install the plugin
-cp -r plugins/memex8 ~/.hermes/plugins/memex8
-
-# Configure (~/.hermes/config.yaml or env vars)
-export MEMEX8_API_KEY=your-key
-export MEMEX8_BASE_URL=http://localhost:8080
-
-# Restart Hermes — done
+cp -r plugins/memex8 ~/.hermes/plugins/
 ```
 
-Hermes gets 5 new tools: `memex8_search`, `memex8_recall`, `memex8_remember`, `memex8_forget`, `memex8_realms`.
-Conversations are auto-stored. No webhooks needed.
+**Step 2: Configure memex8 .env**
+Create `~/.hermes/memex8/.env` (or add to your main `~/.hermes/.env`):
+```bash
+MEMEX8_API_KEY=memex8-dev-key
+MEMEX8_BASE_URL=http://localhost:8080
+```
 
-### Hermes Agent
+**Important**: Both `~/.hermes/.env` and `~/.hermes/memex8/.env` need the same
+`MEMEX8_API_KEY` and `MEMEX8_BASE_URL` values. The plugin reads from whichever
+is available.
 
-Hermes uses a YAML-based MCP config (typically `~/.hermes/config.yaml`):
-
+**Step 3: Activate in Hermes config**
+Edit `~/.hermes/config.yaml`:
 ```yaml
-mcp_servers:
-  memex8:
-    transport: stdio
-    command: ~/.memex8/bin/memex8
-    args:
-      - mcp
+memory:
+  provider: "memex8"
+  memory_enabled: true
 ```
 
-Or use the built-in generator:
+**Step 4: Add session closure to your SOUL.md**
+Add this to the end of your Hermes `SOUL.md` so the agent knows when and what to save:
+```markdown
+## Session Closure
 
-```bash
-memex8 integration hermes
-# Copy the output into ~/.hermes/config.yaml
+When a session produces real outcomes, save a summary to memex8 via
+memex8_remember. Include:
+
+- Topic — what was worked on
+- Decisions made — choices agreed upon
+- New facts discovered — environment info, API quirks, user preferences
+- Code patterns established — conventions, architecture choices, workflows
+- Problem solutions found — bugs fixed with how they were resolved
+- Follow-ups needed — anything left incomplete or to revisit
+
+Format as a single structured entry. Skip trivial sessions — only save
+ones where a future agent would genuinely benefit from knowing what
+happened without reading the full transcript.
+
+> **session_search** = raw conversation history
+> **memex8** = curated takeaways
 ```
 
-Restart Hermes after adding the config.
+**Step 5: Restart Hermes**
+New sessions will use memex8 for all memory operations.
 
-**What happens**: Hermes connects to memex8 on startup. During conversations, Hermes calls `memex8_search` to pull relevant context from your knowledge base, or `memex8_store` to save important findings for future sessions.
+**What happens**: Hermes calls memex8 automatically — it recalls relevant
+context before each turn, saves conversation facts after each exchange, and
+sends a full summary when the session ends.
 
 ### OpenClaw (Webhooks)
 
