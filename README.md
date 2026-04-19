@@ -46,34 +46,220 @@
 - **Augment, Don't Replace** — Writes `MEMEX8.md` back to project directories for model context pickup
 
 ### Embedding Flexibility
-- **Local first** — Ollama with `nomic-embed-text` (768d), zero cost, fully private
-- **Cloud fallback** — OpenAI `text-embedding-3-small` or `large`
+- **Cloud first** — OpenAI `text-embedding-3-small` (1536d), fast and accurate
+- **Local fallback** — Ollama with `nomic-embed-text` (768d), zero cost, fully private
 - **Pluggable** — Trait-based design, add any embedding provider
 
 ### Integrations
 - **MCP Server** — JSON-RPC 2.0 over stdio, works with any MCP-compatible agent
 - **REST API** — Full CRUD + search with authentication, tag filtering, and pagination
-- **OpenClaw** — Webhook hooks for auto-ingesting conversation summaries and skill outputs
-- **Hermes Agent** — MCP server integration with 11 memory tools
+- **Hermes Agent** — Native memory provider plugin (replaces built-in MEMORY.md)
+- **OpenClaw** — Webhook hooks for auto-ingesting conversation summaries
 - **pi.dev** — TypeScript extension for the pi coding agent
-- **Claude Code** — Add memex8 MCP server to Claude Code's MCP config for memory-augmented coding
-- **Opencode** — Add memex8 MCP server to Opencode's config for persistent project context
+- **Claude Code / Opencode** — Add memex8 MCP server for memory-augmented coding
 
-### Web UI
+---
 
-When `memex8 serve` is running, open **http://localhost:8080** in your browser.
+## Quick Start: Get memex8 Running
 
-- **Cards view** — Browse memories in a card layout with upvote, importance, and realm info
-- **3D Graph view** — Explore memories as a force-directed graph with realm coloring (orbit, zoom, pan)
-- **Realms view** — See all knowledge realms with memory counts; click a realm to filter cards
-- **Search** — Full semantic search across all memories
-- **Upvote** — Raise the profile/importance of any memory with one click
+### Prerequisites
+- [Docker & Docker Compose](https://docs.docker.com/compose/install/)
+- An [OpenAI API key](https://platform.openai.com/api-keys) *(or use Ollama for local embeddings)*
 
-No build step needed — the web UI is embedded in the binary.
+### 1. Clone and configure
+```bash
+git clone https://github.com/marcus20232023/memex8.git
+cd memex8
+cp .env.example .env
+nano .env  # Set your OPENAI_API_KEY and change MEMEX8_API_KEY
+```
 
-### File Watching
+> **Security**: Change `MEMEX8_API_KEY` from the default `memex8-dev-key` to a random string.
 
-memex8 can watch directories for changes and automatically re-ingest modified files. Powered by the `notify` crate, it debounces events at 500ms and uses SHA-256 comparison to skip files that haven't actually changed.
+### 2. Start everything
+```bash
+docker compose up -d
+```
+
+That's it. memex8 + Qdrant are running.
+
+> **Using local embeddings?** Add `--profile local-embeddings` to start Ollama:
+> ```bash
+> docker compose --profile local-embeddings up -d
+> ```
+
+### 3. Verify it's working
+```bash
+# Check services
+docker compose ps
+
+# Health check
+curl http://localhost:8080/health
+# Expected: {"status":"healthy"}
+```
+
+### 4. (Optional) Build the local CLI binary
+
+Requires [Rust](https://rustup.rs/). Used for file watching, ingesting files, and diagnostics.
+
+```bash
+cd memex8
+cargo build --release
+# Binary at: ./target/release/memex8
+
+# Run diagnostics
+cargo run --release -- doctor
+```
+
+### 5. Open the web UI
+```
+http://localhost:8080
+```
+
+Enter your `MEMEX8_API_KEY` when prompted (it's saved in localStorage).
+
+---
+
+## Hermes Agent Integration
+
+The deepest integration — memex8 replaces Hermes' built-in memory system entirely.
+
+### Step 1: Install the plugin
+
+Copy the plugin to your Hermes plugins directory:
+
+```bash
+mkdir -p ~/.hermes/plugins
+cp -r ~/memex8/plugins/memex8 ~/.hermes/plugins/
+```
+
+Verify it's in place:
+```bash
+ls ~/.hermes/plugins/memex8/__init__.py
+```
+
+### Step 2: Set environment variables
+
+The memex8 plugin needs to know how to reach your memex8 server. Add these to your `~/.hermes/.env` (or create the file if it doesn't exist):
+
+```bash
+MEMEX8_API_KEY=your-key-here
+MEMEX8_BASE_URL=http://localhost:8080
+```
+
+> **Important**: Use the **same `MEMEX8_API_KEY`** that you set in the memex8 `.env` file. If the keys don't match, the plugin won't be able to authenticate with memex8.
+
+### Step 3: Activate the plugin
+
+Edit `~/.hermes/config.yaml`:
+
+```yaml
+memory:
+  provider: "memex8"
+  memory_enabled: true
+```
+
+### Step 4: Add session closure to your SOUL.md
+
+Add this to the end of your Hermes `SOUL.md` so the agent knows when and what to save:
+
+```markdown
+## Session Closure
+
+When a session produces real outcomes, save a summary to memex8 via
+memex8_remember. Include:
+
+- **Topic** — what was worked on
+- **Decisions made** — choices agreed upon
+- **New facts discovered** — environment info, API quirks, user preferences
+- **Code patterns established** — conventions, architecture choices, workflows
+- **Problem solutions found** — bugs fixed with how they were resolved
+- **Follow-ups needed** — anything left incomplete or to revisit
+
+Format as a single structured entry. Skip trivial sessions — only save
+ones where a future agent would genuinely benefit from knowing what
+happened without reading the full transcript.
+
+> **session_search** = raw conversation history
+> **memex8** = curated takeaways
+```
+
+### Step 5: Restart Hermes
+
+New sessions will use memex8 for all memory operations.
+
+### What happens automatically
+
+| Trigger | Action |
+|---------|--------|
+| Before each turn | Background recall of relevant memories → injected as context |
+| After each turn | Conversation facts stored as searchable memories |
+| Trivial messages | Skipped — "ok", "thanks", etc. are not stored |
+| Session ends | Full conversation summary sent to memex8 via webhook |
+| Built-in `memory` tool | Writes are mirrored to memex8 as well |
+
+### Available tools
+
+| Tool | Description |
+|------|-------------|
+| `memex8_search` | Semantic search across all memories |
+| `memex8_remember` | Store a new memory fact |
+| `memex8_recall` | Get high-importance memories (wakeup context) |
+| `memex8_realms` | List all knowledge realms |
+| `memex8_forget` | Delete a memory by ID |
+| `memex8_get` | Get a specific memory by ID |
+
+---
+
+## Other Integrations
+
+### MCP Server (stdio)
+
+For any MCP-compatible agent (Claude Code, Opencode, etc.):
+
+```bash
+# Start the MCP server
+memex8 mcp
+# Or via config:
+memex8 integration hermes  # outputs config to paste into agent config
+```
+
+### REST API
+
+```bash
+# Search
+curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "how to deploy", "limit": 5}' \
+  http://localhost:8080/api/v1/memories/search
+
+# Store
+curl -X POST -H "Authorization: Bearer $MEMEX8_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "# Deployment\nUse docker compose..."}' \
+  http://localhost:8080/api/v1/memories
+```
+
+Full REST API docs: [see below](#rest-api-reference)
+
+### OpenClaw (Webhooks)
+
+```bash
+memex8 integration openclaw
+# Copy output → paste into OpenClaw config → restart
+```
+
+### pi.dev
+
+```bash
+docker compose exec memex8 memex8 integration pi > ~/.pi/agent/extensions/memex8.ts
+```
+
+---
+
+## File Watching
+
+memex8 can watch directories for changes and automatically re-ingest modified files. Powered by the `notify` crate, it debounces events at 500ms and uses SHA-256 comparison to skip unchanged files.
 
 ```bash
 # Add a directory to watch
@@ -93,6 +279,7 @@ memex8 ingest /home/user/docs --watch
 ```
 
 **How it works:**
+
 1. On add, memex8 scans all `.md` files and records SHA-256 hashes
 2. The `notify` crate watches for filesystem events (recursive)
 3. Events are debounced at 500ms — rapid saves don't trigger multiple ingests
@@ -100,9 +287,50 @@ memex8 ingest /home/user/docs --watch
 5. Watch configs persist to `config.toml` automatically
 6. In `memex8 daemon` mode, all configured watchers start automatically
 
-**Watched directories stay in sync:** edit a file in your editor → memex8 detects the change → re-chunks, re-embeds, and updates the memory — all without running `memex8 ingest` again.
+**Watched directories stay in sync:** edit a file → memex8 detects the change → re-chunks, re-embeds, updates memory — no manual `memex8 ingest` needed.
 
-### CLI
+---
+
+## Configuration
+
+### Environment variables (`.env`)
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `MEMEX8_API_KEY` | Auth token for REST/MCP | `memex8-dev-key` |
+| `OPENAI_API_KEY` | OpenAI embeddings API key | *(empty)* |
+| `EMBEDDING_PROVIDER` | `openai` or `ollama` | `openai` |
+| `EMBEDDING_MODEL` | Model name | `text-embedding-3-small` |
+| `EMBEDDING_DIMENSIONS` | Vector dimension | `1536` |
+| `QDRANT_URL` | Qdrant connection | `http://qdrant:6334` |
+
+See [`.env.example`](.env.example) for the full template.
+
+### TOML config (`config.toml`)
+
+See [`config.example.toml`](config.example.toml) for all options. Key settings:
+
+```toml
+[embedding]
+provider = "openai"          # or "ollama"
+model = "text-embedding-3-small"
+dimensions = 1536
+
+[embedding.openai]
+api_key_env = "OPENAI_API_KEY"
+
+[slumber]
+idle_timeout = "10m"
+quantize_bit_width = 3.5     # TurboQuant bit-width (2.5-4)
+auto_archive_days = 90
+```
+
+Watch configs are added automatically via `memex8 watch add`.
+
+---
+
+## CLI Reference
+
 ```bash
 $ memex8 --help
 Self-hosted AI memory system with Qdrant and TurboQuant
@@ -132,268 +360,11 @@ Commands:
   doctor         Diagnose connectivity issues
 ```
 
-## Quick Start
+---
 
-### Prerequisites
-- Docker & Docker Compose
+## REST API Reference
 
-### 1. Clone and configure
-```bash
-git clone https://github.com/marcus20232023/memex8.git
-cd memex8
-cp .env.example .env
-# Edit .env and set your OPENAI_API_KEY
-nano .env
-```
-
-### 2. Start everything
-```bash
-docker compose up -d
-```
-
-That's it. memex8 + Qdrant are running.
-
-### 3. Open the web UI
-```
-http://localhost:8080
-```
-
-Enter your `MEMEX8_API_KEY` when prompted (it's saved in localStorage).
-
-### 4. (Optional) Install local binary
-For stdio MCP with Claude Code/Opencode, or CLI commands:
-
-```bash
-cargo build --release
-```
-
-### 5. Set up file watching (optional)
-```bash
-# Add your project directories
-memex8 watch add /home/user/projects --realm-hint projects
-memex8 watch add /home/user/notes --realm-hint personal
-
-# Or run the daemon for continuous background processing
-memex8 daemon
-# The daemon runs the slumber scheduler AND starts all configured file watchers
-```
-
-## Configuration
-
-See [`config.example.toml`](config.example.toml) for all options. Key settings:
-
-```toml
-[embedding]
-provider = "ollama"           # or "openai"
-model = "nomic-embed-text"    # Ollama model
-dimensions = 768
-
-[embedding.openai]
-api_key_env = "OPENAI_API_KEY"
-model = "text-embedding-3-small"
-
-[slumber]
-idle_timeout = "10m"
-quantize_bit_width = 3.5      # TurboQuant bit-width (2.5-4)
-auto_archive_days = 90
-
-# Watch configs are added automatically via `memex8 watch add`
-[[watch]]
-path = "/home/user/projects"
-chunk_by = "section"
-poll_interval = "5m"
-realm_hint = "projects"
-```
-
-## Integrations
-
-All integrations use the MCP protocol — memex8 acts as an MCP server that agents connect to via stdio.
-
-### Available MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `memex8_search` | Semantic search across memories |
-| `memex8_store` | Store a new memory |
-| `memex8_recall` | Get high-importance memories (wakeup context) |
-| `memex8_get` | Get memory by ID |
-| `memex8_ingest` | Ingest file or directory |
-| `memex8_realms_list` | List all knowledge realms |
-| `memex8_realms_show` | Show realm details |
-| `memex8_upvote` | Increase memory importance |
-| `memex8_stats` | System statistics |
-| `memex8_slumber_status` | Slumber pipeline status |
-| `memex8_graph_search` | Graph-based memory retrieval |
-
-### Integration: Auto-Ingest via Webhooks
-
-Agents auto-push conversation context to memex8 via webhooks — one command to configure.
-
-#### OpenClaw
-
-```bash
-memex8 integration openclaw
-# Copy the output → paste into OpenClaw config → restart
-```
-
-#### Hermes
-
-```bash
-memex8 integration hermes
-# Copy the output → paste into ~/.hermes/config.yaml → restart
-```
-
-#### What Happens
-
-```
-Agent finishes conversation
-  │
-  │  POST /api/v1/webhooks/conversation
-  │  { "summary": "...", "source": "hermes" }
-  ▼
-memex8 Engine
-  ├─→ Embed (OpenAI/Ollama)
-  ├─→ Auto-assign realm
-  └─→ Store in Qdrant
-```
-
-#### Manual Webhook Test
-
-```bash
-curl -X POST http://localhost:8080/api/v1/webhooks/conversation \
-  -H "Authorization: Bearer $MEMEX8_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"summary": "Test conversation", "source": "manual", "platform": "test"}'
-```
-
-### Integration: Two Modes
-
-memex8 supports three integration modes:
-
-| Mode | Transport | Best for |
-|------|-----------|----------|
-| **Hermes Plugin** | Drop-in Python plugin | Native memory provider |
-| **Webhooks** | POST to `/api/v1/webhooks/*` | Auto-ingest from agents |
-| **REST API** | HTTP calls to `/api/v1/*` | Manual queries, custom tools |
-
-### Hermes Agent (Native Memory Provider Plugin)
-
-The deepest integration — memex8 replaces Hermes' built-in memory system entirely.
-
-**Step 1: Install the plugin**
-```bash
-cp -r plugins/memex8 ~/.hermes/plugins/
-```
-
-**Step 2: Configure memex8 .env**
-Create `~/.hermes/memex8/.env` (or add to your main `~/.hermes/.env`):
-```bash
-MEMEX8_API_KEY=memex8-dev-key
-MEMEX8_BASE_URL=http://localhost:8080
-```
-
-**Important**: Both `~/.hermes/.env` and `~/.hermes/memex8/.env` need the same
-`MEMEX8_API_KEY` and `MEMEX8_BASE_URL` values. The plugin reads from whichever
-is available.
-
-**Step 3: Activate in Hermes config**
-Edit `~/.hermes/config.yaml`:
-```yaml
-memory:
-  provider: "memex8"
-  memory_enabled: true
-```
-
-**Step 4: Add session closure to your SOUL.md**
-Add this to the end of your Hermes `SOUL.md` so the agent knows when and what to save:
-```markdown
-## Session Closure
-
-When a session produces real outcomes, save a summary to memex8 via
-memex8_remember. Include:
-
-- Topic — what was worked on
-- Decisions made — choices agreed upon
-- New facts discovered — environment info, API quirks, user preferences
-- Code patterns established — conventions, architecture choices, workflows
-- Problem solutions found — bugs fixed with how they were resolved
-- Follow-ups needed — anything left incomplete or to revisit
-
-Format as a single structured entry. Skip trivial sessions — only save
-ones where a future agent would genuinely benefit from knowing what
-happened without reading the full transcript.
-
-> **session_search** = raw conversation history
-> **memex8** = curated takeaways
-```
-
-**Step 5: Restart Hermes**
-New sessions will use memex8 for all memory operations.
-
-**What happens**: Hermes calls memex8 automatically — it recalls relevant
-context before each turn, saves conversation facts after each exchange, and
-sends a full summary when the session ends.
-
-### OpenClaw (Webhooks)
-
-OpenClaw integrates via webhooks — when conversations end or skills execute, OpenClaw POSTs summaries to memex8's REST API for auto-ingestion:
-
-```bash
-memex8 integration openclaw
-# Outputs webhook config for your OpenClaw workspace
-```
-
-**What happens**: After every conversation, OpenClaw sends a summary to memex8, which ingests it as a new memory. Context builds automatically over time — no manual intervention needed.
-
-### pi.dev (Docker)
-
-When memex8 runs in Docker, pi.dev connects to the REST API — **no local binary needed**.
-
-1. Start memex8: `docker compose up -d`
-2. Generate the extension (the container has the binary):
-
-```bash
-docker compose exec memex8 memex8 integration pi > ~/.pi/agent/extensions/memex8.ts
-```
-
-3. Edit the generated `memex8.ts` and set the base URL:
-
-```typescript
-const BASE_URL = "http://localhost:8080";  // Docker exposes port 8080
-const API_KEY = process.env.MEMEX8_API_KEY || "";
-```
-
-**What happens**: pi.dev loads the extension on startup. All 4 memory tools (`search`, `store`, `recall`, `ingest`) call the Docker container's REST API at `http://localhost:8080`. The coding agent can query memex8 before making architectural decisions — no local binary, no stdio subprocess.
-
-### pi.dev (Local Binary)
-
-If you installed the local binary:
-
-```bash
-memex8 integration pi > ~/.pi/agent/extensions/memex8.ts
-```
-
-The generated extension defaults to `http://localhost:8080` — works whether memex8 runs in Docker or as a local `memex8 serve` process.
-
-For any agent that doesn't support MCP:
-
-```bash
-# Search
-curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "how to deploy", "limit": 5}' \
-  http://localhost:8080/api/v1/memories/search
-
-# Store
-curl -X POST -H "Authorization: Bearer $MEMEX8_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"content": "# Deployment\nUse docker compose..."}' \
-  http://localhost:8080/api/v1/memories
-```
-
-## REST API
-
-The REST API runs on `http://localhost:8080` by default. All endpoints except `/health` are protected by Bearer token authentication when `MEMEX8_API_KEY` is set.
+The REST API runs on `http://localhost:8080` by default. All endpoints except `/health` require Bearer token authentication when `MEMEX8_API_KEY` is set.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -421,12 +392,7 @@ curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
   -d '{"query": "async Rust"}'
 ```
 
-### Search with Tags and Pagination
-```bash
-curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
-  http://localhost:8080/api/v1/memories/search \
-  -d '{"query": "Rust", "tags": ["backend"], "offset": 10, "limit": 20}'
-```
+---
 
 ## Architecture
 
@@ -471,8 +437,12 @@ memex8/
 │   │   ├── hermes.rs        # Hermes MCP config
 │   │   └── pi.rs            # pi.dev extension
 │   └── web/                 # Web UI (cards, 3D graph, search, upvote)
+├── plugins/memex8/          # Hermes memory provider plugin
+│   ├── __init__.py          # MemoryProvider ABC implementation
+│   ├── plugin.yaml          # Plugin metadata
+│   └── README.md            # Plugin setup docs
 ├── web-dist/                # Web UI static assets (embedded in binary)
-├── docker-compose.yml       # Qdrant + memex8 + optional Ollama
+├── docker-compose.yml       # Qdrant + memex8 (+ optional Ollama)
 ├── Dockerfile               # Multi-stage Rust build
 ├── Cargo.toml
 ├── config.example.toml
@@ -483,7 +453,7 @@ memex8/
 
 ### Ingestion Pipeline
 ```
-.md file → Chunker (pulldown-cmark AST) → Embedder (Ollama/OpenAI) →
+.md file → Chunker (pulldown-cmark AST) → Embedder (OpenAI/Ollama) →
 Realm Assignment (cosine similarity vs centroids) → Qdrant Store
 ```
 
@@ -533,6 +503,39 @@ Based on [arXiv:2504.19874](https://arxiv.org/abs/2504.19874): random orthogonal
 | 3.0 | 0.81 | 0.0005 | 288 B | 10.0x |
 | 3.5 | 0.90 | 0.0003 | 384 B | 7.6x |
 | 4.0 | 0.93 | 0.0002 | 384 B | 7.6x |
+
+---
+
+## Troubleshooting
+
+### "Connection refused"
+memex8 isn't running:
+```bash
+cd ~/memex8 && docker compose ps
+docker compose logs memex8
+```
+
+### "Unauthorized"
+Check your API key:
+```bash
+curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
+  http://localhost:8080/health
+```
+
+### Plugin not found
+```bash
+ls ~/.hermes/plugins/memex8/__init__.py
+# Should exist. If not:
+cp -r /path/to/memex8/plugins/memex8 ~/.hermes/plugins/
+```
+
+### Memories not being recalled
+```bash
+memex8 stats
+memex8 search "your query"
+```
+
+---
 
 ## License
 
