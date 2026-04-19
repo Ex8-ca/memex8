@@ -1,8 +1,8 @@
 # memex8 — Self-Hosted AI Memory System
 
-> A Rust-based memory palace for AI agents. Ingest your notes, documents, and skills into organized knowledge realms. Powered by Qdrant vector storage, TurboQuant compression, and auto-discovered semantic clusters.
+> A Rust-based memory palace for AI agents. Ingest your notes, documents, and skills into organized knowledge realms. Powered by Qdrant vector storage, TurboQuant compression, auto-discovered semantic clusters, and real-time file watching.
 
-[![Rust](https://img.shields.io/badge/Rust-1.82+-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.94+-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Qdrant](https://img.shields.io/badge/Qdrant-1.17-2296F3.svg)](https://qdrant.tech/)
 
@@ -25,7 +25,8 @@
 │  │ Embedder │ │ Chunker  │ │ Realms   │ │  Slumber  │  │
 │  │Ollama/Open│ │pulldown-c│ │Auto-clus.│ │Maintenan. │  │
 │  └────┬─────┘ └──────────┘ └────┬─────┘ └─────┬─────┘  │
-├───────┴──────────────────────────┴──────────────┴────────┤
+│       │     File Watcher ◄────────────────────┘         │
+├───────┴─────────────────────────────────────────────────┤
 │                    Qdrant Storage                        │
 │  ┌──────────┐  ┌──────────┐  ┌───────────────────────┐  │
 │  │ memories │  │  realms  │  │ memories_quantized    │  │
@@ -40,6 +41,7 @@
 - **Vector Memory** — Semantic search across all memories using embeddings
 - **Auto-Discovered Realms** — Memories self-organize into knowledge clusters via cosine similarity; realms auto-split via k-means when they grow too large
 - **TurboQuant Compression** — Near-optimal vector quantization ([arXiv:2504.19874](https://arxiv.org/abs/2504.19874)): 3.5-bit → 7.6x compression with ~0.90 cosine similarity at 768d
+- **File Watching** — Real-time directory monitoring with `notify`; debounced at 500ms, SHA-256 dedup, auto-reingest on change, persistent watch configs
 - **Slumber Mode** — Background maintenance with cron + idle triggers: deduplicate, compress, re-cluster, split/merge realms, prune stale memories, write MEMEX8.md files
 - **Augment, Don't Replace** — Writes `MEMEX8.md` back to project directories for model context pickup
 
@@ -69,6 +71,37 @@ When `memex8 serve` is running, open **http://localhost:8080** in your browser.
 
 No build step needed — the web UI is embedded in the binary.
 
+### File Watching
+
+memex8 can watch directories for changes and automatically re-ingest modified files. Powered by the `notify` crate, it debounces events at 500ms and uses SHA-256 comparison to skip files that haven't actually changed.
+
+```bash
+# Add a directory to watch
+memex8 watch add /home/user/projects
+
+# With options
+memex8 watch add /home/user/notes --chunk-by file --realm-hint personal
+
+# List active watches
+memex8 watch list
+
+# Remove a watch
+memex8 watch remove /home/user/notes
+
+# Ingest + watch in one command
+memex8 ingest /home/user/docs --watch
+```
+
+**How it works:**
+1. On add, memex8 scans all `.md` files and records SHA-256 hashes
+2. The `notify` crate watches for filesystem events (recursive)
+3. Events are debounced at 500ms — rapid saves don't trigger multiple ingests
+4. Before re-ingesting, the file is re-hashed; unchanged files are skipped
+5. Watch configs persist to `config.toml` automatically
+6. In `memex8 daemon` mode, all configured watchers start automatically
+
+**Watched directories stay in sync:** edit a file in your editor → memex8 detects the change → re-chunks, re-embeds, and updates the memory — all without running `memex8 ingest` again.
+
 ### CLI
 ```bash
 $ memex8 --help
@@ -78,20 +111,20 @@ Commands:
   init           Interactive setup wizard
   config-show    Show current configuration
   ingest         Ingest a .md file or directory
-  watch          Add a directory to the persistent watch list
+  watch          Manage persistent file watchers (add, list, remove)
   search         Semantic search across all memories
   get            Get a specific memory by ID
   recall         Get highest-importance memories (wakeup context)
-  realms         Manage knowledge realms
+  realms         Manage knowledge realms (list, create, show, merge, split)
   upvote         Upvote a memory (increase importance)
   prune          Show prune review queue
   archive        Archive a memory
   delete         Permanently delete a memory
   edit           Edit a memory in $EDITOR
-  slumber        Slumber management
+  slumber        Slumber management (status, trigger, pause, resume)
   serve          Start REST API + WebSocket server
-  mcp            Start MCP server
-  daemon         Start background daemon (cron + idle scheduler)
+  mcp            Start MCP server (stdio or SSE transport)
+  daemon         Start background daemon (cron + idle scheduler + file watchers)
   integration    Generate integration configuration
   stats          Show system statistics
   export         Export all memories as JSON
@@ -132,7 +165,17 @@ For stdio MCP with Claude Code/Opencode, or CLI commands:
 
 ```bash
 cargo build --release
-./scripts/setup-docker.sh  # helper script for Docker setup
+```
+
+### 5. Set up file watching (optional)
+```bash
+# Add your project directories
+memex8 watch add /home/user/projects --realm-hint projects
+memex8 watch add /home/user/notes --realm-hint personal
+
+# Or run the daemon for continuous background processing
+memex8 daemon
+# The daemon runs the slumber scheduler AND starts all configured file watchers
 ```
 
 ## Configuration
@@ -153,6 +196,13 @@ model = "text-embedding-3-small"
 idle_timeout = "10m"
 quantize_bit_width = 3.5      # TurboQuant bit-width (2.5-4)
 auto_archive_days = 90
+
+# Watch configs are added automatically via `memex8 watch add`
+[[watch]]
+path = "/home/user/projects"
+chunk_by = "section"
+poll_interval = "5m"
+realm_hint = "projects"
 ```
 
 ## Integrations
@@ -383,6 +433,7 @@ memex8/
 │   │   ├── embedder.rs      # Embedding abstraction
 │   │   ├── chunker.rs       # AST-based markdown chunking (pulldown-cmark)
 │   │   ├── ingester.rs      # File/directory ingestion
+│   │   ├── watcher.rs       # File watcher (notify crate, SHA-256 dedup)
 │   │   ├── realms.rs        # Realm management
 │   │   ├── slumber.rs       # Background maintenance pipeline
 │   │   ├── scheduler.rs     # Cron + idle trigger daemon
@@ -418,6 +469,13 @@ memex8/
 ```
 .md file → Chunker (pulldown-cmark AST) → Embedder (Ollama/OpenAI) →
 Realm Assignment (cosine similarity vs centroids) → Qdrant Store
+```
+
+### File Watcher Pipeline
+```
+Directory watch (notify crate) → File modified event →
+500ms debounce → SHA-256 hash compare → (skip if unchanged) →
+Re-chunk → Re-embed → Auto-realm → Update in Qdrant
 ```
 
 ### Chunker Strategies

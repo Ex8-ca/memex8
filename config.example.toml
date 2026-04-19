@@ -57,3 +57,17 @@ update_on_slumber = true
 [web]
 enabled = true
 theme = "dark"
+
+# [[watch]] — Persistent file watchers (added via `memex8 watch add /path`)
+# Uncomment and customize, or use the CLI to add watches dynamically.
+#
+# [[watch]]
+# path = "/home/user/projects"
+# chunk_by = "section"       # "section" | "paragraph" | "file"
+# poll_interval = "5m"
+# realm_hint = "projects"     # Optional: hint for realm assignment
+#
+# [[watch]]
+# path = "/home/user/notes"
+# chunk_by = "file"
+# poll_interval = "10m"

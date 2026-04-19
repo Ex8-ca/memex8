@@ -11,9 +11,12 @@ pub mod realms;
 pub mod scheduler;
 pub mod search;
 pub mod slumber;
+pub mod watcher;
 
 use crate::config::AppConfig;
 use crate::storage::qdrant::{MemoryPoint, MemoryWithVector, QdrantStore};
+pub use crate::engine::ingester::RawChunk;
+pub use crate::engine::watcher::{FileChangeEvent, FileWatcher};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -61,6 +64,10 @@ pub struct Engine {
     embed_model: String,
     embed_dimensions: u32,
     openai_key: Option<String>,
+    /// File watcher (initialized on first use).
+    file_watcher: Arc<RwLock<Option<FileWatcher>>>,
+    /// Path to the config file (for persisting watch configs).
+    config_path: String,
 }
 
 struct SlumberState {
@@ -121,6 +128,8 @@ impl Engine {
             embed_model: model,
             embed_dimensions: dimensions,
             openai_key,
+            file_watcher: Arc::new(RwLock::new(None)),
+            config_path: "config.toml".to_string(),
         })
     }
 
@@ -240,8 +249,7 @@ impl Engine {
 
     pub async fn watch_path(&self, path: &str) -> anyhow::Result<()> {
         tracing::info!("Watching path: {}", path);
-        // TODO: implement file watcher with notify crate
-        Ok(())
+        self.watch_add(path, "5m", None, "section").await
     }
 
     pub async fn watch_add(
@@ -251,19 +259,170 @@ impl Engine {
         realm_hint: Option<&str>,
         chunk_by: &str,
     ) -> anyhow::Result<()> {
-        // TODO: persist watch config
-        tracing::info!("Added watch: {} (poll: {}, chunk: {})", path, poll_interval, chunk_by);
+        let config = crate::config::WatchConfig {
+            path: path.to_string(),
+            chunk_by: chunk_by.to_string(),
+            poll_interval: poll_interval.to_string(),
+            realm_hint: realm_hint.map(|s| s.to_string()),
+        };
+
+        let mut fw_guard = self.file_watcher.write().await;
+        if fw_guard.is_none() {
+            let (watcher, _rx) = FileWatcher::new();
+            watcher.start(self.config.watch.clone()).await?;
+            *fw_guard = Some(watcher);
+        }
+        let watcher = fw_guard.as_ref().unwrap();
+        watcher.add_watch(config).await?;
+        watcher.persist_watches(&self.config_path).await?;
         Ok(())
     }
 
     pub async fn watch_list(&self) -> anyhow::Result<()> {
-        // TODO: list persisted watches
-        println!("No watches configured yet.");
+        let fw_guard = self.file_watcher.read().await;
+        if let Some(ref watcher) = *fw_guard {
+            let watches = watcher.list_watches().await;
+            if watches.is_empty() {
+                println!("No active watches.");
+            } else {
+                println!("👁️  Active watched directories ({}):", watches.len());
+                println!();
+                for (path, chunk, hint, poll) in &watches {
+                    println!("  📂 {}", path);
+                    println!("     chunk: {} | poll: {} | realm: {}", chunk, poll, hint.as_deref().unwrap_or("auto"));
+                    println!();
+                }
+            }
+        } else if self.config.watch.is_empty() {
+            println!("No watches configured.");
+        } else {
+            println!("👁️  Configured watches ({}):", self.config.watch.len());
+            println!();
+            for w in &self.config.watch {
+                println!("  📂 {}", w.path);
+                println!("     chunk: {} | poll: {} | realm: {}", w.chunk_by, w.poll_interval, w.realm_hint.as_deref().unwrap_or("auto"));
+                println!();
+            }
+        }
         Ok(())
     }
 
     pub async fn watch_remove(&self, path: &str) -> anyhow::Result<()> {
-        // TODO: remove persisted watch
+        let mut fw_guard = self.file_watcher.write().await;
+        if let Some(ref watcher) = *fw_guard {
+            watcher.remove_watch(path).await?;
+            watcher.persist_watches(&self.config_path).await?;
+        }
+        // Remove from the in-memory config watch list
+        let path_normalized = std::path::PathBuf::from(path)
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from(path));
+        let mut cfg = self.config.clone();
+        cfg.watch.retain(|w| {
+            let wp = std::path::PathBuf::from(&w.path);
+            wp.canonicalize().unwrap_or(wp) != path_normalized
+        });
+        Ok(())
+    }
+
+    /// Start all configured file watchers and return a receiver for change events.
+    /// The caller should spawn a task to process FileChangeEvents.
+    pub async fn start_watchers(&self) -> anyhow::Result<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<FileChangeEvent>>>> {
+        if self.config.watch.is_empty() {
+            tracing::info!("No file watches configured.");
+            return Ok(None);
+        }
+
+        let mut fw_guard = self.file_watcher.write().await;
+        let (watcher, event_rx) = FileWatcher::new();
+        watcher.start(self.config.watch.clone()).await?;
+        *fw_guard = Some(watcher);
+
+        // Return a transformed receiver: raw paths → change events
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<FileChangeEvent>>();
+        let watcher_ref = self.file_watcher.clone();
+        tokio::spawn(async move {
+            let mut rx = event_rx;
+            while let Some(path) = rx.recv().await {
+                if let Some(w) = watcher_ref.read().await.as_ref() {
+                    let events = w.check_changes(&[path]).await;
+                    if !events.is_empty() {
+                        let _ = tx.send(events);
+                    }
+                }
+            }
+        });
+
+        tracing::info!("✅ Started {} file watchers", self.config.watch.len());
+        Ok(Some(rx))
+    }
+
+    /// Re-ingest a changed file (used by the daemon's watcher event handler).
+    async fn reingest_changed_file(
+        &self,
+        path: &std::path::Path,
+        chunk_by: &str,
+        realm_hint: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let ingester = ingester::Ingester::new(self.config.clone());
+        let chunks = ingester.ingest_path(&path.to_string_lossy(), chunk_by).await?;
+
+        let embedder = self.make_embedder()?;
+        let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
+        let vectors = embedder.embed_batch(&texts).await?;
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            let id = uuid::Uuid::new_v4().to_string();
+            let vector = vectors.get(i).cloned().unwrap_or_default();
+
+            let realm_id = if let Some(hint) = realm_hint {
+                self.store.find_realm_by_name(hint).await?.map(|r| r.id)
+            } else {
+                None
+            };
+
+            let realm_id = match realm_id {
+                Some(rid) => rid,
+                None => self.auto_assign_realm(&vector).await?,
+            };
+
+            let realm = self.store.get_realm(&realm_id).await?;
+            let realm_name = realm.map(|r| r.name.clone()).unwrap_or_default();
+
+            self.store.store_memory(
+                &id, &vector, &chunk.content, chunk.heading.as_deref(),
+                Some(chunk.source_file.as_str()), &realm_id, &realm_name,
+                &chunk.source_hash, &chunk.chunk_type,
+            ).await?;
+        }
+
+        tracing::info!("  ✅ Re-ingested {} chunks from {}", chunks.len(), path.display());
+        Ok(())
+    }
+
+    /// Process file change events (for use by the daemon).
+    pub async fn handle_watch_events(
+        &self,
+        mut event_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<FileChangeEvent>>,
+    ) -> anyhow::Result<()> {
+        while let Some(events) = event_rx.recv().await {
+            for event in events {
+                match event {
+                    FileChangeEvent::Modified { path, watch_config, .. }
+                    | FileChangeEvent::Created { path, watch_config, .. } => {
+                        let chunk_by = watch_config.chunk_by;
+                        let realm_hint = watch_config.realm_hint;
+                        if let Err(e) = self.reingest_changed_file(&path, &chunk_by, realm_hint.as_deref()).await {
+                            tracing::error!("Failed to re-ingest {}: {}", path.display(), e);
+                        }
+                    }
+                    FileChangeEvent::Deleted { path, .. } => {
+                        tracing::info!("🗑️  File deleted from watch: {}", path.display());
+                        // TODO: Optionally delete corresponding memories
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -665,6 +824,26 @@ impl Engine {
 
         tracing::info!("Imported {} memories from {}", count, path);
         Ok(count)
+    }
+
+    /// Return the config file path.
+    pub fn config_path(&self) -> &str {
+        &self.config_path
+    }
+
+    /// Set the config file path (call after loading from a specific path).
+    pub fn set_config_path(&mut self, path: &str) {
+        self.config_path = path.to_string();
+    }
+
+    /// Get a clone of the config.
+    pub fn config(&self) -> AppConfig {
+        self.config.clone()
+    }
+
+    /// Get the store reference.
+    pub fn store(&self) -> &QdrantStore {
+        &self.store
     }
 }
 

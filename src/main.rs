@@ -269,14 +269,16 @@ async fn main() -> anyhow::Result<()> {
             realm_hint,
             watch,
         } => {
-            let engine = engine::Engine::new(config).await?;
+            let mut engine = engine::Engine::new(config).await?;
+            engine.set_config_path(&cli.config);
             engine.ingest_path(&path, &chunk_by, realm_hint.as_deref()).await?;
             if watch {
                 engine.watch_path(&path).await?;
             }
         }
         Commands::Watch { action } => {
-            let engine = engine::Engine::new(config).await?;
+            let mut engine = engine::Engine::new(config).await?;
+            engine.set_config_path(&cli.config);
             match action {
                 WatchActions::Add {
                     path,
@@ -461,8 +463,26 @@ async fn main() -> anyhow::Result<()> {
             let scheduler = engine::scheduler::Scheduler::new(engine.clone(), config.clone());
             let activity_handle = engine.activity_handle();
 
+            // Start file watchers if configured
+            let watch_handle = {
+                let engine = engine.clone();
+                let watch_rx = engine.start_watchers().await?;
+                watch_rx.map(|rx| {
+                    tokio::spawn(async move {
+                        if let Err(e) = engine.handle_watch_events(rx).await {
+                            tracing::error!("File watcher event handler error: {}", e);
+                        }
+                    })
+                })
+            };
+
             // Run the scheduler loop (blocks until shutdown)
             scheduler.run().await?;
+
+            // Cancel watch handler on shutdown
+            if let Some(handle) = watch_handle {
+                handle.abort();
+            }
         }
         Commands::Integration { platform } => {
             let base_url = std::env::var("MEMEX8_URL")

@@ -1,73 +1,175 @@
-# memex8 Plugin for Hermes-Agent
+# memex8 Memory Plugin for Hermes Agent
 
-Self-hosted memory for Hermes using [memex8](https://github.com/marcus20232023/memex8) — Qdrant vector storage with TurboQuant compression and auto-discovered knowledge realms.
+> Persistent vector memory with semantic search, auto-organizing knowledge realms, and TurboQuant compression.
 
-## Installation
+## Overview
 
-### 1. Copy the plugin to Hermes
+This plugin replaces Hermes' built-in flat-file memory (MEMORY.md / USER.md) with memex8 — a self-hosted vector database that gives your agent deep, semantic recall across all past conversations and ingested documents.
 
-The plugin must go in Hermes' `plugins/memory/` directory (inside the Hermes source tree):
+### Why memex8 over the built-in memory?
+
+| Feature | Built-in (MEMORY.md) | memex8 |
+|---------|---------------------|--------|
+| Capacity | ~2,200 chars (hard limit) | Unlimited (vector store) |
+| Search | None (linear scan) | Semantic vector search |
+| Organization | Two buckets (memory/user) | Auto-discovered knowledge realms |
+| Dedup | None | SHA-256 + vector similarity |
+| External data | No | Ingest projects, Obsidian, email |
+| Persistence | Single file | Qdrant vector database |
+
+## Prerequisites
+
+1. **memex8 running** — Docker compose or local binary
+2. **Qdrant** — Vector database (included in memex8 docker-compose)
+3. **Embedding provider** — Ollama (local) or OpenAI (cloud)
+
+## Quick Setup
+
+### 1. Start memex8
 
 ```bash
-# Find where Hermes is installed
-find ~ -name "hermes" -type f 2>/dev/null | head -5
-# Or check your clone location
-ls ~/hermes-agent/plugins/memory/ 2>/dev/null
-
-# Copy the plugin
-cp -r ~/memex8/plugins/memex8 /path/to/hermes-agent/plugins/memory/
+cd ~/memex8
+docker compose up -d
+# Verify:
+curl http://localhost:8080/health
 ```
 
-### 2. Activate in config
+### 2. Install the plugin
 
-Add to `~/.hermes/config.yaml`:
+```bash
+# Copy to Hermes bundled plugins (in the hermes-agent source tree):
+cp -r ~/memex8/plugins/memex8 /path/to/hermes-agent/plugins/memory/
+
+# Or to user plugins (preferred for dev):
+cp -r ~/memex8/plugins/memex8 ~/.hermes/plugins/
+```
+
+### 3. Activate in Hermes
+
+```bash
+hermes memory setup
+# → Select "memex8"
+# → Enter memex8 URL (default: http://localhost:8080)
+# → Enter API key
+```
+
+Or edit `~/.hermes/config.yaml` directly:
 
 ```yaml
 memory:
-  provider: memex8
+  provider: "memex8"
+  memory_enabled: true
 ```
 
-### 3. Set environment variables
+And set environment variables:
 
 ```bash
-export MEMEX8_API_KEY=your-api-key
-export MEMEX8_BASE_URL=http://localhost:8080  # optional
+# In ~/.hermes/.env:
+MEMEX8_BASE_URL=http://localhost:8080
+MEMEX8_API_KEY=your-key-here
 ```
 
 ### 4. Restart Hermes
 
-Hermes will discover the plugin and show it in memory provider settings.
+New sessions will use memex8 for memory.
 
-## Available Tools
+## Configuration
+
+### Config file: `~/.hermes/memex8.json`
+
+```json
+{
+  "base_url": "http://localhost:8080",
+  "api_key": "your-key",
+  "auto_recall": true,
+  "auto_sync": true,
+  "recall_top_k": 8,
+  "recall_min_score": 0.3,
+  "timeout": 10.0
+}
+```
+
+### Environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `MEMEX8_BASE_URL` | memex8 REST API URL (default: `http://localhost:8080`) |
+| `MEMEX8_API_KEY` | Authentication token (required) |
+
+### Config precedence
+
+1. **Environment variables** — highest priority (overrides everything)
+2. **`~/.hermes/memex8.json`** — persistent config from `hermes memory setup`
+3. **Hardcoded defaults** — fallback
+
+## MCP Tools Provided
 
 | Tool | Description |
 |------|-------------|
 | `memex8_search` | Semantic search across all memories |
-| `memex8_recall` | Get high-importance memories (session context) |
-| `memex8_remember` | Store a fact for future sessions |
+| `memex8_remember` | Store a new memory fact |
+| `memex8_recall` | Get high-importance memories (wakeup context) |
+| `memex8_realms` | List all knowledge realms |
 | `memex8_forget` | Delete a memory by ID |
-| `memex8_realms` | List knowledge realms with counts |
+| `memex8_get` | Get a specific memory by ID |
 
 ## How It Works
 
 ```
 Hermes Agent
   │
-  ├─→ memex8_remember  → POST /api/v1/memories
-  ├─→ memex8_search    → POST /api/v1/memories/search
-  ├─→ memex8_recall    → GET  /api/v1/memories/recall
-  ├─→ sync_turn        → auto-store conversations
-  └─→ queue_prefetch   → preload recall for next turn
+  │  memory provider → memex8 plugin
+  │
+  ├── initialize()     → health check, create HTTP client
+  ├── prefetch()       → return cached background recall results
+  ├── queue_prefetch() → launch async recall before next turn
+  ├── sync_turn()      → auto-save conversation turns
+  ├── memex8_search    → POST /api/v1/memories/search
+  ├── memex8_remember  → POST /api/v1/memories
+  ├── memex8_recall    → GET  /api/v1/memories/recall
+  ├── on_session_end() → POST /api/v1/webhooks/conversation
+  └── on_memory_write()→ mirror built-in memory writes
         │
         ▼
-  memex8 (Docker: localhost:8080)
-        │
-        ├─→ Embed (OpenAI/Ollama)
-        ├─→ Auto-assign realm
-        └─→ Store in Qdrant
+  memex8 Engine
+  (chunk → embed → realm → Qdrant store)
 ```
 
-## Prerequisites
+### Automatic behaviors
 
-- [memex8](https://github.com/marcus20232023/memex8) running in Docker (`docker compose up -d`)
-- Hermes-Agent with plugin support
+- **Auto-recall**: Before each turn, relevant memories are fetched in the background and injected as context
+- **Auto-sync**: Conversation turns are stored as memories (skips trivial replies like "ok", "thanks")
+- **Session-end**: Full conversation summary is sent via webhook at session close
+- **Memory mirroring**: When you use Hermes' built-in `memory` tool (add/replace/remove), memex8 stores a copy too
+- **Circuit breaker**: After 5 consecutive failures, API calls pause for 2 minutes to avoid hammering a down server
+
+## Troubleshooting
+
+### "memex8 plugin not found"
+```bash
+# Check bundled plugins
+ls /path/to/hermes-agent/plugins/memory/memex8/__init__.py
+
+# Or check user plugins
+ls ~/.hermes/plugins/memex8/__init__.py
+```
+
+### "Connection refused"
+memex8 isn't running:
+```bash
+cd ~/memex8 && docker compose ps
+```
+
+### "Unauthorized"
+Check your API key:
+```bash
+curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
+  http://localhost:8080/health
+```
+
+### Memories not being recalled
+Check memex8 has data:
+```bash
+memex8 stats
+memex8 search "your query"
+```
