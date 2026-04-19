@@ -22,6 +22,9 @@ clap = { version = "4", features = ["derive", "env"] }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
+# Lazy static for web config injection
+once_cell = "1"
+
 # HTTP types (to avoid axum version conflicts)
 http = "1"
 

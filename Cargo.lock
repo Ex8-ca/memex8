@@ -1485,6 +1485,7 @@ dependencies = [
  "include_dir",
  "ndarray",
  "notify",
+ "once_cell",
  "predicates",
  "pulldown-cmark",
  "qdrant-client",

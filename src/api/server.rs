@@ -12,9 +12,12 @@ pub struct AppState {
 
 pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()> {
     let engine = Arc::new(Engine::new(config.clone()).await?);
-    let state = Arc::new(AppState { engine, config });
+    let state = Arc::new(AppState { engine, config: config.clone() });
 
-    let has_key = state.config.api_key().is_some();
+    // Inject the API key into the web UI at serve time
+    crate::web::init(config.api_key());
+
+    let has_key = config.api_key().is_some();
     if has_key {
         tracing::info!("🔐 API authentication enabled");
     } else {
