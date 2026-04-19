@@ -70,8 +70,23 @@
 ```bash
 git clone https://github.com/marcus20232023/memex8.git
 cd memex8
-cp .env.example .env
-nano .env  # Set your OPENAI_API_KEY and change MEMEX8_API_KEY
+cp .env.example .env  # only needed for local binary runs (optional)
+```
+
+### 2. Configure the API key
+
+All runtime config comes from **`~/.hermes/.env`** (the same file Hermes Agent uses):
+
+```bash
+nano ~/.hermes/.env
+```
+
+Add or update these values:
+
+```bash
+MEMEX8_API_KEY=your-key-here
+MEMEX8_BASE_URL=http://localhost:8080
+OPENAI_API_KEY=your-openai-key-here
 ```
 
 > **Security**: Change `MEMEX8_API_KEY` from the default `memex8-dev-key` to a random string.
@@ -116,7 +131,7 @@ cargo run --release -- doctor
 http://localhost:8080
 ```
 
-Enter your `MEMEX8_API_KEY` when prompted (it's saved in localStorage).
+The API key from `~/.hermes/.env` is automatically injected — no login needed.
 
 ---
 
@@ -147,7 +162,7 @@ MEMEX8_API_KEY=your-key-here
 MEMEX8_BASE_URL=http://localhost:8080
 ```
 
-> **Important**: Use the **same `MEMEX8_API_KEY`** that you set in the memex8 `.env` file. If the keys don't match, the plugin won't be able to authenticate with memex8.
+> **Important**: Use the **same `MEMEX8_API_KEY`** that you set in `~/.hermes/.env`. The Docker container reads this file directly at startup.
 
 ### Step 3: Activate the plugin
 
@@ -293,11 +308,12 @@ memex8 ingest /home/user/docs --watch
 
 ## Configuration
 
-### Environment variables (`.env`)
+### Environment variables (`~/.hermes/.env`)
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `MEMEX8_API_KEY` | Auth token for REST/MCP | `memex8-dev-key` |
+| `MEMEX8_BASE_URL` | memex8 REST API URL | `http://localhost:8080` |
+| `MEMEX8_API_KEY` | Auth token for REST/MCP and web UI | *(none — required for production)* |
 | `OPENAI_API_KEY` | OpenAI embeddings API key | *(empty)* |
 | `EMBEDDING_PROVIDER` | `openai` or `ollama` | `openai` |
 | `EMBEDDING_MODEL` | Model name | `text-embedding-3-small` |
