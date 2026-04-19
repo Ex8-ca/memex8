@@ -30,9 +30,9 @@ services:
     environment:
       - MEMEX8_API_KEY=${MEMEX8_API_KEY:-memex8-dev-key}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-ollama}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
-      - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-768}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-openai}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
+      - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-1536}
       - QDRANT_URL=http://qdrant:6334
       - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
       - RUST_LOG=info
@@ -41,7 +41,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # Local embeddings via Ollama (started by default — no OpenAI key needed)
+  # Optional: local embeddings via Ollama
   ollama:
     image: ollama/ollama:latest
     ports:
@@ -56,6 +56,8 @@ services:
     #         - driver: nvidia
     #           count: 1
     #           capabilities: [gpu]
+    profiles:
+      - local-embeddings
     restart: unless-stopped
 
 volumes:

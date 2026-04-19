@@ -142,9 +142,7 @@ Commands:
 git clone https://github.com/marcus20232023/memex8.git
 cd memex8
 cp .env.example .env
-# Edit .env — defaults use Ollama (local, no API key needed)
-# If you prefer OpenAI embeddings, set EMBEDDING_PROVIDER=openai
-# and add your OPENAI_API_KEY
+# Edit .env and set your OPENAI_API_KEY
 nano .env
 ```
 
