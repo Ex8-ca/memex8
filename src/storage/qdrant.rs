@@ -466,7 +466,7 @@ impl QdrantStore {
     }
 
     /// Scroll all memories WITH their embedding vectors.
-    /// Used by slumber for TurboQuant compression.
+    /// Used by slumber for ScalarQuant compression.
     pub async fn scroll_all_memories_with_vectors(&self) -> anyhow::Result<Vec<MemoryWithVector>> {
         let raw = self.scroll_memories_internal(true).await?;
         Ok(raw.into_iter().filter_map(|m| {

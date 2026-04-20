@@ -10,7 +10,7 @@ mod web;
 
 #[derive(Parser)]
 #[command(name = "memex8")]
-#[command(about = "Self-hosted AI memory system with Qdrant and TurboQuant")]
+#[command(about = "Self-hosted AI memory system with Qdrant and ScalarQuant compression")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]

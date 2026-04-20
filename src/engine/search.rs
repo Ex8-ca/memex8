@@ -23,7 +23,7 @@ impl SearchEngine {
         Ok(vec![])
     }
 
-    /// Fast search on quantized vectors using TurboQuant-compressed representations
+    /// Fast search on quantized vectors using ScalarQuant-compressed representations
     pub async fn search_quantized(
         query_vector: &[f32],
         limit: usize,

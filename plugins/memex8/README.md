@@ -1,6 +1,6 @@
 # memex8 Memory Plugin for Hermes Agent
 
-> Persistent vector memory with semantic search, auto-organizing knowledge realms, and TurboQuant compression.
+> Persistent vector memory with semantic search, auto-organizing knowledge realms, and ScalarQuant compression.
 
 ## Overview
 

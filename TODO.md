@@ -4,7 +4,7 @@
 
 ## 🔴 High Priority
 
-### 1. TurboQuant: Real Compression Pipeline
+### 1. ScalarQuant: Real Compression Pipeline
 - [x] **Store vectors in Qdrant** — `scroll_all_memories_with_vectors()` fetches vectors from Qdrant
   - File: `src/storage/qdrant.rs` — `extract_vector()` handles dense/sparse/multi-vector extraction
   - Slumber now compresses real vectors, not placeholders
@@ -75,7 +75,7 @@
 - [ ] Chunker tests (section, paragraph, file strategies with real markdown)
 - [ ] Integration tests with Qdrant testcontainer
 - [ ] API integration tests
-- [ ] TurboQuant benchmarks at 768d (the actual embedding dimension)
+- [ ] ScalarQuant benchmarks at 768d (the actual embedding dimension)
 
 ### 12. Production
 - [ ] GitHub Actions CI (build, test, clippy)
@@ -116,18 +116,16 @@
 - [x] Integration generators (Hermes MCP config, OpenClaw webhooks, pi.dev extension)
 - [x] Doctor diagnostics (Qdrant, Ollama/OpenAI, config)
 
-### TurboQuant
-- [x] Lloyd-Max codebook (Beta distribution, 50K samples, 50 iterations)
-- [x] Random orthogonal rotation (QR via Gram-Schmidt)
+### ScalarQuant
+- [x] Adaptive scalar quantization (normalize → per-coordinate min/max range → uniform quantization → bit-pack)
 - [x] Round-trip quantize/dequantize with quality reporting
-- [x] 11 passing tests (including 768d benchmark, bit-packing, compression ratio)
 - [x] Binary bit-packing: 768d @ 3.5-bit = 384 bytes packed (7.6x compression)
 - [x] Vectors stored in Qdrant, fetched by slumber for real compression
 - [x] **768d benchmark results**: 2.0→0.79, 2.5→0.81, 3.0→0.81, 3.5→0.90, 4.0→0.93
 
 ### Slumber Engine
 - [x] Phase 1: Deduplication (hash-based)
-- [x] Phase 2: TurboQuant compression (quality gated, real vectors from Qdrant)
+- [x] Phase 2: ScalarQuant compression (quality gated, real vectors from Qdrant)
 - [x] Phase 3: Realm re-clustering (count updates + centroid recomputation from real vectors)
 - [x] Phase 3b: Realm split (k-means k=2, respects user-pinned, min cluster size 5)
 - [x] Phase 4: Prune flagging (age × importance × access scoring)

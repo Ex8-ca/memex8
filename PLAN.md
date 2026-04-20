@@ -5,7 +5,7 @@
 
 ## Vision
 
-A self-hosted, Rust-based memory system that gives AI agents persistent, searchable, self-organizing knowledge. Agents ingest context, memories auto-organize into realms, and a background "slumber" process compresses, summarizes, and prunes — all powered by Qdrant vector storage and TurboQuant compression.
+A self-hosted, Rust-based memory system that gives AI agents persistent, searchable, self-organizing knowledge. Agents ingest context, memories auto-organize into realms, and a background "slumber" process compresses, summarizes, and prunes — all powered by Qdrant vector storage and ScalarQuant compression.
 
 ## Architecture Layers
 
@@ -43,7 +43,7 @@ A self-hosted, Rust-based memory system that gives AI agents persistent, searcha
 | Integration | MCP protocol | Universal — Hermes, OpenClaw, pi.dev all support MCP |
 | Chunking | H2 sections by default | Preserves semantic context, configurable |
 | Realm assignment | Cosine similarity threshold | Simple, effective, no training needed |
-| Compression | TurboQuant (arXiv:2504.19874) | 2.5-3.5 bits/channel, near-zero quality loss |
+| Compression | ScalarQuant (adaptive per-vector range) | 2.5-3.5 bits/channel, near-zero quality loss |
 | Memory importance | upvotes × recency × access_count | Combines explicit + implicit signals |
 | Tracing | stderr for MCP compatibility | stdout must be clean JSON-RPC |
 
@@ -58,7 +58,7 @@ A self-hosted, Rust-based memory system that gives AI agents persistent, searcha
 - **Engine**: 20+ methods (search, store, ingest, recall, realms CRUD, merge, upvote, prune, archive, edit, import/export)
 - **REST API**: Axum 0.8, 18 routes, CORS, auth middleware, WebSocket scaffold
 - **MCP Server**: JSON-RPC 2.0 stdio, 11 tools, graceful Qdrant fallback, SSE transport scaffold
-- **TurboQuant**: Lloyd-Max codebook, QR rotation, bit-packing, 11 passing tests, 768d benchmark
+- **ScalarQuant**: Adaptive scalar quantization, per-vector range, bit-packing, 8 passing tests, 768d benchmark
 - **Slumber Engine**: Dedup, compression, realm re-clustering, k-means split, prune flagging, MEMEX8.md write-back
 - **Scheduler**: Cron parsing, idle detection, `memex8 daemon` command
 - **Integrations**: Config generators for Hermes, OpenClaw, pi.dev + setup script
@@ -263,13 +263,12 @@ score = importance × recency × (1 + access_count × 0.05)
 where recency = 1 / (1 + days_since_access × 0.1)
 ```
 
-### TurboQuant (from arXiv:2504.19874)
+### ScalarQuant (Adaptive Scalar Vector Quantization)
 ```
 1. Normalize vector: v_norm = v / ||v||
-2. Random rotation: v_rot = R × v_norm (R is orthogonal matrix)
-3. For each dimension i:
-    index_i = nearest_codebook_index(v_rot[i], codebook)
-4. Store: (norm, rotation_seed, indices) → ~3 bits per dimension
+2. Find per-coordinate min/max over actual vector values
+3. Uniform quantization within that range → pack bits
+4. Store: (norm, min, max, packed_indices) → ~3 bits per dimension
 ```
 
 ---
@@ -335,7 +334,7 @@ memex8/ (45 Rust files, ~4500 LOC)
 │   │   │   ├── mod.rs
 │   │   │   ├── ollama.rs        # Ollama /api/embed (Phase 2.1 target)
 │   │   │   └── openai.rs
-│   │   ├── quantizer.rs         # TurboQuant (Phase 2.2 target)
+│   │   ├── quantizer.rs         # ScalarQuant (Phase 2.2 target)
 │   │   ├── realms.rs
 │   │   ├── scheduler.rs         # Cron + idle detection
 │   │   ├── search.rs

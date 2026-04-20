@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::engine::quantizer::TurboQuantizer;
+use crate::engine::quantizer::AdaptiveScalarQuantizer;
 use crate::storage::qdrant::{MemoryPoint, QdrantStore};
 use serde::{Deserialize, Serialize};
 
@@ -33,9 +33,9 @@ impl SlumberEngine {
         report.memories_scanned = all.len();
         report.deduplicated = self.deduplicate().await?;
 
-        // Phase 2: TurboQuant compression
-        tracing::info!("💤 Slumber phase 2: TurboQuant compression");
-        report.quantized = self.turboquant_compress().await?;
+        // Phase 2: ScalarQuant compression
+        tracing::info!("💤 Slumber phase 2: ScalarQuant compression");
+        report.quantized = self.scalarquant_compress().await?;
 
         // Phase 3: Re-cluster realms (update counts, check merges)
         tracing::info!("💤 Slumber phase 3: Re-cluster realms");
@@ -103,10 +103,10 @@ impl SlumberEngine {
         Ok(removed)
     }
 
-    // ─── Phase 2: TurboQuant Compression ─────────────────────────────────────
+    // ─── Phase 2: ScalarQuant Compression ─────────────────────────────────────
 
-    /// Compress all memories using TurboQuant and store in the quantized collection.
-    async fn turboquant_compress(&self) -> anyhow::Result<usize> {
+    /// Compress all memories using ScalarQuant and store in the quantized collection.
+    async fn scalarquant_compress(&self) -> anyhow::Result<usize> {
         let all = self.store.scroll_all_memories_with_vectors().await?;
         let bit_width = self.config.slumber.quantize_bit_width;
 
@@ -118,7 +118,7 @@ impl SlumberEngine {
         // Get dimensions from actual vectors (not config, which may have stale defaults)
         let dims = all[0].vector.len();
 
-        let quantizer = TurboQuantizer::new(dims, bit_width);
+        let quantizer = AdaptiveScalarQuantizer::new(dims, bit_width);
         let mut quantized = 0;
         let mut total_cosine = 0.0f32;
 

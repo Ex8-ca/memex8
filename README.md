@@ -1,6 +1,6 @@
 # memex8 — Self-Hosted AI Memory System
 
-> A Rust-based memory palace for AI agents. Ingest your notes, documents, and skills into organized knowledge realms. Powered by Qdrant vector storage, TurboQuant compression, auto-discovered semantic clusters, and real-time file watching.
+> A Rust-based memory palace for AI agents. Ingest your notes, documents, and skills into organized knowledge realms. Powered by Qdrant vector storage, ScalarQuant compression, auto-discovered semantic clusters, and real-time file watching.
 
 [![Rust](https://img.shields.io/badge/Rust-1.94+-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -30,7 +30,7 @@
 │                    Qdrant Storage                        │
 │  ┌──────────┐  ┌──────────┐  ┌───────────────────────┐  │
 │  │ memories │  │  realms  │  │ memories_quantized    │  │
-│  │ (vector) │  │(centroid)│  │ (TurboQuant vectors)  │  │
+│  │ (vector) │  │(centroid)│  │ (ScalarQuant vectors)  │  │
 │  └──────────┘  └──────────┘  └───────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -40,7 +40,7 @@
 ### Core
 - **Vector Memory** — Semantic search across all memories using embeddings
 - **Auto-Discovered Realms** — Memories self-organize into knowledge clusters via cosine similarity; realms auto-split via k-means when they grow too large
-- **TurboQuant Compression** — Near-optimal vector quantization ([arXiv:2504.19874](https://arxiv.org/abs/2504.19874)): 3.5-bit → 7.6x compression with ~0.90 cosine similarity at 768d
+- **ScalarQuant Compression** — Adaptive scalar vector quantization: 3.5-bit → 7.6x compression with ~0.90 cosine similarity at 768d (inspired by [arXiv:2504.19874](https://arxiv.org/abs/2504.19874))
 - **File Watching** — Real-time directory monitoring with `notify`; debounced at 500ms, SHA-256 dedup, auto-reingest on change, persistent watch configs
 - **Slumber Mode** — Background maintenance with cron + idle triggers: deduplicate, compress, re-cluster, split/merge realms, prune stale memories, write MEMEX8.md files
 - **Augment, Don't Replace** — Writes `MEMEX8.md` back to project directories for model context pickup
@@ -346,7 +346,7 @@ api_key_env = "OPENAI_API_KEY"
 
 [slumber]
 idle_timeout = "10m"
-quantize_bit_width = 3.5     # TurboQuant bit-width (2.5-4)
+quantize_bit_width = 3.5     # ScalarQuant bit-width (2.5-4)
 auto_archive_days = 90
 ```
 
@@ -358,7 +358,7 @@ Watch configs are added automatically via `memex8 watch add`.
 
 ```bash
 $ memex8 --help
-Self-hosted AI memory system with Qdrant and TurboQuant
+Self-hosted AI memory system with Qdrant and ScalarQuant
 
 Commands:
   init           Interactive setup wizard
@@ -444,7 +444,7 @@ memex8/
 │   │   ├── realms.rs        # Realm management
 │   │   ├── slumber.rs       # Background maintenance pipeline
 │   │   ├── scheduler.rs     # Cron + idle trigger daemon
-│   │   ├── quantizer.rs     # TurboQuant compression
+│   │   ├── quantizer.rs     # ScalarQuant compression
 │   │   ├── compressor.rs    # AAAK-style summarization
 │   │   ├── search.rs        # Search orchestration
 │   │   ├── graph.rs         # Knowledge graph
@@ -510,14 +510,14 @@ All Memories → Score(importance × recency × access_count) → Sort → Top N
 ```
 Trigger (idle timeout / cron) →
   1. Deduplicate (hash-based, keep highest importance)
-  2. TurboQuant compress vectors → store in quantized collection
+  2. ScalarQuant compress vectors → store in quantized collection
   3. Recompute realm centroids from actual memory vectors
   4. Split large realms via k-means (k=2)
   5. Prune flagging (age × importance × access scoring)
   6. Update MEMEX8.md files per directory
 ```
 
-### TurboQuant Compression
+### ScalarQuant Compression
 
 Based on [arXiv:2504.19874](https://arxiv.org/abs/2504.19874): random orthogonal rotation + Lloyd-Max scalar quantization on the induced Beta distribution.
 

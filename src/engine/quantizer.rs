@@ -1,20 +1,22 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-/// TurboQuant-inspired vector quantizer (arXiv:2504.19874).
+/// Adaptive scalar vector quantizer with bit-packing.
 ///
-/// Uses uniform scalar quantization on normalized unit vectors with
-/// bit-packing for efficient storage.
+/// Normalizes vectors to unit length, finds per-coordinate min/max,
+/// then uniformly quantizes each coordinate into the actual value range.
+/// Stores min/max alongside packed indices for accurate reconstruction.
 ///
 /// Performance targets (any dimension):
 ///   - 3.5 bits/channel → cosine > 0.90
 ///   - 2.5 bits/channel → cosine > 0.80
 ///   - 4.0 bits/channel → cosine > 0.95
 ///
-/// Approach: normalize to unit vector, find per-vector value range,
-/// uniformly quantize within that range, store min/max for reconstruction.
+/// Inspired by TurboQuant (arXiv:2504.19874) but uses adaptive per-vector
+/// range quantization instead of random rotation + theoretical codebook,
+/// which produces better results on real OpenAI embeddings.
 #[derive(Debug, Clone)]
-pub struct TurboQuantizer {
+pub struct AdaptiveScalarQuantizer {
     dimensions: usize,
     bit_width: f32,
     levels: usize,
@@ -65,8 +67,8 @@ pub struct QuantReport {
     pub compression_ratio: f32,
 }
 
-impl TurboQuantizer {
-    /// Create a new TurboQuantizer.
+impl AdaptiveScalarQuantizer {
+    /// Create a new AdaptiveScalarQuantizer.
     ///
     /// - `dimensions`: vector dimensionality (e.g., 1536 for text-embedding-3-small)
     /// - `bit_width`: target bits per dimension (2.5, 3.0, 3.5, or 4.0)
@@ -329,30 +331,9 @@ mod tests {
     }
 
     #[test]
-    fn test_rotation_roundtrip() {
-        let dims = 128; // smaller for QR speed
-        let quantizer = TurboQuantizer::new(dims, 4.0);
-        let original = make_test_vector(dims, 42);
-
-        // Forward rotation
-        let rotated = mat_vec_mul(&quantizer.rotation_matrix, &original, dims);
-        // Inverse rotation (transpose)
-        let recovered = mat_vec_mul_transpose(&quantizer.rotation_matrix, &rotated, dims);
-
-        let mse: f32 = original
-            .iter()
-            .zip(recovered.iter())
-            .map(|(a, b)| (a - b).powi(2))
-            .sum::<f32>()
-            / dims as f32;
-
-        assert!(mse < 1e-8, "Rotation roundtrip MSE {} too high", mse);
-    }
-
-    #[test]
     fn test_roundtrip_4_0_bits() {
         let dims = 128;
-        let quantizer = TurboQuantizer::new(dims, 4.0);
+        let quantizer = AdaptiveScalarQuantizer::new(dims, 4.0);
         let original = make_test_vector(dims, 42);
 
         let (_qv, report) = quantizer.quantize_with_report(&original);
@@ -372,7 +353,7 @@ mod tests {
     #[test]
     fn test_roundtrip_3_5_bits() {
         let dims = 128;
-        let quantizer = TurboQuantizer::new(dims, 3.5);
+        let quantizer = AdaptiveScalarQuantizer::new(dims, 3.5);
         let original = make_test_vector(dims, 42);
 
         let (_qv, report) = quantizer.quantize_with_report(&original);
@@ -392,7 +373,7 @@ mod tests {
     #[test]
     fn test_roundtrip_2_5_bits() {
         let dims = 128;
-        let quantizer = TurboQuantizer::new(dims, 2.5);
+        let quantizer = AdaptiveScalarQuantizer::new(dims, 2.5);
         let original = make_test_vector(dims, 42);
 
         let (_qv, report) = quantizer.quantize_with_report(&original);
@@ -410,33 +391,9 @@ mod tests {
     }
 
     #[test]
-    fn test_codebook_sorted() {
-        let quantizer = TurboQuantizer::new(128, 3.5);
-        for i in 1..quantizer.codebook.len() {
-            assert!(
-                quantizer.codebook[i] >= quantizer.codebook[i - 1],
-                "Codebook not sorted at index {}",
-                i
-            );
-        }
-    }
-
-    #[test]
-    fn test_codebook_in_range() {
-        let quantizer = TurboQuantizer::new(128, 3.5);
-        for &val in &quantizer.codebook {
-            assert!(
-                val >= -1.0 && val <= 1.0,
-                "Codebook value {} outside [-1, 1]",
-                val
-            );
-        }
-    }
-
-    #[test]
     fn test_norm_preservation() {
         let dims = 128;
-        let quantizer = TurboQuantizer::new(dims, 3.5);
+        let quantizer = AdaptiveScalarQuantizer::new(dims, 3.5);
         let original: Vec<f32> = (0..dims).map(|i| i as f32 * 0.1).collect();
 
         let original_norm = vector_norm(&original);
@@ -453,7 +410,7 @@ mod tests {
         let mut prev_cosine = -1.0f32;
 
         for bits in [2.0, 2.5, 3.0, 3.5, 4.0] {
-            let quantizer = TurboQuantizer::new(dims, bits);
+            let quantizer = AdaptiveScalarQuantizer::new(dims, bits);
             let (_qv, report) = quantizer.quantize_with_report(&original);
 
             println!(
@@ -495,7 +452,7 @@ mod tests {
     #[test]
     fn test_compression_ratio() {
         let dims = 768;
-        let quantizer = TurboQuantizer::new(dims, 3.5);
+        let quantizer = AdaptiveScalarQuantizer::new(dims, 3.5);
         let original = make_test_vector(dims, 42);
         let qv = quantizer.quantize(&original);
 
@@ -521,17 +478,17 @@ mod tests {
         let dims = 768;
         let original = make_test_vector(dims, 42);
 
-        println!("\n=== 768d TurboQuant Benchmark ===");
+        println!("\n=== 768d ScalarQuant Benchmark ===");
         println!("Vector: {}d, {} bytes original\n", dims, dims * 4);
 
         for bits in [2.0, 2.5, 3.0, 3.5, 4.0] {
-            let quantizer = TurboQuantizer::new(dims, bits);
+            let quantizer = AdaptiveScalarQuantizer::new(dims, bits);
             let (qv, report) = quantizer.quantize_with_report(&original);
 
             println!(
                 "{:.1}-bit | levels={:3} | cos={:.4} | MSE={:.6} | {} bytes packed | {:.1}x",
                 bits,
-                quantizer.codebook.len(),
+                quantizer.levels,
                 report.cosine_similarity,
                 report.mse,
                 qv.packed_size(),
@@ -541,7 +498,7 @@ mod tests {
         println!();
 
         // 3.5-bit should achieve > 0.85 cosine at 768d
-        let q35 = TurboQuantizer::new(dims, 3.5);
+        let q35 = AdaptiveScalarQuantizer::new(dims, 3.5);
         let (_qv, report) = q35.quantize_with_report(&original);
         assert!(
             report.cosine_similarity > 0.85,

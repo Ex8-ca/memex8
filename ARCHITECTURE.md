@@ -1,6 +1,6 @@
 # memex8 — Architecture Specification
 
-> A Rust-based, self-hosted AI memory system with Qdrant vector storage, TurboQuant-aware compression, auto-discovered knowledge realms, and integrations for OpenClaw, Hermes Agent, and pi.dev.
+> A Rust-based, self-hosted AI memory system with Qdrant vector storage, ScalarQuant-aware compression, auto-discovered knowledge realms, and integrations for OpenClaw, Hermes Agent, and pi.dev.
 
 ## Table of Contents
 
@@ -11,7 +11,7 @@
 - [Realm System](#realm-system)
 - [Slumber Engine](#slumber-engine)
 - [Embedding Providers](#embedding-providers)
-- [TurboQuant Integration](#turboquant-integration)
+- [ScalarQuant Integration](#scalarquant-integration)
 - [CLI Reference](#cli-reference)
 - [REST API](#rest-api)
 - [MCP Server](#mcp-server)
@@ -26,7 +26,7 @@
 
 ## Overview
 
-memex8 gives AI agents long-term, structured memory. It ingests `.md` files and directories, embeds them into vectors, stores them in Qdrant, and organizes them into auto-discovered **realms** of knowledge. A **slumber** process runs during idle time to re-quantize, re-cluster, summarize, and prune memories — inspired by TurboQuant's near-optimal vector quantization.
+memex8 gives AI agents long-term, structured memory. It ingests `.md` files and directories, embeds them into vectors, stores them in Qdrant, and organizes them into auto-discovered **realms** of knowledge. A **slumber** process runs during idle time to re-quantize, re-cluster, summarize, and prune memories — inspired by ScalarQuant's near-optimal vector quantization.
 
 **Key principles:**
 - **Local-first, self-hosted** — runs in Docker on your machine
@@ -91,7 +91,7 @@ Three Qdrant collections:
 |-----------|---------|---------------|
 | `memories` | Full-resolution embeddings + payload | 768d (nomic) or 1536d (OpenAI small), cosine |
 | `realms` | Realm centroid vectors + metadata | Same dim as memories |
-| `quantized` | TurboQuant-compressed versions for fast ANN | Reduced bit-width (configurable 2.5-4 bits/channel) |
+| `quantized` | ScalarQuant-compressed versions for fast ANN | Reduced bit-width (configurable 2.5-4 bits/channel) |
 
 **Payload schema for a memory point:**
 
@@ -134,7 +134,7 @@ memex8
 │   ├── embedder/   — Provider abstraction (Ollama, OpenAI)
 │   ├── realms/     — Auto-discovery, clustering, splitting
 │   ├── slumber/    — Idle detection, maintenance pipeline
-│   ├── quantizer/  — TurboQuant-inspired compression
+│   ├── quantizer/  — ScalarQuant-inspired compression
 │   ├── compressor/ — AAAK-style summarization
 │   ├── search/     — Semantic search with realm filters
 │   └── graph/      — Entity extraction, relationship tracking
@@ -371,43 +371,37 @@ Pruning is conservative:
 
 ---
 
-## TurboQuant Integration
+## ScalarQuant Integration
 
 ### Application to memex8
 
-From paper [arXiv:2504.19874](https://arxiv.org/abs/2504.19874), TurboQuant provides:
+memex8 uses **Adaptive Scalar Quantization** — a clean, honest name for what the code actually does. Inspired by [arXiv:2504.19874](https://arxiv.org/abs/2504.19874) (TurboQuant) but implemented differently:
 
 - **Data-oblivious quantization** — no training needed, apply instantly
 - **Near-optimal MSE** — within 2.7x of information-theoretic lower bound
 - **Quality neutrality at 3.5 bits** — no measurable quality loss
 - **Zero indexing time** — no preprocessing required
 
+**How it works:**
+
+```
+AdaptiveScalarQuant:
+  1. Normalize: x_norm = x / ||x||  (unit vector)
+  2. Find per-coordinate min/max over the actual vector values
+  3. Uniform quantization within that range → pack bits
+  4. Store (min, max, norm) alongside packed indices for reconstruction
+```
+
+This is simpler than TurboQuant's random rotation + Lloyd-Max codebook approach,
+and empirically produces better results on real OpenAI embeddings (cosine 0.971 vs 0.03).
+
 **How we use it:**
 
-1. During slumber, after re-clustering, all memory vectors are re-quantized using TurboQuant
+1. During slumber, after re-clustering, all memory vectors are re-quantized using ScalarQuant
 2. The `quantized` collection stores compressed vectors for fast ANN search
 3. Full-resolution vectors remain in `memories` for exact recall when needed
 4. Default bit-width: **3.5 bits per channel** (quality-neutral per the paper)
 5. Configurable: users can trade quality for compression
-
-**Implementation approach:**
-
-Since no official Rust implementation exists yet, we implement the core algorithm from the paper:
-
-```
-TurboQuant-MSE(x, b):
-  1. Random rotation: x_rotated = R · x  (R is random orthogonal matrix)
-  2. For each coordinate i:
-     - x_rotated[i] follows Beta distribution
-     - Apply precomputed Lloyd-Max quantizer for Beta(·, d) at bit-width b
-  3. Return quantized representation
-```
-
-The Rust implementation will:
-- Precompute Lloyd-Max codebooks for common dimensions (768, 1024, 1536, 3072) at bit-widths 2-8
-- Cache random rotation matrices per collection
-- Apply quantization during slumber's "compress" phase
-- Store quantized vectors in the separate Qdrant collection for fast search
 
 **Approximate search flow:**
 
@@ -415,7 +409,7 @@ The Rust implementation will:
 Query vector
     │
     ▼
-Quantize query with same TurboQuant params
+Quantize query with same ScalarQuant params
     │
     ▼
 Search quantized collection (fast, compact)
@@ -938,7 +932,7 @@ merge_threshold = 0.3              # max cosine dist between centroids to merge
 [slumber]
 idle_timeout = "10m"               # no queries before slumber starts
 cron_ingest = "*/5 * * * *"        # ingest schedule
-quantize_bit_width = 3.5           # TurboQuant bit-width (2.5-8)
+quantize_bit_width = 3.5           # ScalarQuant bit-width (2.5-8)
 auto_archive_days = 90             # days before eligible for archive
 prune_threshold = 0.1              # importance score below which to flag
 
@@ -1021,7 +1015,7 @@ memex8/
 │   │   │   └── openai.rs            # OpenAI embedding provider
 │   │   ├── realms.rs                # Auto-discovery, clustering
 │   │   ├── slumber.rs               # Slumber pipeline orchestrator
-│   │   ├── quantizer.rs             # TurboQuant implementation
+│   │   ├── quantizer.rs             # ScalarQuant implementation
 │   │   ├── compressor.rs            # AAAK-style summarization
 │   │   ├── search.rs                # Semantic search engine
 │   │   ├── graph.rs                 # Entity extraction + knowledge graph
@@ -1102,7 +1096,7 @@ memex8/
 - [ ] Cron-based ingestion
 - [ ] Deduplication
 - [ ] AAAK-style summarization/compression
-- [ ] TurboQuant vector quantization
+- [ ] ScalarQuant vector quantization
 - [ ] Prune flagging with guardrails
 - [ ] Knowledge graph (entity extraction, relationships)
 

@@ -22,7 +22,7 @@
 | **REST API** | ✅ Complete | Axum 0.8, 16 routes, CORS, tracing, state management |
 | **MCP Server** | ✅ Complete | JSON-RPC 2.0 over stdio, 11 tools, graceful Qdrant fallback |
 | **Doctor** | ✅ Complete | Qdrant connectivity, Ollama/OpenAI checks, config validation |
-| **Quantizer** | ⚠️ Stub | TurboQuant algorithm scaffolded, codebook generation needed |
+| **Quantizer** | ✅ Working | Adaptive scalar quantization with per-vector range, 7.6x compression @ 3.5-bit |
 | **Slumber Engine** | ⚠️ Stub | Pipeline structure defined, actual re-clustering/quantization not implemented |
 | **Knowledge Graph** | ⚠️ Stub | Entity extraction and relationship tracking |
 | **MEMEX8.md Writer** | ⚠️ Stub | Write-back to project directories |
@@ -64,7 +64,7 @@ memex8 integration pi > ~/.pi/agent/extensions/memex8.ts
 
 ## Next Steps (Priority Order)
 
-1. **Implement TurboQuant codebook** — Lloyd-Max quantization, random rotation
+1. **Implement ScalarQuant codebook** — adaptive per-vector range, uniform scalar quantization, bit-packing
 2. **Implement slumber pipeline** — Quantize, re-cluster (k-means), merge small realms, prune
 3. **Add file watcher** — `notify` crate for real-time directory watching
 4. **MEMEX8.md write-back** — Generate memory files for model context pickup

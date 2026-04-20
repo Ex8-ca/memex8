@@ -1,7 +1,7 @@
 """memex8 memory plugin — MemoryProvider interface for Hermes Agent.
 
 Self-hosted vector memory with semantic search, auto-organizing knowledge
-realms, and TurboQuant compression.
+realms, and ScalarQuant compression.
 
 Features:
   - Semantic vector search via Qdrant
