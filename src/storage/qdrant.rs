@@ -876,12 +876,14 @@ impl QdrantStore {
 
         for realm in &realms {
             if let Some(centroid) = self.compute_realm_centroid(&realm.id).await? {
-                // Update the realm's vector in Qdrant
+                // Update the realm's vector AND centroid payload in Qdrant
+                let centroid_arr: Vec<serde_json::Value> = centroid.iter().map(|v| serde_json::json!(v)).collect();
                 let payload: Payload = serde_json::json!({
                     "name": realm.name,
                     "memory_count": realm.memory_count,
                     "is_user_pinned": realm.is_user_pinned,
                     "description": realm.description,
+                    "centroid": centroid_arr,
                 })
                 .try_into()
                 .unwrap_or_default();

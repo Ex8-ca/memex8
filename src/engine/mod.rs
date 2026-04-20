@@ -227,6 +227,10 @@ impl Engine {
         let mut best_realm = None;
         let mut best_score = -1.0f32;
         for realm in &realms {
+            // Skip realms with no centroid yet
+            if realm.centroid.is_empty() {
+                continue;
+            }
             let score = cosine_similarity(vector, &realm.centroid);
             if score > best_score {
                 best_score = score;
@@ -234,8 +238,19 @@ impl Engine {
             }
         }
 
+        // Dynamic threshold: lower as we have more realms to avoid 1:1 ratio
+        // For text embeddings, unrelated topics are ~0.2-0.4 cosine similarity
+        let base_threshold = self.config.realms.similarity_threshold;
+        let dynamic_threshold = if realms.len() > 20 {
+            base_threshold * 0.5 // Lower threshold for many realms
+        } else if realms.len() > 10 {
+            base_threshold * 0.7
+        } else {
+            base_threshold
+        };
+
         if let Some(realm) = best_realm {
-            if best_score >= self.config.realms.similarity_threshold {
+            if best_score >= dynamic_threshold {
                 return Ok(realm.id);
             }
         }

@@ -384,10 +384,16 @@ impl SlumberEngine {
         Ok(name.to_string())
     }
 
-    /// Merge realms whose centroids are very similar (cosine > 0.85).
+    /// Merge realms whose centroids are very similar.
+    /// Uses a lower threshold (0.6) for text embeddings where even
+    /// different topics can have moderate cosine similarity.
     async fn merge_similar_realms(&self) -> anyhow::Result<usize> {
         let realms = self.store.list_realms().await?;
         let mut merged = 0;
+
+        // Lower threshold for text embeddings: 0.35 instead of 0.85
+        // Text embeddings from different topics typically have 0.2-0.4 cosine similarity
+        let merge_threshold = 0.35f32;
 
         for i in 0..realms.len() {
             for j in (i + 1)..realms.len() {
@@ -399,49 +405,69 @@ impl SlumberEngine {
                     continue;
                 }
 
-                // Skip realms without centroids
+                // Skip realms without centroids or single-memory realms
                 if a.centroid.is_empty() || b.centroid.is_empty() {
                     continue;
                 }
-
-                let sim = cosine_similarity(&a.centroid, &b.centroid);
-                if sim > 0.85 {
-                    tracing::info!(
-                        "  Merging similar realms: '{}' ({:.3}) ↔ '{}' ({:.3})",
-                        a.name, a.memory_count, b.name, b.memory_count
-                    );
-
-                    // Move all memories from b to a
-                    let all = self.store.scroll_all_memories().await?;
-                    let b_mems: Vec<_> = all.iter()
-                        .filter(|m| m.realm_id.as_deref() == Some(&b.id))
-                        .collect();
-
-                    for mem in &b_mems {
-                        let payload: qdrant_client::Payload = serde_json::json!({
-                            "realm_id": a.id,
-                            "realm_name": a.name,
-                        })
-                        .try_into()
-                        .unwrap_or_default();
-                        if let Err(e) = self.store.update_memory_payload(&mem.id, payload).await {
-                            tracing::warn!("  Failed to reassign memory {}: {}", mem.id, e);
+                if a.memory_count <= 1 && b.memory_count <= 1 {
+                    // Only merge single-memory realms if they're very similar
+                    let sim = cosine_similarity(&a.centroid, &b.centroid);
+                    if sim > merge_threshold {
+                        tracing::info!(
+                            "  Merging similar realms: '{}' ↔ '{}' (sim={:.3})",
+                            a.name, b.name, sim
+                        );
+                        if let Err(e) = self.merge_realm_into(&b.id, &a.id, &a.name).await {
+                            tracing::warn!("  Failed to merge realms: {}", e);
+                        } else {
+                            merged += 1;
                         }
                     }
+                    continue;
+                }
 
-                    // Delete realm b
-                    if let Err(e) = self.store.delete_realm(&b.id).await {
-                        tracing::warn!("  Failed to delete realm '{}': {}", b.name, e);
+                // Merge if at least one realm has multiple memories
+                let sim = cosine_similarity(&a.centroid, &b.centroid);
+                if sim > merge_threshold {
+                    tracing::info!(
+                        "  Merging similar realms: '{}' ({}) ↔ '{}' ({}) (sim={:.3})",
+                        a.name, a.memory_count, b.name, b.memory_count, sim
+                    );
+                    if let Err(e) = self.merge_realm_into(&b.id, &a.id, &a.name).await {
+                        tracing::warn!("  Failed to merge realms: {}", e);
+                    } else {
+                        merged += 1;
                     }
-
-                    // Update realm a count
-                    self.store.update_realm_counts().await?;
-                    merged += 1;
                 }
             }
         }
 
         Ok(merged)
+    }
+
+    /// Helper: merge all memories from source realm into target realm, then delete source.
+    async fn merge_realm_into(&self, source_id: &str, target_id: &str, target_name: &str) -> anyhow::Result<()> {
+        let all = self.store.scroll_all_memories().await?;
+        let source_mems: Vec<_> = all.iter()
+            .filter(|m| m.realm_id.as_deref() == Some(source_id))
+            .collect();
+
+        for mem in &source_mems {
+            let payload: qdrant_client::Payload = serde_json::json!({
+                "realm_id": target_id,
+                "realm_name": target_name,
+            })
+            .try_into()
+            .unwrap_or_default();
+            if let Err(e) = self.store.update_memory_payload(&mem.id, payload).await {
+                tracing::warn!("  Failed to reassign memory {}: {}", mem.id, e);
+            }
+        }
+
+        // Delete source realm
+        self.store.delete_realm(source_id).await?;
+        self.store.update_realm_counts().await?;
+        Ok(())
     }
 
     /// Redistribute memories to the realm whose centroid they're closest to.
