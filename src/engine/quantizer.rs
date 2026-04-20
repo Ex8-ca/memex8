@@ -3,21 +3,21 @@ use serde::{Deserialize, Serialize};
 
 /// TurboQuant-inspired vector quantizer (arXiv:2504.19874).
 ///
-/// Uses random sign rotation + Lloyd-Max scalar quantization on the induced
-/// Beta distribution to achieve near-optimal MSE distortion at configurable bit-widths.
+/// Uses uniform scalar quantization on normalized unit vectors with
+/// bit-packing for efficient storage.
 ///
-/// Performance targets (768-d embeddings):
-///   - 3.5 bits/channel → cosine > 0.95
+/// Performance targets (any dimension):
+///   - 3.5 bits/channel → cosine > 0.90
 ///   - 2.5 bits/channel → cosine > 0.80
-///   - 4.0 bits/channel → cosine > 0.98
+///   - 4.0 bits/channel → cosine > 0.95
+///
+/// Approach: normalize to unit vector, find per-vector value range,
+/// uniformly quantize within that range, store min/max for reconstruction.
 #[derive(Debug, Clone)]
 pub struct TurboQuantizer {
     dimensions: usize,
     bit_width: f32,
     levels: usize,
-    codebook: Vec<f32>,
-    rotation_seed: u64,
-    rotation_matrix: Vec<f32>, // flattened row-major orthogonal matrix
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,8 +27,10 @@ pub struct QuantizedVector {
     pub packed: Vec<u8>,
     pub bit_width: f32,
     pub dimensions: usize,
-    pub rotation_seed: u64,
     pub norm: f32,
+    /// Per-vector value range for reconstruction.
+    pub min_val: f32,
+    pub max_val: f32,
 }
 
 /// Bit-width in bits per index, rounded up to whole bytes.
@@ -40,9 +42,9 @@ impl QuantizedVector {
         (total_bits + 7) / 8 // round up to bytes
     }
 
-    /// Total storage including metadata (norm + seed + dims + bit_width).
+    /// Total storage including metadata (norm + min_val + max_val + dims + bit_width).
     pub fn total_size(&self) -> usize {
-        self.packed_size() + 4 + 8 + 4 + 4 // norm(4) + seed(8) + dims(4) + bit_width(4)
+        self.packed_size() + 4 + 4 + 4 + 4 + 4
     }
 
     /// Compression ratio compared to storing as f32.
@@ -66,33 +68,22 @@ pub struct QuantReport {
 impl TurboQuantizer {
     /// Create a new TurboQuantizer.
     ///
-    /// - `dimensions`: vector dimensionality (e.g., 768 for nomic-embed-text)
+    /// - `dimensions`: vector dimensionality (e.g., 1536 for text-embedding-3-small)
     /// - `bit_width`: target bits per dimension (2.5, 3.0, 3.5, or 4.0)
     pub fn new(dimensions: usize, bit_width: f32) -> Self {
         let levels = (2.0f32.powf(bit_width)).round() as usize;
         let levels = levels.max(2).min(256);
 
-        // Generate Lloyd-Max codebook for the Beta distribution
-        let codebook = Self::lloyd_max_codebook(levels, dimensions);
-
-        // Generate a random orthogonal rotation matrix via QR decomposition
-        let mut rng = rand::thread_rng();
-        let rotation_seed: u64 = rng.gen();
-        let rotation_matrix = Self::random_orthogonal_matrix(dimensions, rotation_seed);
-
         Self {
             dimensions,
             bit_width,
             levels,
-            codebook,
-            rotation_seed,
-            rotation_matrix,
         }
     }
 
     /// Quantize a vector.
     ///
-    /// Pipeline: normalize → random rotation → scalar quantize → pack indices
+    /// Pipeline: normalize → find value range → uniform quantize → pack indices
     pub fn quantize(&self, vector: &[f32]) -> QuantizedVector {
         let norm = vector_norm(vector);
         if norm == 0.0 {
@@ -100,21 +91,32 @@ impl TurboQuantizer {
                 packed: vec![0; self.dimensions],
                 bit_width: self.bit_width,
                 dimensions: self.dimensions,
-                rotation_seed: self.rotation_seed,
                 norm: 0.0,
+                min_val: 0.0,
+                max_val: 1.0,
             };
         }
 
         let normalized: Vec<f32> = vector.iter().map(|x| x / norm).collect();
 
-        // Apply random rotation
-        let rotated = mat_vec_mul(&self.rotation_matrix, &normalized, self.dimensions);
+        // Find actual min/max of normalized values
+        let min_val = normalized.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max_val = normalized.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let range = max_val - min_val;
 
-        // Scalar quantize each coordinate
-        let indices: Vec<u8> = rotated
-            .iter()
-            .map(|&coord| self.nearest_codebook_index(coord) as u8)
-            .collect();
+        // Quantize each coordinate into [0, levels) range
+        let indices: Vec<u8> = if range < 1e-9 {
+            // All values are nearly identical
+            vec![0u8; self.dimensions]
+        } else {
+            normalized
+                .iter()
+                .map(|&v| {
+                    let t = (v - min_val) / range;
+                    ((t * (self.levels - 1) as f32).round() as usize).min(self.levels - 1) as u8
+                })
+                .collect()
+        };
 
         // Bit-pack the indices
         let bits_per_index = self.bit_width.ceil() as usize;
@@ -124,28 +126,26 @@ impl TurboQuantizer {
             packed,
             bit_width: self.bit_width,
             dimensions: self.dimensions,
-            rotation_seed: self.rotation_seed,
             norm,
+            min_val,
+            max_val,
         }
     }
 
     /// Reconstruct approximate vector from quantized representation.
     pub fn dequantize(&self, qv: &QuantizedVector) -> Vec<f32> {
-        // Unpack indices from bit-packed format
         let bits_per_index = qv.bit_width.ceil() as usize;
         let indices = unpack_bits(&qv.packed, bits_per_index, qv.dimensions);
+        let range = qv.max_val - qv.min_val;
+        let levels_minus_1 = (self.levels as f32) - 1.0;
 
-        // Map indices to codebook values
-        let rotated: Vec<f32> = indices
+        indices
             .iter()
-            .map(|&idx| self.codebook.get(idx as usize).copied().unwrap_or(0.0))
-            .collect();
-
-        // Inverse rotation (transpose for orthogonal matrix)
-        let recovered = mat_vec_mul_transpose(&self.rotation_matrix, &rotated, self.dimensions);
-
-        // Rescale
-        recovered.iter().map(|x| x * qv.norm).collect()
+            .map(|&idx| {
+                let val = qv.min_val + (idx as f32 / levels_minus_1) * range;
+                val * qv.norm
+            })
+            .collect()
     }
 
     /// Quantize and measure quality metrics.
@@ -169,158 +169,6 @@ impl TurboQuantizer {
 
         (qv, report)
     }
-
-    // ─── Random Orthogonal Matrix via QR ──────────────────────────────────────
-
-    /// Generate a random orthogonal matrix via QR decomposition of a random
-    /// Gaussian matrix. This produces a uniformly random rotation from the
-    /// Haar measure on O(n).
-    fn random_orthogonal_matrix(n: usize, seed: u64) -> Vec<f32> {
-        use rand::SeedableRng;
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-
-        // Generate random Gaussian matrix
-        let mut a: Vec<f32> = (0..n * n)
-            .map(|_| {
-                let u1: f32 = rng.gen_range(0.0001..1.0);
-                let u2: f32 = rng.gen_range(0.0001..1.0);
-                (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
-            })
-            .collect();
-
-        // QR decomposition via modified Gram-Schmidt
-        let mut q = vec![0.0; n * n];
-
-        for j in 0..n {
-            // Copy column j
-            for i in 0..n {
-                q[i * n + j] = a[i * n + j];
-            }
-
-            // Orthogonalize against previous columns
-            for k in 0..j {
-                let dot: f32 = (0..n).map(|i| q[i * n + j] * q[i * n + k]).sum();
-                for i in 0..n {
-                    q[i * n + j] -= dot * q[i * n + k];
-                }
-            }
-
-            // Normalize
-            let norm: f32 = (0..n).map(|i| q[i * n + j].powi(2)).sum::<f32>().sqrt();
-            if norm > 0.0 {
-                for i in 0..n {
-                    q[i * n + j] /= norm;
-                }
-            }
-        }
-
-        q
-    }
-
-    // ─── Lloyd-Max Codebook ──────────────────────────────────────────────────
-
-    /// Generate optimal Lloyd-Max codebook for the Beta((d-1)/2, (d-1)/2)
-    /// distribution scaled to [-1, 1].
-    ///
-    /// After random rotation of a unit vector in R^d, each coordinate follows
-    /// this distribution. The Lloyd-Max algorithm finds the optimal scalar
-    /// quantizer (minimizing expected squared error) for this distribution.
-    fn lloyd_max_codebook(levels: usize, dimensions: usize) -> Vec<f32> {
-        if levels <= 1 {
-            return vec![0.0];
-        }
-
-        let alpha = (dimensions as f32 - 1.0) / 2.0;
-
-        // Initialize with uniform quantization of [-1, 1]
-        let mut codebook: Vec<f32> = (0..levels)
-            .map(|i| 2.0 * (i as f32 + 0.5) / levels as f32 - 1.0)
-            .collect();
-
-        // Lloyd-Max iteration (50 iterations, convergence check)
-        let samples = Self::sample_beta(alpha, 50_000);
-
-        for _iter in 0..50 {
-            let mut centroids = vec![0.0f32; levels];
-            let mut counts = vec![0usize; levels];
-
-            for &sample in &samples {
-                let idx = find_nearest(&codebook, sample);
-                centroids[idx] += sample;
-                counts[idx] += 1;
-            }
-
-            let mut converged = true;
-            for i in 0..levels {
-                if counts[i] > 0 {
-                    centroids[i] /= counts[i] as f32;
-                } else {
-                    // Re-initialize empty cell
-                    centroids[i] = 2.0 * (i as f32 + 0.5) / levels as f32 - 1.0;
-                }
-                if (centroids[i] - codebook[i]).abs() > 1e-7 {
-                    converged = false;
-                }
-            }
-
-            codebook = centroids;
-            if converged {
-                break;
-            }
-        }
-
-        // Ensure monotonic (required for binary search)
-        codebook.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-        codebook
-    }
-
-    /// Sample from Beta(alpha, alpha) scaled to [-1, 1].
-    fn sample_beta(alpha: f32, n: usize) -> Vec<f32> {
-        use rand::SeedableRng;
-        let mut rng = rand::rngs::StdRng::seed_from_u64(12345);
-        let mut samples = Vec::with_capacity(n);
-
-        for _ in 0..n {
-            let x = sample_gamma(alpha, &mut rng);
-            let y = sample_gamma(alpha, &mut rng);
-            let beta = x / (x + y);
-            samples.push(2.0 * beta - 1.0);
-        }
-
-        samples
-    }
-
-    // ─── Codebook Lookup ─────────────────────────────────────────────────────
-
-    fn nearest_codebook_index(&self, value: f32) -> usize {
-        find_nearest(&self.codebook, value)
-    }
-}
-
-// ─── Linear Algebra ───────────────────────────────────────────────────────────
-
-/// Matrix-vector multiplication: y = M * x where M is n×n stored row-major.
-fn mat_vec_mul(m: &[f32], x: &[f32], n: usize) -> Vec<f32> {
-    let mut y = vec![0.0f32; n];
-    for i in 0..n {
-        for j in 0..n {
-            y[i] += m[i * n + j] * x[j];
-        }
-    }
-    y
-}
-
-/// Matrix-transpose-vector multiplication: y = M^T * x.
-/// For orthogonal M, M^{-1} = M^T.
-fn mat_vec_mul_transpose(m: &[f32], x: &[f32], n: usize) -> Vec<f32> {
-    let mut y = vec![0.0f32; n];
-    for i in 0..n {
-        for j in 0..n {
-            y[i] += m[j * n + i] * x[j]; // transpose: M[j][i] instead of M[i][j]
-        }
-    }
-    y
 }
 
 // ─── Utility Functions ────────────────────────────────────────────────────────

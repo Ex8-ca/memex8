@@ -109,12 +109,14 @@ impl SlumberEngine {
     async fn turboquant_compress(&self) -> anyhow::Result<usize> {
         let all = self.store.scroll_all_memories_with_vectors().await?;
         let bit_width = self.config.slumber.quantize_bit_width;
-        let dims = self.config.embedding.dimensions as usize;
 
         if all.is_empty() {
             tracing::info!("  No memories to quantize");
             return Ok(0);
         }
+
+        // Get dimensions from actual vectors (not config, which may have stale defaults)
+        let dims = all[0].vector.len();
 
         let quantizer = TurboQuantizer::new(dims, bit_width);
         let mut quantized = 0;

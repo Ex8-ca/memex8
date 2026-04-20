@@ -691,7 +691,7 @@ impl Engine {
             storage_bytes: mem_stats.size_bytes,
             embedding_provider: self.embed_provider.clone(),
             embedding_model: self.embed_model.clone(),
-            embedding_dimensions: self.config.embedding.dimensions,
+            embedding_dimensions: self.embed_dimensions,
             slumber_state: slumber.state,
         })
     }
