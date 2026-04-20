@@ -290,14 +290,17 @@ impl SlumberEngine {
         Ok(splits)
     }
 
-    // ─── Phase 3b: Rename Realms by Summarization ────────────────────────────
+    // ─── Phase 3b: Rename Realms by LLM + Merge Similar Realms ───────────────
 
-    /// Rename realms with human-readable names based on their memory content.
-    /// Uses term frequency analysis to extract key topics.
+    /// Rename realms with human-readable names using LLM, then merge similar realms
+    /// and redistribute memories to their best-matching realm.
     async fn rename_realms(&self) -> anyhow::Result<usize> {
+        let openai_key = std::env::var("OPENAI_API_KEY").ok();
+
         let realms = self.store.list_realms().await?;
         let mut renamed = 0;
 
+        // Step 1: Rename realms with LLM (if available) or word frequency fallback
         for realm in &realms {
             // Skip already human-readable names
             if !realm.name.starts_with("realm-") {
@@ -314,9 +317,19 @@ impl SlumberEngine {
                 continue;
             }
 
-            // Generate a summary name from the content
-            let new_name = Self::summarize_realm(&realm_mems);
-            if new_name != realm.name {
+            let new_name = if let Some(ref key) = openai_key {
+                match self.llm_name_realm(key, &realm_mems).await {
+                    Ok(name) => name,
+                    Err(e) => {
+                        tracing::warn!("  LLM naming failed for '{}', using fallback: {}", realm.name, e);
+                        Self::summarize_realm_freq(&realm_mems)
+                    }
+                }
+            } else {
+                Self::summarize_realm_freq(&realm_mems)
+            };
+
+            if new_name != realm.name && !new_name.is_empty() {
                 self.store.update_realm_name(&realm.id, &new_name).await?;
                 tracing::info!(
                     "  Renamed realm '{}' → '{}'",
@@ -326,13 +339,169 @@ impl SlumberEngine {
             }
         }
 
-        tracing::info!("  Renamed {} realms", renamed);
+        // Step 2: Merge similar realms (centroid cosine > 0.85)
+        let merged = self.merge_similar_realms().await?;
+        tracing::info!("  Merged {} similar realm pairs", merged);
+
+        // Step 3: Redistribute memories to best-matching realms
+        let redistributed = self.redistribute_memories().await?;
+        tracing::info!("  Redistributed {} memories to better-matching realms", redistributed);
+
+        tracing::info!("  Renamed {} realms, merged {} pairs, redistributed {} memories", renamed, merged, redistributed);
         Ok(renamed)
     }
 
-    /// Generate a short, descriptive name for a realm based on its memories.
-    /// Uses word frequency analysis with stopword filtering.
-    fn summarize_realm(memories: &[&crate::storage::qdrant::MemoryPoint]) -> String {
+    /// Use LLM to generate a descriptive realm name.
+    async fn llm_name_realm(&self, api_key: &str, memories: &[&crate::storage::qdrant::MemoryPoint]) -> anyhow::Result<String> {
+        let memory_texts: Vec<String> = memories.iter()
+            .take(5) // limit context
+            .map(|m| {
+                let content = if m.content.len() > 300 {
+                    format!("{}...", &m.content[..300])
+                } else {
+                    m.content.clone()
+                };
+                format!("- {}", content.replace('\n', " "))
+            })
+            .collect();
+
+        let prompt = format!(
+            "You are naming a knowledge realm (topic cluster) for an AI memory system.\n\
+            Below are the memories in this realm:\n\n\
+            {}\n\n\
+            Give this realm a SHORT descriptive name (2-4 words, Title Case).\n\
+            Examples: \"App Ideas\", \"Rust Development\", \"Home Assistant Setup\", \"Trading Strategies\"\n\
+            Output ONLY the name, nothing else.",
+            memory_texts.join("\n")
+        );
+
+        let result = self.call_openai(api_key, &prompt).await?;
+        // Clean up the response
+        let name = result.trim().trim_matches('"').trim();
+        if name.len() > 50 || name.is_empty() {
+            return Err(anyhow::anyhow!("Invalid LLM name: '{}'", name));
+        }
+        Ok(name.to_string())
+    }
+
+    /// Merge realms whose centroids are very similar (cosine > 0.85).
+    async fn merge_similar_realms(&self) -> anyhow::Result<usize> {
+        let realms = self.store.list_realms().await?;
+        let mut merged = 0;
+
+        for i in 0..realms.len() {
+            for j in (i + 1)..realms.len() {
+                let a = &realms[i];
+                let b = &realms[j];
+
+                // Skip pinned realms
+                if a.is_user_pinned || b.is_user_pinned {
+                    continue;
+                }
+
+                // Skip realms without centroids
+                if a.centroid.is_empty() || b.centroid.is_empty() {
+                    continue;
+                }
+
+                let sim = cosine_similarity(&a.centroid, &b.centroid);
+                if sim > 0.85 {
+                    tracing::info!(
+                        "  Merging similar realms: '{}' ({:.3}) ↔ '{}' ({:.3})",
+                        a.name, a.memory_count, b.name, b.memory_count
+                    );
+
+                    // Move all memories from b to a
+                    let all = self.store.scroll_all_memories().await?;
+                    let b_mems: Vec<_> = all.iter()
+                        .filter(|m| m.realm_id.as_deref() == Some(&b.id))
+                        .collect();
+
+                    for mem in &b_mems {
+                        let payload: qdrant_client::Payload = serde_json::json!({
+                            "realm_id": a.id,
+                            "realm_name": a.name,
+                        })
+                        .try_into()
+                        .unwrap_or_default();
+                        if let Err(e) = self.store.update_memory_payload(&mem.id, payload).await {
+                            tracing::warn!("  Failed to reassign memory {}: {}", mem.id, e);
+                        }
+                    }
+
+                    // Delete realm b
+                    if let Err(e) = self.store.delete_realm(&b.id).await {
+                        tracing::warn!("  Failed to delete realm '{}': {}", b.name, e);
+                    }
+
+                    // Update realm a count
+                    self.store.update_realm_counts().await?;
+                    merged += 1;
+                }
+            }
+        }
+
+        Ok(merged)
+    }
+
+    /// Redistribute memories to the realm whose centroid they're closest to.
+    async fn redistribute_memories(&self) -> anyhow::Result<usize> {
+        let realms = self.store.list_realms().await?;
+        let all = self.store.scroll_all_memories_with_vectors().await?;
+        let mut redistributed = 0;
+
+        for mem_with_vec in &all {
+            let mem = &mem_with_vec.memory;
+            let current_realm_id = mem.realm_id.as_deref();
+
+            // Find closest realm centroid
+            let mut best_realm: Option<&crate::storage::qdrant::RealmPoint> = None;
+            let mut best_sim = -1.0f32;
+
+            for realm in &realms {
+                if realm.centroid.is_empty() {
+                    continue;
+                }
+                let sim = cosine_similarity(&mem_with_vec.vector, &realm.centroid);
+                if sim > best_sim {
+                    best_sim = sim;
+                    best_realm = Some(realm);
+                }
+            }
+
+            if let Some(best) = best_realm {
+                if current_realm_id != Some(&best.id) && best_sim > 0.5 {
+                    // Reassign to better-matching realm
+                    let payload: qdrant_client::Payload = serde_json::json!({
+                        "realm_id": best.id,
+                        "realm_name": best.name,
+                    })
+                    .try_into()
+                    .unwrap_or_default();
+
+                    if let Err(e) = self.store.update_memory_payload(&mem.id, payload).await {
+                        tracing::warn!("  Failed to redistribute memory {}: {}", mem.id, e);
+                    } else {
+                        tracing::debug!(
+                            "  Moved '{}' from '{}' → '{}' (sim={:.3})",
+                            &mem.content[..50.min(mem.content.len())],
+                            current_realm_id.unwrap_or("?"),
+                            best.name,
+                            best_sim
+                        );
+                        redistributed += 1;
+                    }
+                }
+            }
+        }
+
+        // Update counts after redistribution
+        self.store.update_realm_counts().await?;
+        Ok(redistributed)
+    }
+
+    /// Generate a realm name using word frequency (fallback when LLM unavailable).
+    fn summarize_realm_freq(memories: &[&crate::storage::qdrant::MemoryPoint]) -> String {
         // Common English stopwords + technical noise words
         let stopwords: std::collections::HashSet<&str> = [
             "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
