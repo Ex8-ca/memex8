@@ -14,6 +14,7 @@ pub struct SlumberReport {
     pub deduplicated: usize,
     pub quantized: usize,
     pub realms_updated: usize,
+    pub realms_renamed: usize,
     pub flagged_for_prune: usize,
     pub memex8_md_written: usize,
 }
@@ -41,6 +42,10 @@ impl SlumberEngine {
         tracing::info!("💤 Slumber phase 3: Re-cluster realms");
         report.realms_updated = self.recluster_realms().await?;
 
+        // Phase 3b: Rename realms with human-readable names
+        tracing::info!("💤 Slumber phase 3b: Rename realms");
+        report.realms_renamed = self.rename_realms().await?;
+
         // Phase 4: Prune flagging
         tracing::info!("💤 Slumber phase 4: Prune flagging");
         report.flagged_for_prune = self.prune_flag().await?;
@@ -52,11 +57,12 @@ impl SlumberEngine {
         }
 
         tracing::info!(
-            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} prune={} md={}",
+            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} renamed={} prune={} md={}",
             report.memories_scanned,
             report.deduplicated,
             report.quantized,
             report.realms_updated,
+            report.realms_renamed,
             report.flagged_for_prune,
             report.memex8_md_written,
         );
@@ -276,6 +282,188 @@ impl SlumberEngine {
         }
 
         Ok(splits)
+    }
+
+    // ─── Phase 3b: Rename Realms by Summarization ────────────────────────────
+
+    /// Rename realms with human-readable names based on their memory content.
+    /// Uses term frequency analysis to extract key topics.
+    async fn rename_realms(&self) -> anyhow::Result<usize> {
+        let realms = self.store.list_realms().await?;
+        let mut renamed = 0;
+
+        for realm in &realms {
+            // Skip already human-readable names
+            if !realm.name.starts_with("realm-") {
+                continue;
+            }
+
+            // Get memories in this realm
+            let all = self.store.scroll_all_memories().await?;
+            let realm_mems: Vec<_> = all.iter()
+                .filter(|m| m.realm_id.as_deref() == Some(&realm.id))
+                .collect();
+
+            if realm_mems.is_empty() {
+                continue;
+            }
+
+            // Generate a summary name from the content
+            let new_name = Self::summarize_realm(&realm_mems);
+            if new_name != realm.name {
+                self.store.update_realm_name(&realm.id, &new_name).await?;
+                tracing::info!(
+                    "  Renamed realm '{}' → '{}'",
+                    realm.name, new_name
+                );
+                renamed += 1;
+            }
+        }
+
+        tracing::info!("  Renamed {} realms", renamed);
+        Ok(renamed)
+    }
+
+    /// Generate a short, descriptive name for a realm based on its memories.
+    /// Uses word frequency analysis with stopword filtering.
+    fn summarize_realm(memories: &[&crate::storage::qdrant::MemoryPoint]) -> String {
+        // Common English stopwords + technical noise words
+        let stopwords: std::collections::HashSet<&str> = [
+            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
+            "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+            "being", "have", "has", "had", "do", "does", "did", "will", "would",
+            "could", "should", "may", "might", "shall", "can", "need", "must",
+            "that", "this", "these", "those", "it", "its", "i", "me", "my", "we",
+            "our", "you", "your", "he", "him", "his", "she", "her", "they", "them",
+            "their", "what", "which", "who", "whom", "when", "where", "why", "how",
+            "not", "no", "yes", "so", "if", "then", "than", "too", "very", "just",
+            "about", "also", "all", "any", "as", "into", "like", "more", "most",
+            "only", "other", "out", "over", "own", "same", "some", "such", "up",
+            "down", "after", "before", "between", "through", "during", "below",
+            "above", "here", "there", "once", "while", "until", "unless", "because",
+            "since", "even", "well", "back", "still", "already", "much", "many",
+            "new", "use", "used", "using", "get", "got", "make", "made", "one",
+            "two", "first", "last", "next", "each", "every", "both", "few",
+            "way", "thing", "things", "work", "want", "need", "know", "think",
+            "see", "come", "go", "take", "give", "tell", "say", "says", "said",
+            "told", "help", "run", "went", "going", "set", "show", "find", "call",
+            "try", "ask", "put", "keep", "let", "begin", "seem", "leave", "turn",
+            "end", "right", "left", "old", "big", "small", "good", "bad", "high",
+            "low", "long", "short", "done", "fix", "fixed", "added", "update",
+            "updated", "changes", "change", "issue", "issues", "fixes", "fixing",
+            "commit", "commits", "pushed", "push", "committing", "github", "repo",
+            "repository", "branch", "main", "master", "merge", "pull", "request",
+            "pr", "bug", "feature", "task", "tasks", "todo", "completed", "finished",
+            "working", "implemented", "implementation", "build", "built", "testing",
+            "tested", "test", "tests", "check", "checked", "checking", "review",
+            "reviewed", "please", "thanks", "thank", "ok", "okay", "sure", "cool",
+            "awesome", "perfect", "exactly", "correct", "wrong", "hey", "hi",
+            "hello", "hello", "hello", "hello", "hey", "hi", "hi", "hi",
+            "md", "txt", "rs", "py", "js", "ts", "html", "css", "json", "yaml",
+            "yml", "toml", "cfg", "conf", "ini", "env", "git", "docker", "compose",
+            "file", "files", "directory", "directories", "folder", "path", "paths",
+            "src", "lib", "bin", "build", "target", "node", "modules", "package",
+            "packages", "install", "installed", "installing", "run", "running",
+            "start", "started", "starting", "stop", "stopped", "stopping", "restart",
+            "restarted", "restarting", "deploy", "deployed", "deploying", "deployment",
+            "config", "configuration", "settings", "setup", "setting", "server",
+            "client", "api", "endpoint", "endpoints", "url", "urls", "http", "https",
+            "localhost", "port", "ports", "host", "hosts", "app", "apps", "application",
+            "applications", "project", "projects", "code", "coding", "program",
+            "programming", "software", "system", "systems", "service", "services",
+            "function", "functions", "method", "methods", "class", "classes", "object",
+            "objects", "type", "types", "string", "strings", "number", "numbers",
+            "int", "float", "bool", "bools", "array", "arrays", "list", "lists",
+            "map", "maps", "dict", "dicts", "hash", "hashes", "hashmap", "hashmaps",
+            "vec", "vectors", "vector", "embed", "embedding", "embeddings", "model",
+            "models", "llm", "llms", "ai", "ml", "agent", "agents", "bot", "bots",
+            "memex8", "hermes", "openclaw", "plugin", "plugins", "skill", "skills",
+            "memory", "memories", "memo", "memos", "note", "notes", "data", "database",
+            "db", "store", "storage", "stored", "stores", "saving", "save", "saved",
+            "reads", "read", "writes", "write", "written", "content", "contents",
+            "text", "texts", "words", "word", "sentence", "sentences", "paragraph",
+            "paragraphs", "page", "pages", "line", "lines", "character", "characters",
+            "char", "chars", "symbol", "symbols", "token", "tokens", "chunk", "chunks",
+            "section", "sections", "header", "headers", "title", "titles", "heading",
+            "headings", "user", "users", "assistant", "assistant", "system", "message",
+            "messages", "chat", "chats", "conversation", "conversations", "turn",
+            "turns", "prompt", "prompts", "response", "responses", "output", "outputs",
+            "input", "inputs", "error", "errors", "warning", "warnings", "info",
+            "information", "detail", "details", "log", "logs", "logging", "logged",
+            "trace", "traces", "debug", "debugging", "bug", "bugs", "crash", "crashes",
+            "crashed", "fail", "fails", "failed", "failure", "failures", "success",
+            "successful", "succeed", "succeeded", "succeeds", "improve", "improved",
+            "improvement", "improvements", "optimize", "optimized", "optimization",
+            "performance", "speed", "fast", "faster", "fastest", "slow", "slower",
+            "slowest", "time", "times", "second", "seconds", "minute", "minutes",
+            "hour", "hours", "day", "days", "week", "weeks", "month", "months",
+            "year", "years", "now", "today", "tomorrow", "yesterday", "soon", "later",
+            "early", "earlier", "late", "recent", "recently", "current", "currently",
+            "future", "past", "previous", "following", "preceding", "however",
+            "whatever", "whenever", "wherever", "whoever", "whomever", "whichever",
+            "although", "though", "whether", "therefore", "thus", "hence",
+            "consequently", "accordingly", "nevertheless", "nonetheless",
+            "notwithstanding", "otherwise", "meanwhile", "furthermore", "moreover",
+            "besides", "additionally", "either", "neither", "nor", "except", "save",
+            "barring", "excluding", "including", "concerning", "regarding", "respecting",
+            "touching", "versus", "via", "per", "throughout", "across", "along",
+            "around", "near", "nearer", "nearest", "beside", "beyond", "beneath",
+            "under", "underneath", "overhead", "onto", "upon", "towards", "away",
+            "off", "forth", "forward", "backward", "behind", "ahead", "ago", "yet",
+            "always", "often", "frequently", "usually", "generally", "normally",
+            "commonly", "rarely", "seldom", "occasionally", "sometimes", "hardly",
+            "scarcely", "barely", "merely", "simply", "quite", "rather", "fairly",
+            "pretty", "somewhat", "extremely", "exceedingly", "remarkably",
+            "exceptionally", "particularly", "especially", "mainly", "mostly",
+            "largely", "chiefly", "primarily", "principally", "essentially",
+            "fundamentally", "basically", "virtually", "practically", "nearly",
+            "almost", "approximately", "roughly", "circa", "precisely", "specifically",
+            "namely", "namely",
+        ].into_iter().collect();
+
+        // Count word frequencies across all memories
+        let mut word_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        for mem in memories {
+            // Use heading if available, otherwise first 200 chars of content
+            let text = mem.heading.clone().unwrap_or_else(|| {
+                mem.content.chars().take(200).collect()
+            });
+
+            // Extract words: alphanumeric sequences of 3+ chars
+            for word in text.split_whitespace() {
+                let cleaned: String = word.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect::<String>()
+                    .to_lowercase();
+
+                if cleaned.len() >= 3 && !stopwords.contains(cleaned.as_str()) {
+                    *word_counts.entry(cleaned).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Sort by frequency
+        let mut sorted: Vec<_> = word_counts.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+        // Take top 2-3 words and format as title case
+        let top_words: Vec<String> = sorted.iter()
+            .take(3)
+            .map(|(w, _)| {
+                let mut chars = w.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                }
+            })
+            .collect();
+
+        if top_words.is_empty() {
+            return format!("topic-{}", &memories[0].realm_id.as_ref().map(|s| &s[..8]).unwrap_or("unknown"));
+        }
+
+        top_words.join(" ")
     }
 
     // ─── Phase 4: Prune Flagging ─────────────────────────────────────────────

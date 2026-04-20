@@ -732,6 +732,23 @@ impl QdrantStore {
         Ok(())
     }
 
+    /// Update the name of a realm.
+    pub async fn update_realm_name(&self, id: &str, name: &str) -> anyhow::Result<()> {
+        let payload: Payload = serde_json::json!({ "name": name })
+            .try_into()
+            .unwrap_or_default();
+        self.client
+            .set_payload(
+                SetPayloadPointsBuilder::new(REALMS, payload)
+                    .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
+                        ids: vec![id.into()],
+                    }))
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
     // ── quantized (slumber) ───────────────────────────────────────────────────
 
     pub async fn store_quantized(
