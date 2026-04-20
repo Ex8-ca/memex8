@@ -1,7 +1,6 @@
 use crate::config::AppConfig;
 use crate::engine::quantizer::AdaptiveScalarQuantizer;
 use crate::storage::qdrant::{MemoryPoint, QdrantStore};
-use serde::{Deserialize, Serialize};
 
 pub struct SlumberEngine {
     config: AppConfig,
@@ -83,7 +82,7 @@ impl SlumberEngine {
     async fn deduplicate(&self) -> anyhow::Result<usize> {
         let all = self.store.scroll_all_memories().await?;
         let mut removed = 0;
-        let dedup_threshold = 0.95f32;
+        let _dedup_threshold = 0.95f32;
 
         // Group by source_hash first (exact duplicates)
         let mut by_hash: std::collections::HashMap<String, Vec<&MemoryPoint>> =
@@ -173,7 +172,7 @@ impl SlumberEngine {
         self.store.update_realm_counts().await?;
 
         let realms = self.store.list_realms().await?;
-        let mut merges = 0;
+        let merges = 0;
 
         // Check for merge opportunities (realms with very similar content)
         // For now, check realms that share many source files
@@ -188,7 +187,7 @@ impl SlumberEngine {
                 }
 
                 // Small realms are candidates for merge
-                let threshold = self.config.realms.merge_threshold;
+                let _threshold = self.config.realms.merge_threshold;
                 if a.memory_count < 5 && b.memory_count < 5 {
                     // Could merge, but for now just log
                     tracing::debug!(

@@ -63,7 +63,7 @@ impl RealmEngine {
         Ok(0)
     }
 
-    pub async fn check_split(&self, realm_id: &str) -> anyhow::Result<bool> {
+    pub async fn check_split(&self, _realm_id: &str) -> anyhow::Result<bool> {
         // TODO: k-means k=2 on realm members, check if sub-clusters have sufficient distance
         Ok(false)
     }

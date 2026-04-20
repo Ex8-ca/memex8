@@ -94,6 +94,7 @@ fn point_id_to_string(id: Option<&qdrant_client::qdrant::PointId>) -> String {
 }
 
 /// Extract dense vector from a RetrievedPoint.
+#[allow(deprecated)]
 fn extract_vector(point: &qdrant_client::qdrant::RetrievedPoint) -> Option<Vec<f32>> {
     point.vectors.as_ref().and_then(|v| {
         v.vectors_options.as_ref().and_then(|opts| match opts {

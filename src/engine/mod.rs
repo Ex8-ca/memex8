@@ -1,5 +1,4 @@
 pub mod chunker;
-pub mod compressor;
 pub mod doctor;
 pub mod embedder;
 pub mod graph;
@@ -9,13 +8,11 @@ pub mod providers;
 pub mod quantizer;
 pub mod realms;
 pub mod scheduler;
-pub mod search;
 pub mod slumber;
 pub mod watcher;
 
 use crate::config::AppConfig;
-use crate::storage::qdrant::{MemoryPoint, MemoryWithVector, QdrantStore};
-pub use crate::engine::ingester::RawChunk;
+use crate::storage::qdrant::{MemoryWithVector, QdrantStore};
 pub use crate::engine::watcher::{FileChangeEvent, FileWatcher};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -323,7 +320,7 @@ impl Engine {
     }
 
     pub async fn watch_remove(&self, path: &str) -> anyhow::Result<()> {
-        let mut fw_guard = self.file_watcher.write().await;
+        let fw_guard = self.file_watcher.write().await;
         if let Some(ref watcher) = *fw_guard {
             watcher.remove_watch(path).await?;
             watcher.persist_watches(&self.config_path).await?;
@@ -721,7 +718,7 @@ impl Engine {
     pub async fn store_memory(
         &self,
         content: &str,
-        tags: Option<Vec<String>>,
+        _tags: Option<Vec<String>>,
         realm_hint: Option<&str>,
         source: Option<&str>,
     ) -> anyhow::Result<String> {
@@ -765,8 +762,8 @@ impl Engine {
     pub async fn graph_search(
         &self,
         entity: &str,
-        relationship: Option<&str>,
-        depth: usize,
+        _relationship: Option<&str>,
+        _depth: usize,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
         // TODO: implement knowledge graph traversal
         // For now, fall back to semantic search and wrap results

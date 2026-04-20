@@ -569,3 +569,12 @@ MIT
 ## Contributing
 
 Contributions welcome! See [TODO.md](TODO.md) and [PLAN.md](PLAN.md) for current roadmap.
+
+## Roadmap / Planned Features
+
+- [ ] **Ollama embeddings** — Use local Ollama (e.g. `nomic-embed-text`) instead of OpenAI for embeddings. Reduces cost and keeps data local.
+- [ ] **LLM consolidation via Ollama** — Run Phase 6 memory consolidation (summarize fragmented memories) using a local LLM instead of OpenAI.
+- [ ] **Memory pruning scheduler** — Auto-prune memories below importance threshold after N days of inactivity.
+- [ ] **Realm merge UI** — Web interface to manually merge two realms together.
+- [ ] **Import/export** — JSON backup/restore of all memories and realms for migration between instances.
+- [ ] **Upsert / edit in place** — Update an existing memory's content without creating a duplicate.

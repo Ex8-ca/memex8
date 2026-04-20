@@ -237,7 +237,7 @@ async fn write_error(
 }
 
 /// Run MCP server over SSE (HTTP)
-pub async fn run_sse(config: AppConfig, port: u16) -> anyhow::Result<()> {
+pub async fn run_sse(_config: AppConfig, port: u16) -> anyhow::Result<()> {
     tracing::info!("Starting MCP server (SSE transport) on port {}", port);
     // TODO: implement SSE transport using Axum
     // For now, use the main server with the SSE endpoint

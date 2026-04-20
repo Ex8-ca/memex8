@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use clap::{Parser, Subcommand};
 
 mod api;
@@ -461,7 +463,7 @@ async fn main() -> anyhow::Result<()> {
             let engine = std::sync::Arc::new(engine::Engine::new(config.clone()).await?);
             tracing::info!("🧠 memex8 daemon starting...");
             let scheduler = engine::scheduler::Scheduler::new(engine.clone(), config.clone());
-            let activity_handle = engine.activity_handle();
+            let _activity_handle = engine.activity_handle();
 
             // Start file watchers if configured
             let watch_handle = {

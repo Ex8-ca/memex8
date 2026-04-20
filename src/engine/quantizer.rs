@@ -1,4 +1,4 @@
-use rand::Rng;
+#![allow(dead_code)]
 use serde::{Deserialize, Serialize};
 
 /// Adaptive scalar vector quantizer with bit-packing.

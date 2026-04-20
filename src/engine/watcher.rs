@@ -3,6 +3,7 @@
 //! Watches configured directories for file changes, debounces events at 500ms,
 //! compares SHA-256 hashes to skip unchanged files, and reports which files changed.
 
+
 use crate::config::WatchConfig;
 use notify::{
     event::{AccessKind, AccessMode, ModifyKind},
