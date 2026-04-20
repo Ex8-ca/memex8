@@ -420,6 +420,42 @@ impl QdrantStore {
         Ok(())
     }
 
+    /// Store a memory with a pre-computed vector (for consolidated summaries).
+    pub async fn store_memory_with_vector(
+        &self,
+        id: &str,
+        content: &str,
+        vector: &[f32],
+        realm_id: Option<&str>,
+        realm_name: Option<&str>,
+        importance: f32,
+        source_file: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let ingested_at = chrono::Utc::now().to_rfc3339();
+
+        let payload: Payload = serde_json::json!({
+            "content": content,
+            "realm_id": realm_id,
+            "realm_name": realm_name.unwrap_or("general"),
+            "importance": importance,
+            "upvotes": 0u32,
+            "access_count": 0u32,
+            "ingested_at": ingested_at,
+            "last_accessed": ingested_at,
+            "source_file": source_file.unwrap_or(""),
+            "source_hash": "",
+            "chunk_type": "consolidated",
+        })
+        .try_into()
+        .unwrap_or_default();
+
+        let point = PointStruct::new(id.to_string(), vector.to_vec(), payload);
+        self.client
+            .upsert_points(UpsertPointsBuilder::new(MEMORIES, vec![point]).wait(true))
+            .await?;
+        Ok(())
+    }
+
     pub async fn update_upvotes(&self, id: &str, upvotes: u32, importance: f32) -> anyhow::Result<()> {
         let payload: Payload = serde_json::json!({
             "upvotes": upvotes,

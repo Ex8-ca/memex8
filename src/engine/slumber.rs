@@ -17,6 +17,7 @@ pub struct SlumberReport {
     pub realms_renamed: usize,
     pub flagged_for_prune: usize,
     pub memex8_md_written: usize,
+    pub memories_consolidated: usize,
 }
 
 impl SlumberEngine {
@@ -56,13 +57,18 @@ impl SlumberEngine {
             report.memex8_md_written = self.update_memex8_md().await?;
         }
 
+        // Phase 6: LLM memory consolidation
+        tracing::info!("💤 Slumber phase 6: LLM memory consolidation");
+        report.memories_consolidated = self.llm_consolidate().await?;
+
         tracing::info!(
-            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} renamed={} prune={} md={}",
+            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} renamed={} consolidated={} prune={} md={}",
             report.memories_scanned,
             report.deduplicated,
             report.quantized,
             report.realms_updated,
             report.realms_renamed,
+            report.memories_consolidated,
             report.flagged_for_prune,
             report.memex8_md_written,
         );
@@ -592,6 +598,185 @@ impl SlumberEngine {
         ));
 
         md
+    }
+
+    // ─── Phase 6: LLM Memory Consolidation ────────────────────────────────────
+
+    /// Use an LLM to consolidate raw conversation fragments into clean summaries.
+    /// Groups memories by realm, sends batches to OpenAI for consolidation,
+    /// then replaces fragmented memories with clean summaries.
+    async fn llm_consolidate(&self) -> anyhow::Result<usize> {
+        let openai_key = std::env::var("OPENAI_API_KEY").ok();
+        if openai_key.is_none() {
+            tracing::info!("  Skipping LLM consolidation: no OPENAI_API_KEY");
+            return Ok(0);
+        }
+        let openai_key = openai_key.unwrap();
+
+        // Group memories by realm
+        let all = self.store.scroll_all_memories().await?;
+        let mut by_realm: std::collections::HashMap<String, Vec<&MemoryPoint>> =
+            std::collections::HashMap::new();
+
+        for mem in &all {
+            let realm = mem.realm_name.clone();
+            by_realm.entry(realm).or_default().push(mem);
+        }
+
+        let mut consolidated = 0;
+
+        for (realm_name, memories) in &by_realm {
+            // Only consolidate realms with 2+ memories
+            if memories.len() < 2 {
+                continue;
+            }
+
+            tracing::info!(
+                "  Consolidating {} memories in realm '{}'",
+                memories.len(),
+                realm_name
+            );
+
+            // Build the prompt
+            let memory_texts: Vec<String> = memories
+                .iter()
+                .map(|m| {
+                    let content = if m.content.len() > 500 {
+                        format!("{}...", &m.content[..500])
+                    } else {
+                        m.content.clone()
+                    };
+                    format!("--- Memory {} ---\n{}", m.id, content)
+                })
+                .collect();
+
+            let prompt = format!(
+                "You are an AI memory consolidation assistant. \
+                Below are raw memory entries from a knowledge realm called '{}'. \
+                These memories were auto-captured from AI agent conversations and contain \
+                conversational artifacts, redundancies, and fragmentation.\n\n\
+                Your task: Consolidate these {} memories into a SINGLE clean, concise summary.\n\n\
+                Rules:\n\
+                - Remove all conversational artifacts (## User, ## Assistant, etc.)\n\
+                - Remove meta-commentary about saving memories or reviewing conversations\n\
+                - Merge duplicate information\n\
+                - Keep only the factual, useful information\n\
+                - Write in a clear, structured format\n\
+                - Keep it under 500 words\n\
+                - If the memories are about code/technical topics, preserve technical details\n\
+                - Output ONLY the consolidated summary, no preamble\n\n\
+                {}\n\n\
+                Consolidated summary:",
+                realm_name,
+                memories.len(),
+                memory_texts.join("\n\n")
+            );
+
+            // Call OpenAI
+            let summary = match self.call_openai(&openai_key, &prompt).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("  OpenAI consolidation failed for '{}': {}", realm_name, e);
+                    continue;
+                }
+            };
+
+            if summary.trim().is_empty() {
+                continue;
+            }
+
+            // Get centroid vector BEFORE deleting (for placement in vector space)
+            let first_realm_id = memories.first().and_then(|m| m.realm_id.as_deref()).unwrap_or("").to_string();
+            let first_vector = self
+                .store
+                .compute_realm_centroid(&first_realm_id)
+                .await
+                .ok()
+                .flatten();
+
+            // Collect IDs to delete
+            let ids_to_delete: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
+
+            // Delete old fragmented memories
+            for id in &ids_to_delete {
+                if let Err(e) = self.store.delete_memory(id).await {
+                    tracing::warn!("  Failed to delete old memory {}: {}", id, e);
+                }
+            }
+
+            // Store the consolidated summary
+            let id = uuid::Uuid::new_v4().to_string();
+            if let Some(ref vector) = first_vector {
+                if let Err(e) = self
+                    .store
+                    .store_memory_with_vector(
+                        &id,
+                        &summary,
+                        vector,
+                        None,
+                        Some(realm_name),
+                        1.0,
+                        None,
+                    )
+                    .await
+                {
+                    tracing::warn!("  Failed to store consolidated memory for '{}': {}", realm_name, e);
+                    continue;
+                }
+            } else {
+                tracing::warn!("  No vector available for consolidated memory in '{}', skipping", realm_name);
+                continue;
+            }
+
+            tracing::info!(
+                "  Consolidated {} memories → 1 summary in '{}'",
+                memories.len(),
+                realm_name
+            );
+            consolidated += 1;
+        }
+
+        tracing::info!("  Consolidated {} realms", consolidated);
+        Ok(consolidated)
+    }
+
+    /// Call OpenAI API to generate a summary.
+    async fn call_openai(&self, api_key: &str, prompt: &str) -> anyhow::Result<String> {
+        let client = reqwest::Client::new();
+        let response = client
+            .post("https://api.openai.com/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": "You are a memory consolidation assistant. You take raw, fragmented memory entries and produce clean, concise summaries. Output ONLY the summary text, nothing else."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 1000,
+                "temperature": 0.3
+            }))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("OpenAI API error ({}): {}", status, body));
+        }
+
+        let body: serde_json::Value = response.json().await?;
+        let content = body["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        if content.is_empty() {
+            return Err(anyhow::anyhow!("OpenAI returned empty response"));
+        }
+
+        Ok(content)
     }
 }
 
