@@ -67,6 +67,7 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/memories/{id}", axum::routing::get(crate::api::routes::memories::get))
         .route("/memories/{id}", axum::routing::delete(crate::api::routes::memories::delete))
         .route("/memories/{id}/upvote", axum::routing::post(crate::api::routes::memories::upvote))
+        .route("/memories/{id}/downvote", axum::routing::post(crate::api::routes::memories::downvote))
         .route("/memories/{id}/archive", axum::routing::post(crate::api::routes::memories::archive))
         .route("/realms", axum::routing::get(crate::api::routes::realms::list))
         .route("/realms", axum::routing::post(crate::api::routes::realms::create))

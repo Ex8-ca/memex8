@@ -1,3 +1,4 @@
+use crate::api::error::ApiError;
 use crate::api::server::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -170,9 +171,17 @@ pub async fn ingest(
 pub async fn upvote(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, crate::api::error::ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     state.engine.upvote(&id).await?;
-    Ok(Json(serde_json::json!({"upvoted": id})))
+    Ok(Json(serde_json::json!({ "status": "upvoted" })))
+}
+
+pub async fn downvote(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.engine.downvote(&id).await?;
+    Ok(Json(serde_json::json!({ "status": "downvoted" })))
 }
 
 pub async fn archive(

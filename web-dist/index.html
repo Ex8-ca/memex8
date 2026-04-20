@@ -218,6 +218,32 @@
             background: rgba(34, 197, 94, 0.1);
         }
 
+        .downvote-btn {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+            padding: 0.25rem 0.5rem;
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 0.75rem;
+            margin-left: 0.25rem;
+        }
+
+        .downvote-btn:hover {
+            border-color: var(--red);
+            color: var(--red);
+            background: rgba(239, 68, 68, 0.1);
+        }
+
+        .downvote-btn.downvoted {
+            border-color: var(--red);
+            color: var(--red);
+            background: rgba(239, 68, 68, 0.1);
+        }
+
         .delete-btn {
             display: flex;
             align-items: center;
@@ -380,6 +406,22 @@
 
         .modal-close:hover { color: var(--text); }
 
+        .modal-downvote-btn {
+            padding: 0.4rem 1rem;
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+
+        .modal-downvote-btn:hover {
+            border-color: var(--red);
+            color: var(--red);
+            background: rgba(239, 68, 68, 0.1);
+        }
+
         .modal-delete-btn {
             padding: 0.4rem 1rem;
             background: rgba(239, 68, 68, 0.1);
@@ -454,6 +496,9 @@
             <pre id="modal-content"></pre>
             <div id="modal-meta" style="margin-top: 1rem; font-size: 0.8rem; color: var(--text-muted);"></div>
             <div style="margin-top: 1rem; display: flex; justify-content: flex-end; gap: 0.5rem;">
+                <button class="modal-downvote-btn" id="modal-downvote-btn" style="display: none;">
+                    ▼ Downvote
+                </button>
                 <button class="modal-delete-btn" id="modal-delete-btn" style="display: none;">
                     🗑 Delete this memory
                 </button>
@@ -553,6 +598,10 @@
                                     onclick="event.stopPropagation(); upvote('${m.id}', this)">
                                 ▲ Upvote
                             </button>
+                            <button class="downvote-btn ${m.downvotes > 0 ? 'downvoted' : ''}"
+                                    onclick="event.stopPropagation(); downvote('${m.id}', this)">
+                                ▼ Downvote
+                            </button>
                             <button class="delete-btn"
                                     onclick="event.stopPropagation(); deleteMemory('${m.id}', this)">
                                 🗑 Delete
@@ -574,10 +623,41 @@
                 const mem = allMemories.find(m => m.id === id);
                 if (mem) {
                     mem.upvotes = (mem.upvotes || 0) + 1;
+                    mem.downvotes = (mem.downvotes || 0);
                     mem.importance = Math.min((mem.importance || 0) + 0.1, 1.0);
+                    // Reset downvote display if it was active
+                    const downBtn = btn.parentElement?.querySelector('.downvote-btn');
+                    if (downBtn) {
+                        downBtn.classList.remove('downvoted');
+                        downBtn.textContent = '▼ Downvote';
+                    }
                 }
             } catch (e) {
                 console.error('Upvote failed:', e);
+            }
+        }
+
+        // ─── Downvote ──────────────────────────────────────────────
+        async function downvote(id, btn) {
+            try {
+                await api(`/memories/${id}/downvote`);
+                btn.classList.add('downvoted');
+                btn.textContent = '▼ Downvoted';
+
+                // Update local state
+                const mem = allMemories.find(m => m.id === id);
+                if (mem) {
+                    mem.downvotes = (mem.downvotes || 0) + 1;
+                    mem.importance = Math.max((mem.importance || 0) - 0.1, 0.01);
+                    // Reset upvote display if it was active
+                    const upBtn = btn.parentElement?.querySelector('.upvote-btn');
+                    if (upBtn) {
+                        upBtn.classList.remove('upvoted');
+                        upBtn.textContent = '▲ Upvote';
+                    }
+                }
+            } catch (e) {
+                console.error('Downvote failed:', e);
             }
         }
 
@@ -645,14 +725,23 @@
             `;
             document.getElementById('modal-overlay').classList.add('active');
 
-            // Wire up modal delete button
+            // Wire up modal buttons
             const deleteBtn = document.getElementById('modal-delete-btn');
             deleteBtn.style.display = 'inline-flex';
             deleteBtn.onclick = () => deleteMemory(id, deleteBtn);
+
+            const downBtn = document.getElementById('modal-downvote-btn');
+            downBtn.style.display = 'inline-flex';
+            downBtn.textContent = '▼ Downvote';
+            downBtn.onclick = () => {
+                downvote(id, downBtn);
+                downBtn.textContent = '▼ Downvoted';
+            };
         }
 
         function closeModal() {
             document.getElementById('modal-delete-btn').style.display = 'none';
+            document.getElementById('modal-downvote-btn').style.display = 'none';
             document.getElementById('modal-overlay').classList.remove('active');
         }
 

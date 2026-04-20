@@ -580,6 +580,13 @@ impl Engine {
         self.store.update_upvotes(id, new_upvotes, new_importance).await
     }
 
+    pub async fn downvote(&self, id: &str) -> anyhow::Result<()> {
+        let memory = self.get_memory(id).await?;
+        let new_upvotes = (memory.upvotes as i64 - 1).max(0) as u32;
+        let new_importance = (memory.importance - 0.1).max(0.01);
+        self.store.update_upvotes(id, new_upvotes, new_importance).await
+    }
+
     pub async fn prune_queue(&self) -> anyhow::Result<Vec<crate::storage::qdrant::MemoryPoint>> {
         let memories = self.store.scroll_all_memories().await?;
         let now = chrono::Utc::now();
