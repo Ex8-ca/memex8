@@ -322,7 +322,7 @@ mod tests {
     use super::*;
 
     fn make_test_vector(dims: usize, seed: u64) -> Vec<f32> {
-        use rand::SeedableRng;
+        use rand::{Rng, SeedableRng};
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         // Create a normalized random vector
         let v: Vec<f32> = (0..dims).map(|_| rng.gen::<f32>() - 0.5).collect();
