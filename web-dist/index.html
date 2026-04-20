@@ -184,6 +184,11 @@
             color: var(--text-muted);
         }
 
+        .card-actions {
+            display: flex;
+            align-items: center;
+        }
+
         .card-meta {
             display: flex;
             gap: 1rem;
@@ -211,6 +216,26 @@
             border-color: var(--green);
             color: var(--green);
             background: rgba(34, 197, 94, 0.1);
+        }
+
+        .delete-btn {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+            padding: 0.25rem 0.5rem;
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 0.75rem;
+            margin-left: 0.5rem;
+        }
+
+        .delete-btn:hover {
+            border-color: var(--red);
+            color: var(--red);
+            background: rgba(239, 68, 68, 0.1);
         }
 
         .importance-bar {
@@ -355,6 +380,20 @@
 
         .modal-close:hover { color: var(--text); }
 
+        .modal-delete-btn {
+            padding: 0.4rem 1rem;
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid var(--red);
+            border-radius: 6px;
+            color: var(--red);
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+
+        .modal-delete-btn:hover {
+            background: rgba(239, 68, 68, 0.2);
+        }
+
         /* Responsive */
         @media (max-width: 768px) {
             .header { flex-direction: column; gap: 1rem; }
@@ -414,6 +453,11 @@
             <h2 id="modal-title"></h2>
             <pre id="modal-content"></pre>
             <div id="modal-meta" style="margin-top: 1rem; font-size: 0.8rem; color: var(--text-muted);"></div>
+            <div style="margin-top: 1rem; display: flex; justify-content: flex-end; gap: 0.5rem;">
+                <button class="modal-delete-btn" id="modal-delete-btn" style="display: none;">
+                    🗑 Delete this memory
+                </button>
+            </div>
         </div>
     </div>
 
@@ -504,10 +548,16 @@
                                 <div class="importance-fill" style="width: ${(m.importance || 0) * 100}%"></div>
                             </div>
                         </div>
-                        <button class="upvote-btn ${m.upvotes > 0 ? 'upvoted' : ''}"
-                                onclick="event.stopPropagation(); upvote('${m.id}', this)">
-                            ▲ Upvote
-                        </button>
+                        <div class="card-actions">
+                            <button class="upvote-btn ${m.upvotes > 0 ? 'upvoted' : ''}"
+                                    onclick="event.stopPropagation(); upvote('${m.id}', this)">
+                                ▲ Upvote
+                            </button>
+                            <button class="delete-btn"
+                                    onclick="event.stopPropagation(); deleteMemory('${m.id}', this)">
+                                🗑 Delete
+                            </button>
+                        </div>
                     </div>
                 </div>
             `).join('');
@@ -528,6 +578,24 @@
                 }
             } catch (e) {
                 console.error('Upvote failed:', e);
+            }
+        }
+
+        // ─── Delete ──────────────────────────────────────────────
+        async function deleteMemory(id, btn) {
+            if (!confirm('Delete this memory? This cannot be undone.')) return;
+            try {
+                await api(`/memories/${id}`, { method: 'DELETE' });
+
+                // Remove from local state and re-render
+                allMemories = allMemories.filter(m => m.id !== id);
+                renderCards(allMemories);
+
+                // Close modal if open
+                closeModal();
+            } catch (e) {
+                console.error('Delete failed:', e);
+                alert('Failed to delete memory: ' + e.message);
             }
         }
 
@@ -576,9 +644,15 @@
                 <strong>Ingested:</strong> ${mem.ingested_at || '—'}
             `;
             document.getElementById('modal-overlay').classList.add('active');
+
+            // Wire up modal delete button
+            const deleteBtn = document.getElementById('modal-delete-btn');
+            deleteBtn.style.display = 'inline-flex';
+            deleteBtn.onclick = () => deleteMemory(id, deleteBtn);
         }
 
         function closeModal() {
+            document.getElementById('modal-delete-btn').style.display = 'none';
             document.getElementById('modal-overlay').classList.remove('active');
         }
 

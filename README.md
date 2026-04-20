@@ -133,6 +133,15 @@ http://localhost:8080
 
 The API key from `~/.hermes/.env` is automatically injected — no login needed.
 
+### Web UI features
+
+- **Cards view** — Browse memories by importance with upvote and delete buttons
+- **Search** — Semantic search across all memories
+- **3D Graph** — Interactive force-directed knowledge graph with realm coloring
+- **Realms** — Filter memories by knowledge realm
+- **Memory detail modal** — Click any card to view full content, then delete directly from the modal
+- **Delete** — Each card has a 🗑 Delete button; clicking it shows a confirmation dialog before permanently removing the memory
+
 ---
 
 ## Hermes Agent Integration
@@ -390,9 +399,9 @@ The REST API runs on `http://localhost:8080` by default. All endpoints except `/
 | `POST` | `/api/v1/memories/ingest` | Ingest file or directory |
 | `GET`  | `/api/v1/memories/tags` | Get tag suggestions |
 | `GET`  | `/api/v1/memories/{id}` | Get memory by ID |
-| `DELETE` | `/api/v1/memories/{id}` | Delete a memory |
 | `POST` | `/api/v1/memories/{id}/upvote` | Upvote a memory |
 | `POST` | `/api/v1/memories/{id}/archive` | Archive a memory |
+| `DELETE` | `/api/v1/memories/{id}` | Delete a memory |
 | `GET`  | `/api/v1/realms` | List all realms |
 | `POST` | `/api/v1/realms` | Create a realm |
 | `GET`  | `/api/v1/realms/{name}` | Show realm details |
