@@ -863,6 +863,8 @@
         let gEdges = [];           // { source, target, strength }
         let gTransform = { x: 0, y: 0, scale: 1 };
         let gDrag = null;          // currently dragged node
+        let gDragOffset = { x: 0, y: 0 }; // offset from node center at drag start
+        let gWasDragged = false;   // true if mouse moved while dragging (prevents click)
         let gHovered = null;
         let gSelected = null;
         let gPanning = false;
@@ -1260,7 +1262,8 @@
                 if (hit) {
                     gDrag = hit;
                     gSelected = hit;
-                    canvas.style.cursor = 'pointer';
+                    gDragOffset = { x: sx, y: sy };
+                    canvas.style.cursor = 'grabbing';
                 } else {
                     gPanning = true;
                     gPanStart = { x: e.clientX - gTransform.x, y: e.clientY - gTransform.y };
@@ -1275,10 +1278,13 @@
                 const sy = e.clientY - rect.top;
 
                 if (gDrag) {
+                    // Move the dragged node in graph coordinates
                     const pos = screenToGraph(sx, sy);
                     gDrag.x = pos.x;
                     gDrag.y = pos.y;
-                    gDrag.vx = 0; gDrag.vy = 0;
+                    gDrag.vx = 0;
+                    gDrag.vy = 0;
+                    gWasDragged = true;
                     drawGraph();
                     return;
                 }
@@ -1290,6 +1296,7 @@
                     return;
                 }
 
+                // Hover detection
                 const hit = nodeAt(sx, sy);
                 if (hit !== gHovered) {
                     gHovered = hit;
@@ -1318,6 +1325,7 @@
             canvas.addEventListener('mouseup', () => {
                 gDrag = null;
                 gPanning = false;
+                gWasDragged = false;
                 canvas.style.cursor = 'grab';
             });
 
@@ -1325,36 +1333,54 @@
                 gHovered = null;
                 gDrag = null;
                 gPanning = false;
+                gWasDragged = false;
                 document.getElementById('graph-tooltip').style.display = 'none';
                 drawGraph();
             });
 
+            // Zoom with wheel
+            canvas.addEventListener('wheel', e => {
+                e.preventDefault();
+                const rect = canvas.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+
+                const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+                const newScale = Math.max(0.1, Math.min(5, gTransform.scale * zoomFactor));
+
+                // Zoom toward cursor
+                gTransform.x = mx - (mx - gTransform.x) * (newScale / gTransform.scale);
+                gTransform.y = my - (my - gTransform.y) * (newScale / gTransform.scale);
+                gTransform.scale = newScale;
+
+                drawGraph();
+            }, { passive: false });
+
+            // Click to open memory
             canvas.addEventListener('click', e => {
+                if (gWasDragged) { gWasDragged = false; return; } // Don't open if we were dragging
                 const rect = canvas.getBoundingClientRect();
                 const sx = e.clientX - rect.left;
                 const sy = e.clientY - rect.top;
                 const hit = nodeAt(sx, sy);
-                if (hit) {
+                if (hit && hit.type === 'memory' && hit.data) {
                     openMemoryModal(hit.data);
                 }
             });
 
-            // Scroll to zoom
-            canvas.addEventListener('wheel', e => {
-                e.preventDefault();
-                const rect = canvas.getBoundingClientRect();
-                const sx = e.clientX - rect.left;
-                const sy = e.clientY - rect.top;
-                const factor = e.deltaY < 0 ? 1.1 : 0.9;
-                const newScale = Math.max(0.05, Math.min(8, gTransform.scale * factor));
-                gTransform.x = sx - (sx - gTransform.x) * (newScale / gTransform.scale);
-                gTransform.y = sy - (sy - gTransform.y) * (newScale / gTransform.scale);
-                gTransform.scale = newScale;
-                drawGraph();
-            }, { passive: false });
-
-            // Legend
+            // Build legend
             buildLegend();
+        }
+
+        function buildLegend() {
+            const legend = document.getElementById('graph-legend');
+            if (!legend) return;
+            legend.innerHTML = allRealms.map((r, i) => `
+                <div class="legend-item">
+                    <div class="legend-dot" style="background: ${REALM_COLORS[i % REALM_COLORS.length]}"></div>
+                    <span>${escapeHtml(r.name || 'Unnamed')}</span>
+                </div>
+            `).join('');
         }
 
         function openMemoryModal(memoryData) {
@@ -1371,33 +1397,25 @@
             const realmColor = memoryData.realm_id ? getRealmColor(memoryData.realm_id, allRealms) : '#888';
             meta.innerHTML = `importance: <strong style="color:${realmColor}">${imp.toFixed(3)}</strong> · realm: <strong style="color:${realmColor}">${escapeHtml(realm)}</strong>`;
 
-            // Show upvote/downvote/delete buttons if logged in
+            // Show upvote/downvote/delete buttons
             const upvoteBtn = document.getElementById('modal-upvote-btn');
             const downvoteBtn = document.getElementById('modal-downvote-btn');
             const deleteBtn = document.getElementById('modal-delete-btn');
-            const hasVoting = upvoteBtn && voteEnabled;
-            if (upvoteBtn) upvoteBtn.style.display = hasVoting ? 'inline-block' : 'none';
-            if (downvoteBtn) downvoteBtn.style.display = hasVoting ? 'inline-block' : 'none';
-            if (deleteBtn) deleteBtn.style.display = hasVoting ? 'inline-block' : 'none';
-
-            if (hasVoting) {
+            if (upvoteBtn) {
+                upvoteBtn.style.display = 'inline-block';
                 upvoteBtn.onclick = () => { upvote(memoryData.id, upvoteBtn); closeModal(); };
+            }
+            if (downvoteBtn) {
+                downvoteBtn.style.display = 'inline-block';
                 downvoteBtn.onclick = () => { downvote(memoryData.id, downvoteBtn); closeModal(); };
+            }
+            if (deleteBtn) {
+                deleteBtn.style.display = 'inline-block';
                 deleteBtn.onclick = () => { if (confirm('Delete this memory?')) { deleteMemory(memoryData.id); closeModal(); } };
             }
 
             document.getElementById('modal-overlay').classList.add('active');
             currentMemoryId = memoryData.id;
-        }
-
-        function buildLegend() {
-            const legend = document.getElementById('graph-legend');
-            legend.innerHTML = allRealms.map((r, i) => `
-                <div class="legend-item">
-                    <div class="legend-dot" style="background: ${REALM_COLORS[i % REALM_COLORS.length]}"></div>
-                    <span>${escapeHtml(r.name || 'Unnamed')}</span>
-                </div>
-            `).join('');
         }
 
         // ─── Utilities ───────────────────────────────────────────
