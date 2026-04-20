@@ -892,9 +892,11 @@
 
         // Build graph data from memories + realms
         function buildGraphData(memories, realms) {
-            const realmMap = {};
+            const realmById = {};
+            const realmByName = {};
             realms.forEach((r, i) => {
-                realmMap[r.id] = r;
+                realmById[r.id] = r;
+                realmByName[r.name] = r;
             });
 
             gNodes = [];
@@ -918,8 +920,8 @@
 
             // Memory nodes (smaller, orbit their realm)
             memories.forEach((m) => {
-                const realm = realmMap[m.realm_id];
-                const realmNode = gNodes.find(n => n.id === m.realm_id);
+                // Memories have realm_name (string like "realm-28da6a75"), realms have name
+                const realmNode = gNodes.find(n => n.label === m.realm_name);
                 const color = realmNode ? realmNode.color : '#555';
 
                 const spread = realmNode ? 100 : 200;
@@ -940,14 +942,14 @@
 
                 // Connect memory to its realm
                 if (realmNode) {
-                    gEdges.push({ source: m.id, target: realm.id, strength: 1 });
+                    gEdges.push({ source: m.id, target: realmNode.id, strength: 1 });
                 }
             });
 
             // Memory-to-memory edges (same realm, high importance)
             memories.forEach((m1, i) => {
                 memories.slice(i + 1).forEach((m2) => {
-                    if (m1.realm_id && m1.realm_id === m2.realm_id) {
+                    if (m1.realm_name && m1.realm_name === m2.realm_name) {
                         const imp = Math.min((m1.importance || 0) + (m2.importance || 0), 1);
                         if (imp > 0.6) {
                             gEdges.push({ source: m1.id, target: m2.id, strength: imp });
