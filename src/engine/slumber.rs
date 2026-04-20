@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::engine::memex8_md::write_digest_md;
 use crate::engine::quantizer::AdaptiveScalarQuantizer;
 use crate::storage::qdrant::{MemoryPoint, QdrantStore};
 
@@ -17,6 +18,8 @@ pub struct SlumberReport {
     pub flagged_for_prune: usize,
     pub memex8_md_written: usize,
     pub memories_consolidated: usize,
+    pub index_optimized: usize,
+    pub digest_md_written: usize,
 }
 
 impl SlumberEngine {
@@ -60,8 +63,31 @@ impl SlumberEngine {
         tracing::info!("💤 Slumber phase 6: LLM memory consolidation");
         report.memories_consolidated = self.llm_consolidate().await?;
 
+        // Phase 7: Qdrant index optimization (vacuum + rebuild)
+        tracing::info!("💤 Slumber phase 7: Qdrant index optimization");
+        report.index_optimized = self.optimize_qdrant_index().await?;
+
+        // Phase 7: Write master memex8.md digest
+        if self.config.digest_md.enabled {
+            tracing::info!("💤 Slumber phase 7: Write digest md");
+            let realms = self.store.list_realms().await?;
+            let all_memories = self.store.scroll_all_memories().await?;
+            report.digest_md_written = match write_digest_md(
+                &self.config.digest_md,
+                &all_memories,
+                &realms,
+                &report,
+            ).await {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!("  Digest md write failed: {}", e);
+                    0
+                }
+            };
+        }
+
         tracing::info!(
-            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} renamed={} consolidated={} prune={} md={}",
+            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={}",
             report.memories_scanned,
             report.deduplicated,
             report.quantized,
@@ -70,6 +96,8 @@ impl SlumberEngine {
             report.memories_consolidated,
             report.flagged_for_prune,
             report.memex8_md_written,
+            report.index_optimized,
+            report.digest_md_written,
         );
 
         Ok(report)
@@ -932,6 +960,58 @@ impl SlumberEngine {
 
         tracing::info!("  Consolidated {} realms", consolidated);
         Ok(consolidated)
+    }
+
+    // ─── Phase 7: Qdrant Index Optimization ───────────────────────────────────
+
+    /// Optimize Qdrant collections by triggering vacuum and index rebuilds.
+    /// Returns number of collections optimized.
+    async fn optimize_qdrant_index(&self) -> anyhow::Result<usize> {
+        use qdrant_client::qdrant;
+
+        let collections = vec![
+            &self.config.qdrant.collection_memories[..],
+            &self.config.qdrant.collection_quantized[..],
+            &self.config.qdrant.collection_realms[..],
+        ];
+
+        let mut optimized = 0;
+
+        for collection_name in collections {
+            tracing::info!("  Optimizing collection '{}'...", collection_name);
+
+            // Update collection optimizer settings to trigger background optimization
+            let result = self
+                .store
+                .update_collection_optimizer(
+                    collection_name,
+                    qdrant::OptimizersConfigDiff {
+                        deleted_threshold: Some(0.1),
+                        vacuum_min_vector_number: Some(1000),
+                        default_segment_number: Some(4),
+                        max_segment_size: Some(200000),
+                        memmap_threshold: Some(50000),
+                        indexing_threshold: Some(20000),
+                        flush_interval_sec: Some(5),
+                        max_optimization_threads: Some(qdrant::MaxOptimizationThreads::from(2)),
+                        ..Default::default()
+                    },
+                )
+                .await;
+
+            match result {
+                Ok(_) => {
+                    tracing::info!("  Optimized '{}'", collection_name);
+                    optimized += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("  Failed to optimize '{}': {}", collection_name, e);
+                }
+            }
+        }
+
+        tracing::info!("  Optimized {} collections", optimized);
+        Ok(optimized)
     }
 
     /// Call OpenAI API to generate a summary.

@@ -905,4 +905,20 @@ impl QdrantStore {
 
         Ok(updated)
     }
+
+    /// Update optimizer config for a collection (triggers background optimization).
+    pub async fn update_collection_optimizer(
+        &self,
+        collection_name: &str,
+        config: qdrant_client::qdrant::OptimizersConfigDiff,
+    ) -> anyhow::Result<()> {
+        self.client
+            .update_collection(
+                qdrant_client::qdrant::UpdateCollectionBuilder::new(collection_name.to_string())
+                    .optimizers_config(config)
+                    .build(),
+            )
+            .await?;
+        Ok(())
+    }
 }

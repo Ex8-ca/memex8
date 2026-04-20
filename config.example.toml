@@ -49,10 +49,28 @@ max_cluster_size = 20
 preserve_originals = true
 confidence_threshold = 0.8
 
+[slumber.index_optimization]
+enabled = true
+deleted_threshold = 0.1
+vacuum_min_vector_number = 1000
+default_segment_number = 4
+max_segment_size = 200000
+memmap_threshold = 50000
+indexing_threshold = 20000
+flush_interval_sec = 5
+max_optimization_threads = 2
+
 [memex8_md]
 enabled = true
 max_memories = 20
 update_on_slumber = true
+
+[digest_md]
+enabled = true
+path = "~/.memex8/memex8.md"
+max_memories = 20
+include_realms = true
+max_log_entries = 30
 
 [web]
 enabled = true

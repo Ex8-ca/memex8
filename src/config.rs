@@ -11,6 +11,7 @@ pub struct AppConfig {
     pub realms: RealmsConfig,
     pub slumber: SlumberConfig,
     pub memex8_md: Memex8MdConfig,
+    pub digest_md: DigestMdConfig,
     pub web: WebConfig,
     #[serde(default)]
     pub watch: Vec<WatchConfig>,
@@ -153,10 +154,60 @@ impl Default for SummarizeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexOptimizationConfig {
+    pub enabled: bool,
+    pub deleted_threshold: f32,
+    pub vacuum_min_vector_number: u32,
+    pub default_segment_number: u32,
+    pub max_segment_size: u64,
+    pub memmap_threshold: u64,
+    pub indexing_threshold: u64,
+    pub flush_interval_sec: u64,
+    pub max_optimization_threads: u32,
+}
+
+impl Default for IndexOptimizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            deleted_threshold: 0.1,
+            vacuum_min_vector_number: 1000,
+            default_segment_number: 4,
+            max_segment_size: 200000,
+            memmap_threshold: 50000,
+            indexing_threshold: 20000,
+            flush_interval_sec: 5,
+            max_optimization_threads: 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memex8MdConfig {
     pub enabled: bool,
     pub max_memories: u32,
     pub update_on_slumber: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestMdConfig {
+    pub enabled: bool,
+    pub path: String,
+    pub max_memories: u32,
+    pub include_realms: bool,
+    pub max_log_entries: u32,
+}
+
+impl Default for DigestMdConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: "~/.memex8/memex8.md".into(),
+            max_memories: 20,
+            include_realms: true,
+            max_log_entries: 30,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +302,7 @@ impl Default for AppConfig {
                 max_memories: 20,
                 update_on_slumber: true,
             },
+            digest_md: DigestMdConfig::default(),
             web: WebConfig {
                 enabled: true,
                 theme: "dark".into(),
