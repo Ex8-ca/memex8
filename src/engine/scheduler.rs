@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use crate::engine::Engine;
+use chrono::{Datelike, Timelike};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
@@ -137,10 +138,123 @@ fn parse_cron_to_duration(cron_expr: &str) -> anyhow::Result<Duration> {
         }
     }
 
+    // Handle standard cron expressions like "0 3 * * *" (daily at specific time)
+    // For these, parse the hour and minute and return the appropriate interval
+    let parts: Vec<&str> = cron_expr.split_whitespace().collect();
+    if parts.len() == 5 {
+        // minute hour day month weekday
+        let hour = parts[1];
+        let minute = parts[0];
+        let day = parts[2];
+        let month = parts[3];
+        let weekday = parts[4];
+
+        // If day, month, and weekday are all *, it's a daily schedule
+        if day == "*" && month == "*" && weekday == "*" {
+            let h: u64 = hour.parse().unwrap_or(0);
+            let m: u64 = minute.parse().unwrap_or(0);
+            let total_minutes = h * 60 + m;
+            if total_minutes > 0 {
+                // Run once per day at the specified time
+                return Ok(Duration::from_secs(24 * 3600));
+            }
+        }
+
+        // Hourly schedule: "0 * * * *"
+        if hour == "*" && day == "*" && month == "*" && weekday == "*" {
+            return Ok(Duration::from_secs(3600));
+        }
+
+        // Every N hours: "0 */4 * * *"
+        if let Some(star_n) = hour.strip_prefix("*/") {
+            let hours: u64 = star_n.parse().unwrap_or(4);
+            return Ok(Duration::from_secs(hours * 3600));
+        }
+    }
+
     // Default: every 5 minutes
     tracing::warn!(
         "Complex cron expression '{}' not fully parsed, defaulting to 5 minutes",
         cron_expr
     );
     Ok(Duration::from_secs(300))
+}
+
+/// Check if the current time matches a cron expression.
+/// Returns true if we should run the scheduled task now.
+pub fn should_run_at_schedule(schedule: &str) -> bool {
+    let schedule = schedule.trim();
+    if schedule.is_empty() {
+        return false;
+    }
+
+    let now = chrono::Local::now();
+    let parts: Vec<&str> = schedule.split_whitespace().collect();
+    if parts.len() != 5 {
+        return false;
+    }
+
+    let current_minute = now.minute() as u64;
+    let current_hour = now.hour() as u64;
+    let current_day = now.day() as u64;
+    let current_month = now.month() as u64;
+    let current_weekday = now.weekday().num_days_from_sunday() as u64;
+
+    if !matches_field(parts[0], current_minute) {
+        return false;
+    }
+    if !matches_field(parts[1], current_hour) {
+        return false;
+    }
+    if !matches_field(parts[2], current_day) {
+        return false;
+    }
+    if !matches_field(parts[3], current_month) {
+        return false;
+    }
+    if !matches_field(parts[4], current_weekday) {
+        return false;
+    }
+
+    true
+}
+
+/// Check if a value matches a cron field (minute, hour, etc.)
+fn matches_field(field: &str, value: u64) -> bool {
+    if field == "*" {
+        return true;
+    }
+
+    // Handle "*/N" (every N)
+    if let Some(star_n) = field.strip_prefix("*/") {
+        if let Ok(n) = star_n.parse::<u64>() {
+            if n > 0 {
+                return value % n == 0;
+            }
+        }
+    }
+
+    // Handle specific value
+    if let Ok(n) = field.parse::<u64>() {
+        return value == n;
+    }
+
+    // Handle comma-separated values
+    if field.contains(',') {
+        return field.split(',')
+            .map(|s| s.trim())
+            .any(|s| matches_field(s, value));
+    }
+
+    // Handle ranges like "1-5"
+    if field.contains('-') {
+        let parts: Vec<&str> = field.split('-').collect();
+        if parts.len() == 2 {
+            if let (Ok(start), Ok(end)) = (parts[0].parse::<u64>(), parts[1].parse::<u64>()) {
+                return value >= start && value <= end;
+            }
+        }
+    }
+
+    false
 }

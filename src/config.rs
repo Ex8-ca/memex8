@@ -135,6 +135,11 @@ pub struct SlumberConfig {
     pub touch_importance_bump: f32,
     #[serde(default)]
     pub summarize: SummarizeConfig,
+    /// Cron schedule for LLM consolidation (Phase 6).
+    /// Default: "0 3 * * *" (daily at 3am).
+    /// Set to "" to disable schedule-based consolidation.
+    #[serde(default = "default_consolidation_schedule")]
+    pub consolidation_schedule: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,6 +238,7 @@ pub struct WatchConfig {
 fn default_chunk() -> String { "section".into() }
 fn default_poll() -> String { "5m".into() }
 fn default_touch_importance_bump() -> f32 { 0.02 }
+fn default_consolidation_schedule() -> String { "0 3 * * *".into() }
 
 impl AppConfig {
     pub fn load(path: &str) -> anyhow::Result<Self> {
@@ -301,6 +307,7 @@ impl Default for AppConfig {
                 prune_threshold: 0.1,
                 touch_importance_bump: 0.02,
                 summarize: SummarizeConfig::default(),
+                consolidation_schedule: "0 3 * * *".into(),
             },
             memex8_md: Memex8MdConfig {
                 enabled: true,

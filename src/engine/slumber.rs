@@ -59,9 +59,15 @@ impl SlumberEngine {
             report.memex8_md_written = self.update_memex8_md().await?;
         }
 
-        // Phase 6: LLM memory consolidation
-        tracing::info!("💤 Slumber phase 6: LLM memory consolidation");
-        report.memories_consolidated = self.llm_consolidate().await?;
+        // Phase 6: LLM memory consolidation (only run on schedule)
+        if self.config.slumber.consolidation_schedule.is_empty() {
+            tracing::debug!("  Skipping consolidation: schedule is empty");
+        } else if crate::engine::scheduler::should_run_at_schedule(&self.config.slumber.consolidation_schedule) {
+            tracing::info!("💤 Slumber phase 6: Memory consolidation (schedule matched: {})", self.config.slumber.consolidation_schedule);
+            report.memories_consolidated = self.llm_consolidate().await?;
+        } else {
+            tracing::debug!("  Skipping consolidation: schedule not matched ({}). Next run: at scheduled time.", self.config.slumber.consolidation_schedule);
+        }
 
         // Phase 7: Qdrant index optimization (vacuum + rebuild)
         tracing::info!("💤 Slumber phase 7: Qdrant index optimization");
