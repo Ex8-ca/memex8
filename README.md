@@ -49,10 +49,12 @@
 - **Augment, Don't Replace** — Writes `MEMEX8.md` back to project directories for model context pickup
 - **Experimental: ScalarQuant Compression** — Adaptive scalar vector quantization inspired by [arXiv:2504.19874](https://arxiv.org/abs/2504.19874). Code exists but is not yet production-ready — results vary at higher dimensions.
 
-### Embedding Flexibility
-- **Cloud first** — OpenAI `text-embedding-3-small` (1536d), fast and accurate
-- **Local fallback** — Ollama with `nomic-embed-text` (768d), zero cost, fully private
-- **Pluggable** — Trait-based design, add any embedding provider
+### Embedding & Consolidation Flexibility
+- **Embeddings — Cloud first** — OpenAI `text-embedding-3-small` (1536d), fast and accurate
+- **Embeddings — Local fallback** — Ollama with `nomic-embed-text` (768d), zero cost, fully private
+- **Slumber Consolidation — Cloud** — OpenAI `gpt-4o-mini` (default, cheap, no local GPU needed)
+- **Slumber Consolidation — Local** — Any OpenAI-compatible endpoint (Ollama, Text Generation Inference, etc.) for fully private consolidation
+- **Pluggable** — Trait-based design, add any embedding or LLM provider
 
 ### Integrations
 - **Hermes Agent** — Native memory provider plugin (replaces built-in `MEMORY.md`). This is the primary integration — the plugin handles memory calls in-process so the agent doesn't make unnecessary tool calls. Memory is just *there* when needed.
@@ -345,6 +347,13 @@ api_key_env = "OPENAI_API_KEY"
 idle_timeout = "10m"
 quantize_bit_width = 3.5     # ScalarQuant bit-width (2.5-4)
 auto_archive_days = 90
+
+# Slumber consolidation (Phase 6): runs on schedule (default: daily at 3am)
+# backend: "openai" (default, uses OPENAI_API_KEY + gpt-4o-mini)
+#          "local" (uses LOCAL_LLM_URL + LOCAL_LLM_API_KEY)
+[slumber.consolidation]
+backend = "openai"
+model = "gpt-4o-mini"        # openai model name, or local model name
 ```
 
 Watch configs are added automatically via `memex8 watch add`.

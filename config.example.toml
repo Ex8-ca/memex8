@@ -42,6 +42,15 @@ cron_ingest = "*/5 * * * *"
 quantize_bit_width = 3.5
 auto_archive_days = 90
 prune_threshold = 0.1
+consolidation_schedule = "0 3 * * *"   # Daily at 3am; "" to disable
+
+# Slumber consolidation (Phase 6)
+# backend: "openai" (default) or "local"
+# openai: uses OPENAI_API_KEY from environment
+# local: uses LOCAL_LLM_URL + LOCAL_LLM_API_KEY from environment
+[slumber.consolidation]
+backend = "openai"
+model = "gpt-4o-mini"    # openai model, or local model name
 
 [slumber.summarize]
 enabled = true
