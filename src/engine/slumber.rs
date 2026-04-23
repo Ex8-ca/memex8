@@ -797,9 +797,13 @@ impl SlumberEngine {
                 md.push_str(&format!("**{}**\n\n", heading));
             }
 
-            // Truncate long content
+            // Truncate long content (UTF-8 safe)
             let content = if mem.content.len() > 500 {
-                format!("{}...", &mem.content[..500])
+                let safe_end = mem.content.char_indices()
+                    .take_while(|(i, _)| *i < 500)
+                    .last()
+                    .map_or(mem.content.len(), |(i, c)| i + c.len_utf8());
+                format!("{}...", &mem.content[..safe_end])
             } else {
                 mem.content.clone()
             };
