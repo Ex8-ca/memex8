@@ -468,6 +468,11 @@ impl Engine {
         // Apply pagination
         let results: Vec<_> = results.into_iter().skip(offset).take(limit).collect();
 
+        // Touch all returned memories (increment access_count, bump importance)
+        let touch_ids: Vec<&str> = results.iter().map(|r| r.payload.id.as_str()).collect();
+        let bump = self.config.slumber.touch_importance_bump;
+        let _ = self.store.track_access_batch(&touch_ids, bump).await;
+
         {
             let mut state = self.slumber_state.write().await;
             state.last_query = chrono::Utc::now();
@@ -511,6 +516,12 @@ impl Engine {
             .collect();
 
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Touch the top memories before returning them
+        let top: Vec<_> = scored.iter().take(limit).collect();
+        let touch_ids: Vec<&str> = top.iter().map(|(m, _)| m.id.as_str()).collect();
+        let bump = self.config.slumber.touch_importance_bump;
+        let _ = self.store.track_access_batch(&touch_ids, bump).await;
 
         Ok(scored
             .into_iter()

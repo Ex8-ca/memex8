@@ -130,6 +130,9 @@ pub struct SlumberConfig {
     pub quantize_bit_width: f32,
     pub auto_archive_days: u32,
     pub prune_threshold: f32,
+    /// How much to bump importance each time a memory is recalled (touched).
+    #[serde(default = "default_touch_importance_bump")]
+    pub touch_importance_bump: f32,
     #[serde(default)]
     pub summarize: SummarizeConfig,
 }
@@ -229,6 +232,7 @@ pub struct WatchConfig {
 
 fn default_chunk() -> String { "section".into() }
 fn default_poll() -> String { "5m".into() }
+fn default_touch_importance_bump() -> f32 { 0.02 }
 
 impl AppConfig {
     pub fn load(path: &str) -> anyhow::Result<Self> {
@@ -295,6 +299,7 @@ impl Default for AppConfig {
                 quantize_bit_width: 3.5,
                 auto_archive_days: 90,
                 prune_threshold: 0.1,
+                touch_importance_bump: 0.02,
                 summarize: SummarizeConfig::default(),
             },
             memex8_md: Memex8MdConfig {

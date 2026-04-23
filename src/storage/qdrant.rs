@@ -477,10 +477,24 @@ impl QdrantStore {
         Ok(())
     }
 
-    pub async fn track_access(&self, id: &str) -> anyhow::Result<()> {
+    /// Touch a memory: increment access_count, update last_accessed, bump importance.
+    /// This is the core of the "human memory" model — frequently recalled memories
+    /// become stronger and more likely to surface in future searches.
+    pub async fn track_access(&self, id: &str, importance_bump: f32) -> anyhow::Result<()> {
+        let current = self.get_memory(id).await?;
+        let (new_access_count, new_importance) = if let Some(mem) = current {
+            let count = mem.access_count + 1;
+            let importance = (mem.importance + importance_bump).min(1.0);
+            (count, importance)
+        } else {
+            return Ok(());
+        };
+
         let now = chrono::Utc::now().to_rfc3339();
         let payload: Payload = serde_json::json!({
             "last_accessed": now,
+            "access_count": new_access_count,
+            "importance": new_importance,
         })
         .try_into()
         .unwrap_or_default();
@@ -494,6 +508,53 @@ impl QdrantStore {
                     .wait(true),
             )
             .await?;
+        Ok(())
+    }
+
+    /// Touch multiple memories in a single batch (for search results).
+    pub async fn track_access_batch(&self, ids: &[&str], importance_bump: f32) -> anyhow::Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let point_ids: Vec<qdrant_client::qdrant::PointId> = ids.iter().map(|id| (*id).into()).collect();
+        let resp = self.client
+            .get_points(
+                GetPointsBuilder::new(MEMORIES, point_ids)
+                    .with_payload(true)
+                    .with_vectors(false),
+            )
+            .await?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+
+        for point in resp.result {
+            let pid = point_id_to_string(point.id.as_ref());
+            let map = map_to_json(&point.payload);
+            let mem = memory_from_payload(&pid, &map);
+
+            let new_count = mem.access_count + 1;
+            let new_importance = (mem.importance + importance_bump).min(1.0);
+
+            let payload: Payload = serde_json::json!({
+                "last_accessed": now,
+                "access_count": new_count,
+                "importance": new_importance,
+            })
+            .try_into()
+            .unwrap_or_default();
+
+            self.client
+                .set_payload(
+                    SetPayloadPointsBuilder::new(MEMORIES, payload)
+                        .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
+                            ids: vec![pid.into()],
+                        }))
+                        .wait(false),
+                )
+                .await?;
+        }
+
         Ok(())
     }
 
