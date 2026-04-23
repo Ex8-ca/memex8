@@ -140,6 +140,9 @@ pub struct SlumberConfig {
     /// Set to "" to disable schedule-based consolidation.
     #[serde(default = "default_consolidation_schedule")]
     pub consolidation_schedule: String,
+    /// Consolidation backend config.
+    #[serde(default)]
+    pub consolidation: ConsolidationConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +160,33 @@ impl Default for SummarizeConfig {
             max_cluster_size: 20,
             preserve_originals: true,
             confidence_threshold: 0.8,
+        }
+    }
+}
+
+/// Consolidation backend configuration.
+/// Supports both OpenAI (default, cheap for this use case) and local LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsolidationConfig {
+    /// Backend to use: "openai" (default) or "local".
+    #[serde(default = "default_consolidation_backend")]
+    pub backend: String,
+    /// Model to use for consolidation.
+    /// OpenAI: "gpt-4o-mini" (default) or "gpt-4o".
+    /// Local: model name passed to the local LLM endpoint.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+fn default_consolidation_backend() -> String {
+    "openai".into()
+}
+
+impl Default for ConsolidationConfig {
+    fn default() -> Self {
+        Self {
+            backend: "openai".into(),
+            model: Some("gpt-4o-mini".into()),
         }
     }
 }
@@ -308,6 +338,7 @@ impl Default for AppConfig {
                 touch_importance_bump: 0.02,
                 summarize: SummarizeConfig::default(),
                 consolidation_schedule: "0 3 * * *".into(),
+                consolidation: ConsolidationConfig::default(),
             },
             memex8_md: Memex8MdConfig {
                 enabled: true,

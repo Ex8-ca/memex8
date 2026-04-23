@@ -409,7 +409,7 @@ impl SlumberEngine {
             memory_texts.join("\n")
         );
 
-        let result = self.call_local_llm(base_url, api_key, &prompt).await?;
+        let result = self.call_local_llm(base_url, api_key, None, &prompt).await?;
         // Clean up the response
         let name = result.trim().trim_matches('"').trim();
         if name.len() > 50 || name.is_empty() {
@@ -835,8 +835,8 @@ impl SlumberEngine {
     /// Groups memories by realm, sends batches to local LLM (Qwen 3.6 via Unsloth),
     /// then replaces fragmented memories with clean summaries.
     async fn llm_consolidate(&self) -> anyhow::Result<usize> {
-        let llm_url = std::env::var("LOCAL_LLM_URL").unwrap_or_else(|_| "http://192.168.1.8:8888".into());
-        let llm_key = std::env::var("LOCAL_LLM_API_KEY").ok();
+        let backend = &self.config.slumber.consolidation.backend;
+        let model = self.config.slumber.consolidation.model.clone();
 
         // Group memories by realm
         let all = self.store.scroll_all_memories().await?;
@@ -857,9 +857,10 @@ impl SlumberEngine {
             }
 
             tracing::info!(
-                "  Consolidating {} memories in realm '{}'",
+                "  Consolidating {} memories in realm '{}' (backend: {})",
                 memories.len(),
-                realm_name
+                realm_name,
+                backend
             );
 
             // Build the prompt (limit to top 10 memories by importance)
@@ -905,11 +906,32 @@ impl SlumberEngine {
                 memory_texts.join("\n\n")
             );
 
-            // Call local LLM for consolidation
-            let summary = match self.call_local_llm(&llm_url, llm_key.as_deref(), &prompt).await {
+            // Call the appropriate LLM backend
+            let summary = match backend.as_str() {
+                "openai" => {
+                    let api_key = std::env::var("OPENAI_API_KEY").ok();
+                    if api_key.is_none() {
+                        tracing::warn!("  Skipping consolidation: OPENAI_API_KEY not set");
+                        return Ok(consolidated);
+                    }
+                    let openai_model = model.as_deref().unwrap_or("gpt-4o-mini");
+                    self.call_openai(&api_key.unwrap(), openai_model, &prompt).await
+                }
+                "local" => {
+                    let llm_url = std::env::var("LOCAL_LLM_URL").unwrap_or_else(|_| "http://192.168.1.8:8888".into());
+                    let llm_key = std::env::var("LOCAL_LLM_API_KEY").ok();
+                    self.call_local_llm(&llm_url, llm_key.as_deref(), model.as_deref(), &prompt).await
+                }
+                _ => {
+                    tracing::warn!("  Unknown consolidation backend: {}", backend);
+                    continue;
+                }
+            };
+
+            let summary = match summary {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!("  Local LLM consolidation failed for '{}': {}", realm_name, e);
+                    tracing::warn!("  Consolidation failed for '{}': {}", realm_name, e);
                     continue;
                 }
             };
@@ -1026,7 +1048,45 @@ impl SlumberEngine {
     }
 
     /// Call OpenAI API to generate a summary.
-    async fn call_local_llm(&self, base_url: &str, api_key: Option<&str>, prompt: &str) -> anyhow::Result<String> {
+    async fn call_openai(&self, api_key: &str, model: &str, prompt: &str) -> anyhow::Result<String> {
+        let client = reqwest::Client::new();
+        let response = client
+            .post("https://api.openai.com/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a memory consolidation assistant. You take raw, fragmented memory entries and produce clean, concise summaries. Output ONLY the summary text, nothing else."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 1000,
+                "temperature": 0.3
+            }))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("OpenAI API error ({}): {}", status, body));
+        }
+
+        let body: serde_json::Value = response.json().await?;
+        let content = body["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        if content.is_empty() {
+            return Err(anyhow::anyhow!("OpenAI returned empty response"));
+        }
+
+        Ok(content)
+    }
+
+    async fn call_local_llm(&self, base_url: &str, api_key: Option<&str>, model: Option<&str>, prompt: &str) -> anyhow::Result<String> {
         let client = reqwest::Client::new();
         let url = base_url.trim_end_matches('/');
         let mut req = client
@@ -1037,9 +1097,11 @@ impl SlumberEngine {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
 
+        let model_name = model.unwrap_or("unsloth/Qwen3.6-35B-A3B-GGUF");
+
         let response = req
             .json(&serde_json::json!({
-                "model": "unsloth/Qwen3.6-35B-A3B-GGUF",
+                "model": model_name,
                 "messages": [
                     {"role": "system", "content": "You are a memory consolidation assistant. You take raw, fragmented memory entries and produce clean, concise summaries. Output ONLY the summary text, nothing else."},
                     {"role": "user", "content": prompt}
