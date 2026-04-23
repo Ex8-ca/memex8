@@ -355,6 +355,6 @@ impl FileWatcher {
     }
 
     fn default_config_content() -> String {
-        "[server]\nhost = \"0.0.0.0\"\nport = 8080\nmcp_port = 8081\n\n[auth]\napi_key_env = \"MEMEX8_API_KEY\"\n\n[embedding]\nprovider = \"ollama\"\nmodel = \"nomic-embed-text\"\ndimensions = 768\n\n[qdrant]\nurl = \"http://localhost:6333\"\n\nwatch = []\n".to_string()
+        "[server]\nhost = \"0.0.0.0\"\nport = 8080\nmcp_port = 8081\n\n[auth]\napi_key_env = \"MEMEX8_API_KEY\"\n\n[embedding]\nprovider = \"openai\"\nmodel = \"text-embedding-3-small\"\ndimensions = 1536\n\n[qdrant]\nurl = \"http://localhost:6333\"\n\nwatch = []\n".to_string()
     }
 }

@@ -322,7 +322,8 @@ impl SlumberEngine {
     /// Rename realms with human-readable names using LLM, then merge similar realms
     /// and redistribute memories to their best-matching realm.
     async fn rename_realms(&self) -> anyhow::Result<usize> {
-        let openai_key = std::env::var("OPENAI_API_KEY").ok();
+        let llm_url = std::env::var("LOCAL_LLM_URL").unwrap_or_else(|_| "http://192.168.1.8:8888".into());
+        let llm_key = std::env::var("LOCAL_LLM_API_KEY").ok();
 
         let realms = self.store.list_realms().await?;
         let mut renamed = 0;
@@ -344,8 +345,8 @@ impl SlumberEngine {
                 continue;
             }
 
-            let new_name = if let Some(ref key) = openai_key {
-                match self.llm_name_realm(key, &realm_mems).await {
+            let new_name = if llm_key.is_some() {
+                match self.llm_name_realm(&llm_url, llm_key.as_deref(), &realm_mems).await {
                     Ok(name) => name,
                     Err(e) => {
                         tracing::warn!("  LLM naming failed for '{}', using fallback: {}", realm.name, e);
@@ -379,7 +380,7 @@ impl SlumberEngine {
     }
 
     /// Use LLM to generate a descriptive realm name.
-    async fn llm_name_realm(&self, api_key: &str, memories: &[&crate::storage::qdrant::MemoryPoint]) -> anyhow::Result<String> {
+    async fn llm_name_realm(&self, base_url: &str, api_key: Option<&str>, memories: &[&crate::storage::qdrant::MemoryPoint]) -> anyhow::Result<String> {
         let memory_texts: Vec<String> = memories.iter()
             .take(5) // limit context
             .map(|m| {
@@ -402,7 +403,7 @@ impl SlumberEngine {
             memory_texts.join("\n")
         );
 
-        let result = self.call_openai(api_key, &prompt).await?;
+        let result = self.call_local_llm(base_url, api_key, &prompt).await?;
         // Clean up the response
         let name = result.trim().trim_matches('"').trim();
         if name.len() > 50 || name.is_empty() {
@@ -825,15 +826,11 @@ impl SlumberEngine {
     // ─── Phase 6: LLM Memory Consolidation ────────────────────────────────────
 
     /// Use an LLM to consolidate raw conversation fragments into clean summaries.
-    /// Groups memories by realm, sends batches to OpenAI for consolidation,
+    /// Groups memories by realm, sends batches to local LLM (Qwen 3.6 via Unsloth),
     /// then replaces fragmented memories with clean summaries.
     async fn llm_consolidate(&self) -> anyhow::Result<usize> {
-        let openai_key = std::env::var("OPENAI_API_KEY").ok();
-        if openai_key.is_none() {
-            tracing::info!("  Skipping LLM consolidation: no OPENAI_API_KEY");
-            return Ok(0);
-        }
-        let openai_key = openai_key.unwrap();
+        let llm_url = std::env::var("LOCAL_LLM_URL").unwrap_or_else(|_| "http://192.168.1.8:8888".into());
+        let llm_key = std::env::var("LOCAL_LLM_API_KEY").ok();
 
         // Group memories by realm
         let all = self.store.scroll_all_memories().await?;
@@ -894,11 +891,11 @@ impl SlumberEngine {
                 memory_texts.join("\n\n")
             );
 
-            // Call OpenAI
-            let summary = match self.call_openai(&openai_key, &prompt).await {
+            // Call local LLM for consolidation
+            let summary = match self.call_local_llm(&llm_url, llm_key.as_deref(), &prompt).await {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!("  OpenAI consolidation failed for '{}': {}", realm_name, e);
+                    tracing::warn!("  Local LLM consolidation failed for '{}': {}", realm_name, e);
                     continue;
                 }
             };
@@ -1015,14 +1012,20 @@ impl SlumberEngine {
     }
 
     /// Call OpenAI API to generate a summary.
-    async fn call_openai(&self, api_key: &str, prompt: &str) -> anyhow::Result<String> {
+    async fn call_local_llm(&self, base_url: &str, api_key: Option<&str>, prompt: &str) -> anyhow::Result<String> {
         let client = reqwest::Client::new();
-        let response = client
-            .post("https://api.openai.com/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
+        let url = base_url.trim_end_matches('/');
+        let mut req = client
+            .post(format!("{}/v1/chat/completions", url))
+            .header("Content-Type", "application/json");
+
+        if let Some(key) = api_key {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let response = req
             .json(&serde_json::json!({
-                "model": "gpt-4o-mini",
+                "model": "unsloth/Qwen3.6-35B-A3B-GGUF",
                 "messages": [
                     {"role": "system", "content": "You are a memory consolidation assistant. You take raw, fragmented memory entries and produce clean, concise summaries. Output ONLY the summary text, nothing else."},
                     {"role": "user", "content": prompt}
@@ -1036,7 +1039,7 @@ impl SlumberEngine {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("OpenAI API error ({}): {}", status, body));
+            return Err(anyhow::anyhow!("Local LLM API error ({}): {}", status, body));
         }
 
         let body: serde_json::Value = response.json().await?;
@@ -1047,7 +1050,7 @@ impl SlumberEngine {
             .to_string();
 
         if content.is_empty() {
-            return Err(anyhow::anyhow!("OpenAI returned empty response"));
+            return Err(anyhow::anyhow!("Local LLM returned empty response"));
         }
 
         Ok(content)
