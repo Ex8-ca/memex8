@@ -1,12 +1,14 @@
 # memex8 — Self-Hosted AI Memory System
 
-> A Rust-based memory palace for AI agents. Ingest your notes, documents, and skills into organized knowledge realms. Powered by Qdrant vector storage, ScalarQuant compression, auto-discovered semantic clusters, and real-time file watching.
+> A Rust-based memory palace for AI agents. Ingest your notes, documents, and skills into organized knowledge realms. Powered by Qdrant vector storage, **slumber-based memory consolidation**, auto-discovered semantic clusters, and real-time file watching.
 
 [![Rust](https://img.shields.io/badge/Rust-1.94+-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Qdrant](https://img.shields.io/badge/Qdrant-1.17-2296F3.svg)](https://qdrant.tech/)
 
 ## Overview
+
+> **Personal project.** No guarantees, no SLA, no support commitments. Shared because I think the ideas are worth discussing. Use it, fork it, adapt it — at your own risk.
 
 **memex8** gives AI agents (OpenClaw, Hermes, pi.dev, Claude Code, Opencode, or any MCP-compatible agent) persistent, searchable memory. Instead of re-reading thousands of files on every session, agents query memex8 for relevant context — fast, semantic, and self-organizing.
 
@@ -23,15 +25,15 @@
 │                      Engine                             │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐  │
 │  │ Embedder │ │ Chunker  │ │ Realms   │ │  Slumber  │  │
-│  │Ollama/Open│ │pulldown-c│ │Auto-clus.│ │Maintenan. │  │
+│  │Ollama/Open│ │pulldown-c│ │Auto-clus.│ │Consolidat.│  │
 │  └────┬─────┘ └──────────┘ └────┬─────┘ └─────┬─────┘  │
 │       │     File Watcher ◄────────────────────┘         │
 ├───────┴─────────────────────────────────────────────────┤
 │                    Qdrant Storage                        │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────────────┐  │
-│  │ memories │  │  realms  │  │ memories_quantized    │  │
-│  │ (vector) │  │(centroid)│  │ (ScalarQuant vectors)  │  │
-│  └──────────┘  └──────────┘  └───────────────────────┘  │
+│  ┌──────────┐  ┌──────────┐                              │
+│  │ memories │  │  realms  │                              │
+│  │ (vector) │  │(centroid)│                              │
+│  └──────────┘  └──────────┘                              │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -39,12 +41,13 @@
 
 ### Core
 - **Vector Memory** — Semantic search across all memories using embeddings
+- **Slumber-Based Memory Consolidation** — The system periodically "sleeps" and reviews its own memories: groups by realm, sends batches to an LLM for consolidation, and merges fragmented conversation summaries into clean, dense memories. Closer to how biological memory works than the typical "save → search → retrieve" pipeline.
 - **Auto-Discovered Realms** — Memories self-organize into knowledge clusters via cosine similarity; realms auto-split via k-means when they grow too large
-- **ScalarQuant Compression** — Adaptive scalar vector quantization: 3.5-bit → 7.6x compression with ~0.90 cosine similarity at 768d (inspired by [arXiv:2504.19874](https://arxiv.org/abs/2504.19874))
 - **File Watching** — Real-time directory monitoring with `notify`; debounced at 500ms, SHA-256 dedup, auto-reingest on change, persistent watch configs
-- **Slumber Mode** — Background maintenance with cron + idle triggers: deduplicate, compress, re-cluster, split/merge realms, prune stale memories, write MEMEX8.md files, and write master `memex8.md` digest
+- **Slumber Mode** — Background maintenance pipeline (triggered by cron + idle): deduplicate, re-cluster, split/merge realms, prune stale memories, write MEMEX8.md files, and write master `memex8.md` digest
 - **Master Digest (`memex8.md`)** — Slumber writes a dated digest log to `~/.memex8/memex8.md` summarizing what was worked on each session, realm overview, and top memories by importance
 - **Augment, Don't Replace** — Writes `MEMEX8.md` back to project directories for model context pickup
+- **Experimental: ScalarQuant Compression** — Adaptive scalar vector quantization inspired by [arXiv:2504.19874](https://arxiv.org/abs/2504.19874). Code exists but is not yet production-ready — results vary at higher dimensions.
 
 ### Embedding Flexibility
 - **Cloud first** — OpenAI `text-embedding-3-small` (1536d), fast and accurate
@@ -52,12 +55,11 @@
 - **Pluggable** — Trait-based design, add any embedding provider
 
 ### Integrations
-- **MCP Server** — JSON-RPC 2.0 over stdio, works with any MCP-compatible agent
+- **Hermes Agent** — Native memory provider plugin (replaces built-in `MEMORY.md`). This is the primary integration — the plugin handles memory calls in-process so the agent doesn't make unnecessary tool calls. Memory is just *there* when needed.
+- **MCP Server** — JSON-RPC 2.0 over stdio, works with any MCP-compatible agent (Claude Code, Opencode, etc.). Available but the plugin path is preferred for Hermes.
 - **REST API** — Full CRUD + search with authentication, tag filtering, and pagination
-- **Hermes Agent** — Native memory provider plugin (replaces built-in MEMORY.md)
 - **OpenClaw** — Webhook hooks for auto-ingesting conversation summaries
 - **pi.dev** — TypeScript extension for the pi coding agent
-- **Claude Code / Opencode** — Add memex8 MCP server for memory-augmented coding
 
 ---
 
@@ -69,7 +71,7 @@
 
 ### 1. Clone and configure
 ```bash
-git clone https://github.com/marcus20232023/memex8.git
+git clone https://gitlab.chillygeek.com/marcus2004/memex8.git
 cd memex8
 cp .env.example .env  # only needed for local binary runs (optional)
 ```
@@ -353,7 +355,7 @@ Watch configs are added automatically via `memex8 watch add`.
 
 ```bash
 $ memex8 --help
-Self-hosted AI memory system with Qdrant and ScalarQuant
+Self-hosted AI memory system with Qdrant and slumber consolidation
 
 Commands:
   init           Interactive setup wizard
@@ -439,8 +441,8 @@ memex8/
 │   │   ├── realms.rs        # Realm management
 │   │   ├── slumber.rs       # Background maintenance pipeline
 │   │   ├── scheduler.rs     # Cron + idle trigger daemon
-│   │   ├── quantizer.rs     # ScalarQuant compression
-│   │   ├── compressor.rs    # AAAK-style summarization
+│   │   ├── quantizer.rs     # ScalarQuant compression *(experimental)*
+│   │   ├── compressor.rs    # LLM-based summarization for slumber consolidation
 │   │   ├── search.rs        # Search orchestration
 │   │   ├── graph.rs         # Knowledge graph
 │   │   ├── doctor.rs        # Diagnostics
@@ -505,16 +507,19 @@ All Memories → Score(importance × recency × access_count) → Sort → Top N
 ```
 Trigger (idle timeout / cron) →
   1. Deduplicate (hash-based, keep highest importance)
-  2. ScalarQuant compress vectors → store in quantized collection
+  2. **LLM Memory Consolidation** — Groups memories by realm, sends batches to OpenAI for summarization, merges fragmented conversation summaries into clean, dense memories
   3. Recompute realm centroids from actual memory vectors
   4. Split large realms via k-means (k=2)
   5. Prune flagging (age × importance × access scoring)
   6. Update MEMEX8.md files per directory
+  7. Write master memex8.md digest (slumber log + realm overview)
 ```
 
-### ScalarQuant Compression
+### ScalarQuant Compression *(Experimental)*
 
 Based on [arXiv:2504.19874](https://arxiv.org/abs/2504.19874): random orthogonal rotation + Lloyd-Max scalar quantization on the induced Beta distribution.
+
+> ⚠️ **Not production-ready.** The code exists in `src/engine/quantizer.rs` and is called during slumber, but results are inconsistent at higher embedding dimensions. We pulled TurboQuant integration after it proved unreliable. If you have experience with vector quantization that actually works in practice, we'd love your input.
 
 | Bits | Cosine (768d) | MSE | Packed Size | Compression |
 |------|---------------|-----|-------------|-------------|
@@ -563,7 +568,9 @@ MIT
 
 ## Contributing
 
-Contributions welcome! See [TODO.md](TODO.md) and [PLAN.md](PLAN.md) for current roadmap.
+This is a personal project shared for reference. No guarantees, no SLA, no support commitments. If you find it useful, fork it, adapt it, or build on the ideas.
+
+See [TODO.md](TODO.md) and [PLAN.md](PLAN.md) for the current roadmap.
 
 ## Roadmap / Planned Features
 
