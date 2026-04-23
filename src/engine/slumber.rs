@@ -856,12 +856,20 @@ impl SlumberEngine {
                 realm_name
             );
 
-            // Build the prompt
-            let memory_texts: Vec<String> = memories
+            // Build the prompt (limit to top 10 memories by importance)
+            let mut sorted = memories.to_vec();
+            sorted.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+            sorted.truncate(10);
+
+            let memory_texts: Vec<String> = sorted
                 .iter()
                 .map(|m| {
                     let content = if m.content.len() > 500 {
-                        format!("{}...", &m.content[..500])
+                        let safe_end = m.content.char_indices()
+                            .take_while(|(i, _)| *i < 500)
+                            .last()
+                            .map_or(m.content.len(), |(i, c)| i + c.len_utf8());
+                        format!("{}...", &m.content[..safe_end])
                     } else {
                         m.content.clone()
                     };
@@ -887,7 +895,7 @@ impl SlumberEngine {
                 {}\n\n\
                 Consolidated summary:",
                 realm_name,
-                memories.len(),
+                sorted.len(),
                 memory_texts.join("\n\n")
             );
 

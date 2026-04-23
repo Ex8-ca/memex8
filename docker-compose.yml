@@ -31,7 +31,8 @@ services:
     env_file:
       - ${HOME}/.hermes/.env
     environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - LOCAL_LLM_URL=http://192.168.1.8:8888
+      - LOCAL_LLM_API_KEY=sk-unsloth-77d85c89e40ee1d3145a8ec9f00ea783
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-openai}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
       - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-1536}
