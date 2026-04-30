@@ -12,6 +12,17 @@ pub struct AppState {
 
 pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()> {
     let engine = Arc::new(Engine::new(config.clone()).await?);
+    run_with_engine(config, engine, host, port).await
+}
+
+/// Start the API server with a pre-built engine. Used when serve mode also
+/// needs to run the scheduler + watchers (combined serve+daemon).
+pub async fn run_with_engine(
+    config: AppConfig,
+    engine: Arc<Engine>,
+    host: &str,
+    port: u16,
+) -> anyhow::Result<()> {
     let state = Arc::new(AppState { engine, config: config.clone() });
 
     // Inject the API key into the web UI at serve time

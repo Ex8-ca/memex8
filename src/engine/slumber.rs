@@ -28,7 +28,10 @@ impl SlumberEngine {
     }
 
     /// Run the full slumber maintenance pipeline.
-    pub async fn run_full_pipeline(&self) -> anyhow::Result<SlumberReport> {
+    /// `force_consolidation` is set by the scheduler when the consolidation
+    /// wall-clock schedule matches — avoids the timing drift bug where the
+    /// 5-minute cron ingest ticks never align with "0 3 * * *" exactly.
+    pub async fn run_full_pipeline(&self, force_consolidation: bool) -> anyhow::Result<SlumberReport> {
         let mut report = SlumberReport::default();
 
         // Phase 1: Deduplicate near-identical memories
@@ -59,14 +62,14 @@ impl SlumberEngine {
             report.memex8_md_written = self.update_memex8_md().await?;
         }
 
-        // Phase 6: LLM memory consolidation (only run on schedule)
+        // Phase 6: LLM memory consolidation (only run when scheduler signals it)
         if self.config.slumber.consolidation_schedule.is_empty() {
-            tracing::debug!("  Skipping consolidation: schedule is empty");
-        } else if crate::engine::scheduler::should_run_at_schedule(&self.config.slumber.consolidation_schedule) {
-            tracing::info!("💤 Slumber phase 6: Memory consolidation (schedule matched: {})", self.config.slumber.consolidation_schedule);
+            tracing::debug!("  Skipping consolidation: schedule is disabled");
+        } else if force_consolidation {
+            tracing::info!("💤 Slumber phase 6: Memory consolidation (forced by scheduler)");
             report.memories_consolidated = self.llm_consolidate().await?;
         } else {
-            tracing::debug!("  Skipping consolidation: schedule not matched ({}). Next run: at scheduled time.", self.config.slumber.consolidation_schedule);
+            tracing::debug!("  Skipping consolidation: not scheduled this cycle");
         }
 
         // Phase 7: Qdrant index optimization (vacuum + rebuild)
@@ -390,8 +393,8 @@ impl SlumberEngine {
         let memory_texts: Vec<String> = memories.iter()
             .take(5) // limit context
             .map(|m| {
-                let content = if m.content.len() > 300 {
-                    format!("{}...", &m.content[..300])
+                let content = if m.content.chars().count() > 300 {
+                    format!("{}...", m.content.chars().take(300).collect::<String>())
                 } else {
                     m.content.clone()
                 };
@@ -695,7 +698,7 @@ impl SlumberEngine {
             .collect();
 
         if top_words.is_empty() {
-            return format!("topic-{}", &memories[0].realm_id.as_ref().map(|s| &s[..8]).unwrap_or("unknown"));
+            return format!("topic-{}", &memories[0].realm_id.as_ref().map(|s| s.chars().take(8).collect::<String>()).unwrap_or("unknown".to_string()));
         }
 
         top_words.join(" ")

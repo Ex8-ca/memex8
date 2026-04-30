@@ -12,6 +12,6 @@ pub async fn status(
 pub async fn trigger(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, crate::api::error::ApiError> {
-    state.engine.trigger_slumber().await?;
+    state.engine.trigger_slumber(false).await?;
     Ok(Json(serde_json::json!({"status": "slumber_completed"})))
 }

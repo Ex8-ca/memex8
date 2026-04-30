@@ -431,7 +431,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 SlumberActions::Trigger => {
                     println!("💤 Triggering slumber...");
-                    engine.trigger_slumber().await?;
+                    engine.trigger_slumber(true).await?;
                     println!("✅ Slumber complete.");
                 }
                 SlumberActions::Pause => {
@@ -447,7 +447,41 @@ async fn main() -> anyhow::Result<()> {
         Commands::Serve { host, port } => {
             let h = host.as_deref().unwrap_or(&config.server.host);
             let p = port.unwrap_or(config.server.port);
-            api::server::run(config.clone(), h, p).await?;
+
+            // Build engine for the scheduler
+            let engine = std::sync::Arc::new(engine::Engine::new(config.clone()).await?);
+
+            // Spawn the scheduler loop in the background (daemon functionality)
+            let scheduler_config = config.clone();
+            let scheduler_engine = engine.clone();
+            tokio::spawn(async move {
+                let scheduler = engine::scheduler::Scheduler::new(scheduler_engine, scheduler_config);
+                if let Err(e) = scheduler.run().await {
+                    tracing::error!("Scheduler error: {}", e);
+                }
+            });
+            tracing::info!("🕐 Scheduler started in background (daemon mode)");
+
+            // Start file watchers if configured
+            let watch_handle = {
+                let engine = engine.clone();
+                let watch_rx = engine.start_watchers().await?;
+                watch_rx.map(|rx| {
+                    tokio::spawn(async move {
+                        if let Err(e) = engine.handle_watch_events(rx).await {
+                            tracing::error!("File watcher event handler error: {}", e);
+                        }
+                    })
+                })
+            };
+
+            // Run API server (blocks until shutdown)
+            api::server::run_with_engine(config.clone(), engine, h, p).await?;
+
+            // Cancel watch handler on shutdown
+            if let Some(handle) = watch_handle {
+                handle.abort();
+            }
         }
         Commands::Mcp { transport, port } => {
             match transport.as_str() {

@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::engine::Engine;
-use chrono::{Datelike, Timelike};
+use chrono::{Datelike, Local, Timelike};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
@@ -26,6 +26,40 @@ impl Scheduler {
         self.last_activity.clone()
     }
 
+    /// Check if the consolidation schedule should fire now.
+    /// Uses wall-clock time instead of elapsed-time checks so it properly
+    /// matches cron expressions like "0 3 * * *" (daily at 3am).
+    /// Also prevents double-firing: returns false if consolidation already
+    /// ran in the past `min_interval_hours`.
+    fn should_consolidate_now(
+        &self,
+        last_consolidation: &mut Option<chrono::DateTime<Local>>,
+        min_interval_hours: u64,
+    ) -> bool {
+        let schedule = &self.config.slumber.consolidation_schedule;
+        if schedule.is_empty() {
+            return false;
+        }
+
+        let now = Local::now();
+
+        // If we already consolidated recently, don't fire again
+        if let Some(last) = last_consolidation {
+            let elapsed = now.signed_duration_since(*last);
+            if elapsed.num_hours() < min_interval_hours as i64 {
+                return false;
+            }
+        }
+
+        // Check if current wall-clock time matches the consolidation schedule
+        if should_run_at_schedule(schedule) {
+            *last_consolidation = Some(now);
+            return true;
+        }
+
+        false
+    }
+
     /// Run the scheduler loop. Blocks until the process is shut down.
     pub async fn run(self) -> anyhow::Result<()> {
         let idle_timeout = parse_duration(&self.config.slumber.idle_timeout)?;
@@ -45,6 +79,7 @@ impl Scheduler {
         cron_check.tick().await;
 
         let mut last_cron_run = Instant::now() - cron_interval;
+        let mut last_consolidation: Option<chrono::DateTime<Local>> = None;
 
         loop {
             tokio::select! {
@@ -60,12 +95,19 @@ impl Scheduler {
                         );
                         drop(last); // Release read lock
 
-                        match self.engine.trigger_slumber().await {
+                        // Check if consolidation should run (wall-clock schedule)
+                        let force_consolidation = self.should_consolidate_now(
+                            &mut last_consolidation,
+                            12, // min 12h between consolidations
+                        );
+
+                        match self.engine.trigger_slumber(force_consolidation).await {
                             Ok(report) => {
                                 tracing::info!(
-                                    "💤 Idle slumber complete: dedup={} quant={} prune={} md={}",
+                                    "💤 Idle slumber complete: dedup={} quant={} consolidated={} prune={} md={}",
                                     report.deduplicated,
                                     report.quantized,
+                                    report.memories_consolidated,
                                     report.flagged_for_prune,
                                     report.memex8_md_written,
                                 );
@@ -83,12 +125,20 @@ impl Scheduler {
                     // Only run if enough time has passed since last cron run
                     if last_cron_run.elapsed() >= cron_interval {
                         tracing::info!("🕐 Cron trigger — running slumber...");
-                        match self.engine.trigger_slumber().await {
+
+                        // Check if consolidation should run (wall-clock schedule)
+                        let force_consolidation = self.should_consolidate_now(
+                            &mut last_consolidation,
+                            12, // min 12h between consolidations
+                        );
+
+                        match self.engine.trigger_slumber(force_consolidation).await {
                             Ok(report) => {
                                 tracing::info!(
-                                    "🕐 Cron slumber complete: dedup={} quant={} prune={} md={}",
+                                    "🕐 Cron slumber complete: dedup={} quant={} consolidated={} prune={} md={}",
                                     report.deduplicated,
                                     report.quantized,
+                                    report.memories_consolidated,
                                     report.flagged_for_prune,
                                     report.memex8_md_written,
                                 );

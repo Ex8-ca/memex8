@@ -676,7 +676,7 @@ impl Engine {
         }
     }
 
-    pub async fn trigger_slumber(&self) -> anyhow::Result<slumber::SlumberReport> {
+    pub async fn trigger_slumber(&self, force_consolidation: bool) -> anyhow::Result<slumber::SlumberReport> {
         {
             let mut state = self.slumber_state.write().await;
             state.status = "running".into();
@@ -687,7 +687,7 @@ impl Engine {
             self.config.clone(),
             self.store.clone_store(),
         );
-        let report = slumber.run_full_pipeline().await?;
+        let report = slumber.run_full_pipeline(force_consolidation).await?;
 
         {
             let mut state = self.slumber_state.write().await;
