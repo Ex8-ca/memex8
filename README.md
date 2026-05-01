@@ -1,6 +1,6 @@
 # memex8 — Self-Hosted AI Memory System
 
-> A Rust-based memory palace for AI agents. Ingest your notes, documents, and skills into organized knowledge realms. Powered by Qdrant vector storage, **slumber-based memory consolidation**, auto-discovered semantic clusters, and real-time file watching.
+> A Rust-based memory palace for AI agents. Ingest your notes, documents, and skills into organized knowledge realms. Powered by Qdrant vector storage, **slumber-based memory consolidation**, **human-like memory evolution** (decay, associations, spreading activation), auto-discovered semantic clusters, and real-time file watching.
 
 [![Rust](https://img.shields.io/badge/Rust-1.94+-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -25,7 +25,7 @@
 │                      Engine                             │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐  │
 │  │ Embedder │ │ Chunker  │ │ Realms   │ │  Slumber  │  │
-│  │Ollama/Open│ │pulldown-c│ │Auto-clus.│ │Consolidat.│  │
+│  │Ollama/Open│ │pulldown-c│ │Auto-clus.│ │Evolution  │  │
 │  └────┬─────┘ └──────────┘ └────┬─────┘ └─────┬─────┘  │
 │       │     File Watcher ◄────────────────────┘         │
 ├───────┴─────────────────────────────────────────────────┤
@@ -41,10 +41,14 @@
 
 ### Core
 - **Vector Memory** — Semantic search across all memories using embeddings
-- **Slumber-Based Memory Consolidation** — The system periodically "sleeps" and reviews its own memories: groups by realm, sends batches to an LLM for consolidation, and merges fragmented conversation summaries into clean, dense memories. Closer to how biological memory works than the typical "save → search → retrieve" pipeline.
+- **Slumber-Based Memory Consolidation** — The system periodically "sleeps" and reviews its own memories through a 9-phase pipeline: deduplicate, compress, re-cluster, rename/merge realms, prune stale memories, LLM consolidation, index optimization, apply memory decay, and build semantic associations. Closer to how biological memory works than the typical "save → search → retrieve" pipeline.
+- **Human-Like Memory Evolution** — Memories age, strengthen, and connect over time:
+  - **Touch Layer** — Every search/recall auto-increments access count and importance (like rehearsal strengthening memory)
+  - **Memory Decay** — Untouched memories slowly lose importance via a forgetting curve (default: 0.001/day, floor at 0.05). Frequently used memories stay strong.
+  - **Memory Associations** — During slumber, each memory links to its 5 nearest neighbors by vector similarity, creating a semantic knowledge graph (configurable top-K, min 0.60 strength).
+  - **Spreading Activation** — When a memory is recalled, its associated memories get a small importance bump too (default: 0.005). "Related things come to mind."
 - **Auto-Discovered Realms** — Memories self-organize into knowledge clusters via cosine similarity; realms auto-split via k-means when they grow too large
 - **File Watching** — Real-time directory monitoring with `notify`; debounced at 500ms, SHA-256 dedup, auto-reingest on change, persistent watch configs
-- **Slumber Mode** — Background maintenance pipeline (triggered by cron + idle): deduplicate, re-cluster, split/merge realms, prune stale memories, write MEMEX8.md files, and write master `memex8.md` digest
 - **Master Digest (`memex8.md`)** — Slumber writes a dated digest log to `~/.memex8/memex8.md` summarizing what was worked on each session, realm overview, and top memories by importance
 - **Augment, Don't Replace** — Writes `MEMEX8.md` back to project directories for model context pickup
 - **Experimental: ScalarQuant Compression** — Adaptive scalar vector quantization inspired by [arXiv:2504.19874](https://arxiv.org/abs/2504.19874). Code exists but is not yet production-ready — results vary at higher dimensions.
