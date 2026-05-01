@@ -28,6 +28,13 @@ pub struct MemoryResult {
     pub score: f32,
     pub last_accessed: String,
     pub access_count: u32,
+    pub upvotes: u32,
+    /// Associated memory IDs from Phase 9 (semantic linking).
+    #[serde(default)]
+    pub related_memory_ids: Vec<String>,
+    /// Cosine similarity strengths for each related memory (same order as related_memory_ids).
+    #[serde(default)]
+    pub association_strengths: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -551,6 +558,9 @@ impl Engine {
                 score: r.score,
                 last_accessed: r.payload.last_accessed,
                 access_count: r.payload.access_count,
+                upvotes: r.payload.upvotes,
+                related_memory_ids: r.payload.related_memory_ids,
+                association_strengths: r.payload.association_strengths,
             })
             .collect())
     }
@@ -624,6 +634,9 @@ impl Engine {
                 score,
                 last_accessed: m.last_accessed,
                 access_count: m.access_count,
+                upvotes: m.upvotes,
+                related_memory_ids: m.related_memory_ids,
+                association_strengths: m.association_strengths,
             })
             .collect())
     }
