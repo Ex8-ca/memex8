@@ -34,7 +34,8 @@ impl OllamaEmbedder {
 #[async_trait]
 impl Embedder for OllamaEmbedder {
     async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
-        let resp = self.client
+        let resp = self
+            .client
             .post(format!("{}/api/embed", self.url))
             .json(&OllamaRequest {
                 model: self.model.clone(),

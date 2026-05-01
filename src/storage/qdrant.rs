@@ -1,14 +1,12 @@
-use qdrant_client::Qdrant;
-use qdrant_client::Payload;
 use qdrant_client::qdrant::{
-    Condition, Distance, Filter, FieldType, PointStruct, point_id::PointIdOptions,
-    points_selector::PointsSelectorOneOf,
+    point_id::PointIdOptions, points_selector::PointsSelectorOneOf, vectors_output::VectorsOptions,
+    Condition, CountPointsBuilder, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder,
+    DeletePointsBuilder, Distance, FieldType, Filter, GetPointsBuilder, PointStruct, PointsIdsList,
     ScrollPointsBuilder, SearchPointsBuilder, SetPayloadPointsBuilder, UpsertPointsBuilder,
-    VectorParamsBuilder, PointsIdsList,
-    DeletePointsBuilder, GetPointsBuilder, CountPointsBuilder,
-    CreateCollectionBuilder, CreateFieldIndexCollectionBuilder,
-    vectors_output::VectorsOptions,
+    VectorParamsBuilder,
 };
+use qdrant_client::Payload;
+use qdrant_client::Qdrant;
 use serde::{Deserialize, Serialize};
 
 // ─── Data types ───────────────────────────────────────────────────────────────
@@ -30,6 +28,12 @@ pub struct MemoryPoint {
     pub chunk_type: String,
     pub heading: Option<String>,
     pub source_hash: String,
+    /// IDs of semantically associated memories.
+    #[serde(default)]
+    pub related_memory_ids: Vec<String>,
+    /// Cosine similarity strengths for each related memory (same order as related_memory_ids).
+    #[serde(default)]
+    pub association_strengths: Vec<f32>,
 }
 
 /// Memory with its embedding vector (internal use only, not serialized).
@@ -100,21 +104,24 @@ fn extract_vector(point: &qdrant_client::qdrant::RetrievedPoint) -> Option<Vec<f
         v.vectors_options.as_ref().and_then(|opts| match opts {
             VectorsOptions::Vector(vec_out) => {
                 // Try the newer vector field first, fall back to deprecated data
-                vec_out.vector.as_ref().and_then(|v| match v {
-                    qdrant_client::qdrant::vector_output::Vector::Dense(d) => {
-                        Some(d.data.iter().map(|x| *x as f32).collect())
-                    }
-                    qdrant_client::qdrant::vector_output::Vector::Sparse(_s) => None,
-                    qdrant_client::qdrant::vector_output::Vector::MultiDense(_m) => None,
-                })
-                .or_else(|| {
-                    // Fallback to deprecated data field
-                    if !vec_out.data.is_empty() {
-                        Some(vec_out.data.iter().map(|x| *x as f32).collect())
-                    } else {
-                        None
-                    }
-                })
+                vec_out
+                    .vector
+                    .as_ref()
+                    .and_then(|v| match v {
+                        qdrant_client::qdrant::vector_output::Vector::Dense(d) => {
+                            Some(d.data.iter().map(|x| *x as f32).collect())
+                        }
+                        qdrant_client::qdrant::vector_output::Vector::Sparse(_s) => None,
+                        qdrant_client::qdrant::vector_output::Vector::MultiDense(_m) => None,
+                    })
+                    .or_else(|| {
+                        // Fallback to deprecated data field
+                        if !vec_out.data.is_empty() {
+                            Some(vec_out.data.iter().map(|x| *x as f32).collect())
+                        } else {
+                            None
+                        }
+                    })
             }
             VectorsOptions::Vectors(named) => {
                 // Get first named vector
@@ -171,6 +178,29 @@ fn map_tags(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> Vec<
         .unwrap_or_default()
 }
 
+fn map_str_vec(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> Vec<String> {
+    map.get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn map_f32_vec(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> Vec<f32> {
+    map.get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_f64())
+                .map(|f| f as f32)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 // ─── MemoryPoint helpers ──────────────────────────────────────────────────────
 
 fn memory_to_payload(mem: &MemoryPoint) -> Payload {
@@ -189,6 +219,8 @@ fn memory_to_payload(mem: &MemoryPoint) -> Payload {
         "chunk_type": mem.chunk_type,
         "heading": mem.heading,
         "source_hash": mem.source_hash,
+        "related_memory_ids": mem.related_memory_ids,
+        "association_strengths": mem.association_strengths,
     });
     Payload::try_from(json).unwrap_or_default()
 }
@@ -210,13 +242,19 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
         chunk_type: map_str(map, "chunk_type").unwrap_or_default(),
         heading: map_str(map, "heading"),
         source_hash: map_str(map, "source_hash").unwrap_or_default(),
+        related_memory_ids: map_str_vec(map, "related_memory_ids"),
+        association_strengths: map_f32_vec(map, "association_strengths"),
     }
 }
 
 // ─── RealmPoint helpers ───────────────────────────────────────────────────────
 
 fn realm_to_payload(realm: &RealmPoint) -> Payload {
-    let centroid_arr: Vec<serde_json::Value> = realm.centroid.iter().map(|v| serde_json::json!(v)).collect();
+    let centroid_arr: Vec<serde_json::Value> = realm
+        .centroid
+        .iter()
+        .map(|v| serde_json::json!(v))
+        .collect();
     let json = serde_json::json!({
         "name": realm.name,
         "description": realm.description,
@@ -232,9 +270,15 @@ fn realm_from_payload(
     map: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<RealmPoint> {
     let name = map_str(map, "name")?;
-    let centroid = map.get("centroid")
+    let centroid = map
+        .get("centroid")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_f64()).map(|v| v as f32).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_f64())
+                .map(|v| v as f32)
+                .collect()
+        })
         .unwrap_or_default();
     Some(RealmPoint {
         id: id.to_string(),
@@ -256,7 +300,10 @@ impl QdrantStore {
     }
 
     pub async fn ensure_collections(&self, dimensions: u32) -> anyhow::Result<()> {
-        tracing::info!("Ensuring Qdrant collections exist ({} dimensions)...", dimensions);
+        tracing::info!(
+            "Ensuring Qdrant collections exist ({} dimensions)...",
+            dimensions
+        );
         let dims = dimensions as u64;
 
         // ── memories ──
@@ -277,9 +324,9 @@ impl QdrantStore {
                 ("importance", FieldType::Float),
             ] {
                 self.client
-                    .create_field_index(
-                        CreateFieldIndexCollectionBuilder::new(MEMORIES, *field, *schema),
-                    )
+                    .create_field_index(CreateFieldIndexCollectionBuilder::new(
+                        MEMORIES, *field, *schema,
+                    ))
                     .await?;
             }
             tracing::info!("  + indexes created for {}", MEMORIES);
@@ -291,14 +338,19 @@ impl QdrantStore {
             self.client
                 .create_collection(
                     CreateCollectionBuilder::new(REALMS)
-                        .vectors_config(VectorParamsBuilder::new(dimensions as u64, Distance::Cosine))
+                        .vectors_config(VectorParamsBuilder::new(
+                            dimensions as u64,
+                            Distance::Cosine,
+                        ))
                         .on_disk_payload(true),
                 )
                 .await?;
             self.client
-                .create_field_index(
-                    CreateFieldIndexCollectionBuilder::new(REALMS, "name", FieldType::Keyword),
-                )
+                .create_field_index(CreateFieldIndexCollectionBuilder::new(
+                    REALMS,
+                    "name",
+                    FieldType::Keyword,
+                ))
                 .await?;
         }
 
@@ -348,6 +400,8 @@ impl QdrantStore {
             chunk_type: chunk_type.to_string(),
             heading: heading.map(|s| s.to_string()),
             source_hash: source_hash.to_string(),
+            related_memory_ids: vec![],
+            association_strengths: vec![],
         };
         let payload = memory_to_payload(&mem);
         let point = PointStruct::new(id.to_string(), vector.to_vec(), payload);
@@ -388,7 +442,10 @@ impl QdrantStore {
             .with_vectors(false);
 
         if let Some(realm) = realm_filter {
-            builder = builder.filter(Filter::must([Condition::matches("realm_name", realm.to_string())]));
+            builder = builder.filter(Filter::must([Condition::matches(
+                "realm_name",
+                realm.to_string(),
+            )]));
         }
 
         let resp = self.client.search_points(builder).await?;
@@ -414,7 +471,9 @@ impl QdrantStore {
         self.client
             .delete_points(
                 DeletePointsBuilder::new(MEMORIES)
-                    .points(PointsIdsList { ids: vec![id.into()] })
+                    .points(PointsIdsList {
+                        ids: vec![id.into()],
+                    })
                     .wait(true),
             )
             .await?;
@@ -446,6 +505,8 @@ impl QdrantStore {
             "source_file": source_file.unwrap_or(""),
             "source_hash": "",
             "chunk_type": "consolidated",
+            "related_memory_ids": Vec::<String>::new(),
+            "association_strengths": Vec::<f32>::new(),
         })
         .try_into()
         .unwrap_or_default();
@@ -457,7 +518,12 @@ impl QdrantStore {
         Ok(())
     }
 
-    pub async fn update_upvotes(&self, id: &str, upvotes: u32, importance: f32) -> anyhow::Result<()> {
+    pub async fn update_upvotes(
+        &self,
+        id: &str,
+        upvotes: u32,
+        importance: f32,
+    ) -> anyhow::Result<()> {
         let payload: Payload = serde_json::json!({
             "upvotes": upvotes,
             "importance": importance,
@@ -512,13 +578,19 @@ impl QdrantStore {
     }
 
     /// Touch multiple memories in a single batch (for search results).
-    pub async fn track_access_batch(&self, ids: &[&str], importance_bump: f32) -> anyhow::Result<()> {
+    pub async fn track_access_batch(
+        &self,
+        ids: &[&str],
+        importance_bump: f32,
+    ) -> anyhow::Result<()> {
         if ids.is_empty() {
             return Ok(());
         }
 
-        let point_ids: Vec<qdrant_client::qdrant::PointId> = ids.iter().map(|id| (*id).into()).collect();
-        let resp = self.client
+        let point_ids: Vec<qdrant_client::qdrant::PointId> =
+            ids.iter().map(|id| (*id).into()).collect();
+        let resp = self
+            .client
             .get_points(
                 GetPointsBuilder::new(MEMORIES, point_ids)
                     .with_payload(true)
@@ -567,20 +639,28 @@ impl QdrantStore {
     /// Used by slumber for ScalarQuant compression.
     pub async fn scroll_all_memories_with_vectors(&self) -> anyhow::Result<Vec<MemoryWithVector>> {
         let raw = self.scroll_memories_internal(true).await?;
-        Ok(raw.into_iter().filter_map(|m| {
-            m.vector.map(|v| MemoryWithVector {
-                memory: m.memory,
-                vector: v,
+        Ok(raw
+            .into_iter()
+            .filter_map(|m| {
+                m.vector.map(|v| MemoryWithVector {
+                    memory: m.memory,
+                    vector: v,
+                })
             })
-        }).collect())
+            .collect())
     }
 
-    async fn scroll_memories_internal(&self, with_vectors: bool) -> anyhow::Result<Vec<MemoryPointWithVector>> {
+    async fn scroll_memories_internal(
+        &self,
+        with_vectors: bool,
+    ) -> anyhow::Result<Vec<MemoryPointWithVector>> {
         let mut memories = Vec::new();
         let mut offset: Option<String> = None;
 
         loop {
-            let mut builder = ScrollPointsBuilder::new(MEMORIES).limit(500).with_payload(true);
+            let mut builder = ScrollPointsBuilder::new(MEMORIES)
+                .limit(500)
+                .with_payload(true);
             if with_vectors {
                 builder = builder.with_vectors(true);
             }
@@ -603,7 +683,10 @@ impl QdrantStore {
             if resp.next_page_offset.is_none() {
                 break;
             }
-            offset = resp.next_page_offset.as_ref().map(|p| point_id_to_string(Some(p)));
+            offset = resp
+                .next_page_offset
+                .as_ref()
+                .map(|p| point_id_to_string(Some(p)));
         }
 
         Ok(memories)
@@ -663,7 +746,8 @@ impl QdrantStore {
     /// Search for tag suggestions — returns the most common tags.
     pub async fn get_tag_suggestions(&self, limit: usize) -> anyhow::Result<Vec<(String, u32)>> {
         let all = self.scroll_all_memories().await?;
-        let mut tag_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut tag_counts: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
         for mem in &all {
             for tag in &mem.tags {
                 *tag_counts.entry(tag.clone()).or_insert(0) += 1;
@@ -682,7 +766,9 @@ impl QdrantStore {
         let mut offset: Option<String> = None;
 
         loop {
-            let mut builder = ScrollPointsBuilder::new(REALMS).limit(100).with_payload(true);
+            let mut builder = ScrollPointsBuilder::new(REALMS)
+                .limit(100)
+                .with_payload(true);
             if let Some(ref off) = offset {
                 builder = builder.offset(off.clone());
             }
@@ -762,7 +848,8 @@ impl QdrantStore {
         };
 
         if let Some(existing) = self.find_realm_by_name(name).await? {
-            let centroid_arr: Vec<serde_json::Value> = centroid.iter().map(|v| serde_json::json!(v)).collect();
+            let centroid_arr: Vec<serde_json::Value> =
+                centroid.iter().map(|v| serde_json::json!(v)).collect();
             let payload: Payload = serde_json::json!({
                 "memory_count": count,
                 "is_user_pinned": is_user_pinned,
@@ -794,7 +881,9 @@ impl QdrantStore {
         self.client
             .delete_points(
                 DeletePointsBuilder::new(REALMS)
-                    .points(PointsIdsList { ids: vec![id.into()] })
+                    .points(PointsIdsList {
+                        ids: vec![id.into()],
+                    })
                     .wait(true),
             )
             .await?;
@@ -883,11 +972,7 @@ impl QdrantStore {
     }
 
     /// Update arbitrary payload fields on a memory point.
-    pub async fn update_memory_payload(
-        &self,
-        id: &str,
-        payload: Payload,
-    ) -> anyhow::Result<()> {
+    pub async fn update_memory_payload(&self, id: &str, payload: Payload) -> anyhow::Result<()> {
         self.client
             .set_payload(
                 SetPayloadPointsBuilder::new(MEMORIES, payload)
@@ -939,7 +1024,8 @@ impl QdrantStore {
         for realm in &realms {
             if let Some(centroid) = self.compute_realm_centroid(&realm.id).await? {
                 // Update the realm's vector AND centroid payload in Qdrant
-                let centroid_arr: Vec<serde_json::Value> = centroid.iter().map(|v| serde_json::json!(v)).collect();
+                let centroid_arr: Vec<serde_json::Value> =
+                    centroid.iter().map(|v| serde_json::json!(v)).collect();
                 let payload: Payload = serde_json::json!({
                     "name": realm.name,
                     "memory_count": realm.memory_count,
@@ -950,15 +1036,10 @@ impl QdrantStore {
                 .try_into()
                 .unwrap_or_default();
 
-                let point = qdrant_client::qdrant::PointStruct::new(
-                    realm.id.clone(),
-                    centroid,
-                    payload,
-                );
+                let point =
+                    qdrant_client::qdrant::PointStruct::new(realm.id.clone(), centroid, payload);
                 self.client
-                    .upsert_points(
-                        UpsertPointsBuilder::new(REALMS, vec![point]).wait(true),
-                    )
+                    .upsert_points(UpsertPointsBuilder::new(REALMS, vec![point]).wait(true))
                     .await?;
                 updated += 1;
             }
@@ -981,5 +1062,79 @@ impl QdrantStore {
             )
             .await?;
         Ok(())
+    }
+
+    /// Batch update payload on multiple memory points.
+    /// Each entry is (point_id, payload) — updates are sent without wait (fire-and-forget).
+    pub async fn batch_update_payload(
+        &self,
+        ids_and_payloads: &[(&str, Payload)],
+    ) -> anyhow::Result<()> {
+        if ids_and_payloads.is_empty() {
+            return Ok(());
+        }
+
+        for (id, payload) in ids_and_payloads {
+            self.client
+                .set_payload(
+                    SetPayloadPointsBuilder::new(MEMORIES, payload.clone())
+                        .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
+                            ids: vec![(*id).into()],
+                        }))
+                        .wait(false),
+                )
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Find top-K nearest neighbors for a given memory by vector similarity.
+    /// Returns vec of (memory_id, cosine_similarity).
+    /// The memory_id itself is excluded from results.
+    pub async fn find_similar(
+        &self,
+        memory_id: &str,
+        top_k: usize,
+    ) -> anyhow::Result<Vec<(String, f32)>> {
+        // Get the vector for this memory
+        let resp = self
+            .client
+            .get_points(
+                GetPointsBuilder::new(MEMORIES, vec![memory_id.into()])
+                    .with_payload(false)
+                    .with_vectors(true),
+            )
+            .await?;
+
+        let vector = resp
+            .result
+            .into_iter()
+            .next()
+            .and_then(|p| extract_vector(&p));
+
+        let Some(vector) = vector else {
+            return Ok(vec![]);
+        };
+
+        // Search for similar vectors (ask for top_k + 1 to account for self)
+        let resp = self
+            .client
+            .search_points(
+                SearchPointsBuilder::new(MEMORIES, vector.as_slice(), (top_k + 1) as u64)
+                    .with_payload(false)
+                    .with_vectors(false),
+            )
+            .await?;
+
+        let results: Vec<(String, f32)> = resp
+            .result
+            .into_iter()
+            .filter(|r| point_id_to_string(r.id.as_ref()) != memory_id)
+            .map(|r| (point_id_to_string(r.id.as_ref()), r.score))
+            .take(top_k)
+            .collect();
+
+        Ok(results)
     }
 }

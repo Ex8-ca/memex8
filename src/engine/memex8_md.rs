@@ -18,7 +18,10 @@ pub async fn write_memex8_md(
     // Active Realms section
     md.push_str("## Active Realms\n");
     for realm in realms {
-        md.push_str(&format!("- **{}** ({} memories)", realm.name, realm.memory_count));
+        md.push_str(&format!(
+            "- **{}** ({} memories)",
+            realm.name, realm.memory_count
+        ));
         if let Some(desc) = &realm.description {
             md.push_str(&format!(" — {}", desc));
         }
@@ -29,7 +32,11 @@ pub async fn write_memex8_md(
     // Top memories by importance
     md.push_str("## Key Memories\n\n");
     let mut sorted: Vec<&MemoryPoint> = memories.iter().collect();
-    sorted.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        b.importance
+            .partial_cmp(&a.importance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     for memory in sorted.iter().take(max_memories) {
         if let Some(heading) = &memory.heading {
@@ -65,7 +72,9 @@ pub async fn write_digest_md(
     }
 
     // Expand ~ to HOME
-    let path_str = config.path.replace("~", &std::env::var("HOME").unwrap_or_default());
+    let path_str = config
+        .path
+        .replace("~", &std::env::var("HOME").unwrap_or_default());
     let path = std::path::Path::new(&path_str);
 
     // Create parent dir if needed
@@ -87,10 +96,7 @@ pub async fn write_digest_md(
     let timestamp = chrono::Utc::now().to_rfc3339();
 
     // Build this run's entry
-    let mut entry = format!(
-        "## {}\n\n**Slumber cycle** at {}\n\n",
-        date, timestamp
-    );
+    let mut entry = format!("## {}\n\n**Slumber cycle** at {}\n\n", date, timestamp);
 
     // Summarize what slumber did
     if report.memories_scanned > 0 {
@@ -112,16 +118,10 @@ pub async fn write_digest_md(
         ));
     }
     if report.realms_updated > 0 {
-        entry.push_str(&format!(
-            "- 🌐 Updated {} realms\n",
-            report.realms_updated
-        ));
+        entry.push_str(&format!("- 🌐 Updated {} realms\n", report.realms_updated));
     }
     if report.realms_renamed > 0 {
-        entry.push_str(&format!(
-            "- ✏️  Renamed {} realms\n",
-            report.realms_renamed
-        ));
+        entry.push_str(&format!("- ✏️  Renamed {} realms\n", report.realms_renamed));
     }
     if report.memories_consolidated > 0 {
         entry.push_str(&format!(

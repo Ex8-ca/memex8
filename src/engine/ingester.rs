@@ -41,7 +41,8 @@ impl Ingester {
         let source_hash = Self::hash_content(&content);
         let source_file = path.to_string_lossy().to_string();
 
-        let chunks = crate::engine::chunker::chunk(&content, chunk_by, self.config.ingest.max_chunk_tokens)?;
+        let chunks =
+            crate::engine::chunker::chunk(&content, chunk_by, self.config.ingest.max_chunk_tokens)?;
 
         Ok(chunks
             .into_iter()

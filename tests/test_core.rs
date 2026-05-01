@@ -2,8 +2,6 @@
 //!
 //! Run with: cargo test --test test_core
 
-
-
 // ─── Cosine Similarity ────────────────────────────────────────────────────────
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -52,7 +50,11 @@ fn test_cosine_high_dim_orthogonal() {
     let a: Vec<f32> = (0..1536).map(|i| ((i * 7) as f32).sin()).collect();
     let b: Vec<f32> = (0..1536).map(|i| ((i * 13) as f32).cos()).collect();
     let sim = cosine_similarity(&a, &b);
-    assert!(sim.abs() < 0.3, "High-dim orthogonal vectors should have |cos| < 0.3, got {}", sim);
+    assert!(
+        sim.abs() < 0.3,
+        "High-dim orthogonal vectors should have |cos| < 0.3, got {}",
+        sim
+    );
 }
 
 #[test]
@@ -63,7 +65,11 @@ fn test_cosine_similar_vectors() {
     noisy[10] += 0.01;
     noisy[50] -= 0.01;
     let sim = cosine_similarity(&v, &noisy);
-    assert!(sim > 0.99, "Similar vectors should have cos > 0.99, got {}", sim);
+    assert!(
+        sim > 0.99,
+        "Similar vectors should have cos > 0.99, got {}",
+        sim
+    );
 }
 
 // ─── Importance Score ─────────────────────────────────────────────────────────
@@ -188,7 +194,10 @@ fn test_recall_favors_high_importance_over_access_count() {
     let high_imp = recall_score(0.8, 0, 0);
     // Low importance but many accesses
     let many_accesses = recall_score(0.1, 0, 50);
-    assert!(high_imp > many_accesses, "Importance (0.8) should beat access count boost (0.1 × 3.5 = 0.35)");
+    assert!(
+        high_imp > many_accesses,
+        "Importance (0.8) should beat access count boost (0.1 × 3.5 = 0.35)"
+    );
 }
 
 // ─── Token estimation ─────────────────────────────────────────────────────────
@@ -321,7 +330,9 @@ fn is_mergeable_fragment(content: &str) -> bool {
 
 #[test]
 fn test_mergeable_fragment_small_conversation() {
-    assert!(is_mergeable_fragment("## User\nThanks\n## Assistant\nYou're welcome!"));
+    assert!(is_mergeable_fragment(
+        "## User\nThanks\n## Assistant\nYou're welcome!"
+    ));
 }
 
 #[test]

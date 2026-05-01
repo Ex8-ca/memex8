@@ -60,10 +60,7 @@ pub async fn sse_handler(
 
         while let Some(message) = msg_rx.recv().await {
             let id = message.get("id").cloned();
-            let method = message
-                .get("method")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let method = message.get("method").and_then(|v| v.as_str()).unwrap_or("");
             let params = message.get("params").cloned().unwrap_or(json!({}));
 
             tracing::debug!("MCP message: method={} id={:?}", method, id);
@@ -158,7 +155,10 @@ pub async fn message_handler(
 }
 
 /// Handle MCP tool calls by dispatching to the Engine.
-async fn handle_tool_call(engine: &Engine, params: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+async fn handle_tool_call(
+    engine: &Engine,
+    params: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
     let name = params
         .get("name")
         .and_then(|v| v.as_str())
@@ -171,14 +171,19 @@ async fn handle_tool_call(engine: &Engine, params: &serde_json::Value) -> anyhow
                 .get("query")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Missing 'query' parameter"))?;
-            let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            let limit = arguments
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10) as usize;
             let realm = arguments.get("realm").and_then(|v| v.as_str());
             let min_score = arguments
                 .get("min_score")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.3) as f32;
 
-            let results = engine.search(query, realm, None, limit, 0, min_score).await?;
+            let results = engine
+                .search(query, realm, None, limit, 0, min_score)
+                .await?;
             Ok(format_results(results))
         }
         "memex8_store" => {
@@ -199,7 +204,10 @@ async fn handle_tool_call(engine: &Engine, params: &serde_json::Value) -> anyhow
             Ok(json!({ "id": id, "status": "stored" }))
         }
         "memex8_recall" => {
-            let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            let limit = arguments
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10) as usize;
             let realm = arguments.get("realm").and_then(|v| v.as_str());
             let results = engine.recall(limit, realm).await?;
             Ok(format_results(results))

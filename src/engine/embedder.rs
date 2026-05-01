@@ -18,7 +18,8 @@ pub fn create_embedder(config: &AppConfig) -> anyhow::Result<Box<dyn Embedder>> 
             config.embedding.dimensions,
         )?)),
         "openai" => {
-            let api_key = config.openai_api_key()
+            let api_key = config
+                .openai_api_key()
                 .ok_or_else(|| anyhow::anyhow!("OPENAI_API_KEY not set"))?;
             Ok(Box::new(OpenAiEmbedder::new(
                 &api_key,

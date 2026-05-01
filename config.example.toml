@@ -44,6 +44,12 @@ auto_archive_days = 90
 prune_threshold = 0.1
 consolidation_schedule = "0 3 * * *"   # Daily at 3am; "" to disable
 
+# Memory evolution: decay, associations, spreading activation
+decay_rate_per_day = 0.001
+association_top_k = 5
+association_min_strength = 0.6
+spreading_activation_bump = 0.005
+
 # Slumber consolidation (Phase 6)
 # backend: "openai" (default) or "local"
 # openai: uses OPENAI_API_KEY from environment

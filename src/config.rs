@@ -52,7 +52,9 @@ fn default_ollama_url() -> String {
 
 impl Default for OllamaConfig {
     fn default() -> Self {
-        Self { url: default_ollama_url() }
+        Self {
+            url: default_ollama_url(),
+        }
     }
 }
 
@@ -66,9 +68,15 @@ pub struct OpenAiConfig {
     pub dimensions: u32,
 }
 
-fn default_openai_key_env() -> String { "OPENAI_API_KEY".into() }
-fn default_openai_model() -> String { "text-embedding-3-small".into() }
-fn default_openai_dims() -> u32 { 1536 }
+fn default_openai_key_env() -> String {
+    "OPENAI_API_KEY".into()
+}
+fn default_openai_model() -> String {
+    "text-embedding-3-small".into()
+}
+fn default_openai_dims() -> u32 {
+    1536
+}
 
 impl Default for OpenAiConfig {
     fn default() -> Self {
@@ -92,10 +100,18 @@ pub struct QdrantConfig {
     pub collection_realms: String,
 }
 
-fn default_qdrant_url() -> String { "http://localhost:6333".into() }
-fn default_memories() -> String { "memories".into() }
-fn default_quantized() -> String { "quantized".into() }
-fn default_realms() -> String { "realms".into() }
+fn default_qdrant_url() -> String {
+    "http://localhost:6333".into()
+}
+fn default_memories() -> String {
+    "memories".into()
+}
+fn default_quantized() -> String {
+    "quantized".into()
+}
+fn default_realms() -> String {
+    "realms".into()
+}
 
 impl Default for QdrantConfig {
     fn default() -> Self {
@@ -143,6 +159,18 @@ pub struct SlumberConfig {
     /// Consolidation backend config.
     #[serde(default)]
     pub consolidation: ConsolidationConfig,
+    /// Daily decay rate for memory importance (forgetting curve).
+    #[serde(default = "default_decay_rate_per_day")]
+    pub decay_rate_per_day: f32,
+    /// Number of nearest neighbors to link per memory during association phase.
+    #[serde(default = "default_association_top_k")]
+    pub association_top_k: u32,
+    /// Minimum cosine similarity to create an association link.
+    #[serde(default = "default_association_min_strength")]
+    pub association_min_strength: f32,
+    /// Importance bump for associated memories during spreading activation.
+    #[serde(default = "default_spreading_activation_bump")]
+    pub spreading_activation_bump: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,10 +293,30 @@ pub struct WatchConfig {
     pub realm_hint: Option<String>,
 }
 
-fn default_chunk() -> String { "section".into() }
-fn default_poll() -> String { "5m".into() }
-fn default_touch_importance_bump() -> f32 { 0.02 }
-fn default_consolidation_schedule() -> String { "0 3 * * *".into() }
+fn default_chunk() -> String {
+    "section".into()
+}
+fn default_poll() -> String {
+    "5m".into()
+}
+fn default_touch_importance_bump() -> f32 {
+    0.02
+}
+fn default_consolidation_schedule() -> String {
+    "0 3 * * *".into()
+}
+fn default_decay_rate_per_day() -> f32 {
+    0.001
+}
+fn default_association_top_k() -> u32 {
+    5
+}
+fn default_association_min_strength() -> f32 {
+    0.6
+}
+fn default_spreading_activation_bump() -> f32 {
+    0.005
+}
 
 impl AppConfig {
     pub fn load(path: &str) -> anyhow::Result<Self> {
@@ -339,6 +387,10 @@ impl Default for AppConfig {
                 summarize: SummarizeConfig::default(),
                 consolidation_schedule: "0 3 * * *".into(),
                 consolidation: ConsolidationConfig::default(),
+                decay_rate_per_day: 0.001,
+                association_top_k: 5,
+                association_min_strength: 0.6,
+                spreading_activation_bump: 0.005,
             },
             memex8_md: Memex8MdConfig {
                 enabled: true,

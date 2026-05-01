@@ -1,7 +1,7 @@
 use crate::api::server::AppState;
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{StatusCode, header};
+use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use std::sync::Arc;
@@ -39,7 +39,10 @@ pub async fn auth_middleware(
     };
 
     if !auth_value.starts_with("Bearer ") {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid Authorization format, expected 'Bearer <key>'"));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid Authorization format, expected 'Bearer <key>'",
+        ));
     }
 
     let token = &auth_value["Bearer ".len()..];

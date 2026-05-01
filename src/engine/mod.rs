@@ -12,8 +12,8 @@ pub mod slumber;
 pub mod watcher;
 
 use crate::config::AppConfig;
-use crate::storage::qdrant::{MemoryWithVector, QdrantStore};
 pub use crate::engine::watcher::{FileChangeEvent, FileWatcher};
+use crate::storage::qdrant::{MemoryWithVector, QdrantStore};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -79,23 +79,24 @@ struct SlumberState {
 impl Engine {
     pub async fn new(config: AppConfig) -> anyhow::Result<Self> {
         // Override Qdrant URL from env var (set by docker-compose)
-        let qdrant_url = std::env::var("QDRANT_URL")
-            .unwrap_or_else(|_| config.qdrant.url.clone());
+        let qdrant_url = std::env::var("QDRANT_URL").unwrap_or_else(|_| config.qdrant.url.clone());
         tracing::info!("Using Qdrant URL: {}", qdrant_url);
         let store = QdrantStore::new(&qdrant_url).await?;
 
         // Determine active embedding provider from env vars (set by docker-compose .env)
         let provider = std::env::var("EMBEDDING_PROVIDER")
             .unwrap_or_else(|_| config.embedding.provider.clone());
-        let model = std::env::var("EMBEDDING_MODEL")
-            .unwrap_or_else(|_| config.embedding.model.clone());
+        let model =
+            std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| config.embedding.model.clone());
         let dimensions = std::env::var("EMBEDDING_DIMENSIONS")
-            .ok().and_then(|d| d.parse().ok())
+            .ok()
+            .and_then(|d| d.parse().ok())
             .unwrap_or(config.embedding.dimensions);
 
         // If using OpenAI but no key in config, try env var
         let openai_key = std::env::var("OPENAI_API_KEY")
-            .ok().or_else(|| config.openai_api_key());
+            .ok()
+            .or_else(|| config.openai_api_key());
         if provider == "openai" {
             if openai_key.is_none() {
                 return Err(anyhow::anyhow!(
@@ -188,17 +189,19 @@ impl Engine {
             let realm = self.store.get_realm(&realm_id).await?;
             let realm_name = realm.map(|r| r.name.clone()).unwrap_or_default();
 
-            self.store.store_memory(
-                &id,
-                &vector,
-                &chunk.content,
-                chunk.heading.as_deref(),
-                Some(chunk.source_file.as_str()),
-                &realm_id,
-                &realm_name,
-                &chunk.source_hash,
-                &chunk.chunk_type,
-            ).await?;
+            self.store
+                .store_memory(
+                    &id,
+                    &vector,
+                    &chunk.content,
+                    chunk.heading.as_deref(),
+                    Some(chunk.source_file.as_str()),
+                    &realm_id,
+                    &realm_name,
+                    &chunk.source_hash,
+                    &chunk.chunk_type,
+                )
+                .await?;
 
             {
                 let mut state = self.slumber_state.write().await;
@@ -216,7 +219,9 @@ impl Engine {
             // Create a default realm
             let id = uuid::Uuid::new_v4().to_string();
             let name = "general".to_string();
-            self.store.store_realm(&id, vector, &name, None, false).await?;
+            self.store
+                .store_realm(&id, vector, &name, None, false)
+                .await?;
             return Ok(id);
         }
 
@@ -255,7 +260,9 @@ impl Engine {
         // No close realm — create new one
         let id = uuid::Uuid::new_v4().to_string();
         let name = format!("realm-{}", &id[..8]);
-        self.store.store_realm(&id, vector, &name, None, false).await?;
+        self.store
+            .store_realm(&id, vector, &name, None, false)
+            .await?;
         Ok(id)
     }
 
@@ -301,7 +308,12 @@ impl Engine {
                 println!();
                 for (path, chunk, hint, poll) in &watches {
                     println!("  📂 {}", path);
-                    println!("     chunk: {} | poll: {} | realm: {}", chunk, poll, hint.as_deref().unwrap_or("auto"));
+                    println!(
+                        "     chunk: {} | poll: {} | realm: {}",
+                        chunk,
+                        poll,
+                        hint.as_deref().unwrap_or("auto")
+                    );
                     println!();
                 }
             }
@@ -312,7 +324,12 @@ impl Engine {
             println!();
             for w in &self.config.watch {
                 println!("  📂 {}", w.path);
-                println!("     chunk: {} | poll: {} | realm: {}", w.chunk_by, w.poll_interval, w.realm_hint.as_deref().unwrap_or("auto"));
+                println!(
+                    "     chunk: {} | poll: {} | realm: {}",
+                    w.chunk_by,
+                    w.poll_interval,
+                    w.realm_hint.as_deref().unwrap_or("auto")
+                );
                 println!();
             }
         }
@@ -339,7 +356,9 @@ impl Engine {
 
     /// Start all configured file watchers and return a receiver for change events.
     /// The caller should spawn a task to process FileChangeEvents.
-    pub async fn start_watchers(&self) -> anyhow::Result<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<FileChangeEvent>>>> {
+    pub async fn start_watchers(
+        &self,
+    ) -> anyhow::Result<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<FileChangeEvent>>>> {
         if self.config.watch.is_empty() {
             tracing::info!("No file watches configured.");
             return Ok(None);
@@ -377,7 +396,9 @@ impl Engine {
         realm_hint: Option<&str>,
     ) -> anyhow::Result<()> {
         let ingester = ingester::Ingester::new(self.config.clone());
-        let chunks = ingester.ingest_path(&path.to_string_lossy(), chunk_by).await?;
+        let chunks = ingester
+            .ingest_path(&path.to_string_lossy(), chunk_by)
+            .await?;
 
         let embedder = self.make_embedder()?;
         let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
@@ -401,14 +422,26 @@ impl Engine {
             let realm = self.store.get_realm(&realm_id).await?;
             let realm_name = realm.map(|r| r.name.clone()).unwrap_or_default();
 
-            self.store.store_memory(
-                &id, &vector, &chunk.content, chunk.heading.as_deref(),
-                Some(chunk.source_file.as_str()), &realm_id, &realm_name,
-                &chunk.source_hash, &chunk.chunk_type,
-            ).await?;
+            self.store
+                .store_memory(
+                    &id,
+                    &vector,
+                    &chunk.content,
+                    chunk.heading.as_deref(),
+                    Some(chunk.source_file.as_str()),
+                    &realm_id,
+                    &realm_name,
+                    &chunk.source_hash,
+                    &chunk.chunk_type,
+                )
+                .await?;
         }
 
-        tracing::info!("  ✅ Re-ingested {} chunks from {}", chunks.len(), path.display());
+        tracing::info!(
+            "  ✅ Re-ingested {} chunks from {}",
+            chunks.len(),
+            path.display()
+        );
         Ok(())
     }
 
@@ -420,11 +453,18 @@ impl Engine {
         while let Some(events) = event_rx.recv().await {
             for event in events {
                 match event {
-                    FileChangeEvent::Modified { path, watch_config, .. }
-                    | FileChangeEvent::Created { path, watch_config, .. } => {
+                    FileChangeEvent::Modified {
+                        path, watch_config, ..
+                    }
+                    | FileChangeEvent::Created {
+                        path, watch_config, ..
+                    } => {
                         let chunk_by = watch_config.chunk_by;
                         let realm_hint = watch_config.realm_hint;
-                        if let Err(e) = self.reingest_changed_file(&path, &chunk_by, realm_hint.as_deref()).await {
+                        if let Err(e) = self
+                            .reingest_changed_file(&path, &chunk_by, realm_hint.as_deref())
+                            .await
+                        {
                             tracing::error!("Failed to re-ingest {}: {}", path.display(), e);
                         }
                     }
@@ -453,16 +493,22 @@ impl Engine {
         // If tags filter requested, use tag-aware search
         let results = if let Some(tags) = tags {
             if tags.is_empty() {
-                self.store.search(&query_vector, limit + offset, min_score, realm).await?
+                self.store
+                    .search(&query_vector, limit + offset, min_score, realm)
+                    .await?
             } else {
-                self.store.search_by_tags(&query_vector, tags, limit + offset).await?
+                self.store
+                    .search_by_tags(&query_vector, tags, limit + offset)
+                    .await?
                     .into_iter()
                     .filter(|r| r.score >= min_score)
                     .filter(|r| realm.map_or(true, |re| r.payload.realm_name == re))
                     .collect()
             }
         } else {
-            self.store.search(&query_vector, limit + offset, min_score, realm).await?
+            self.store
+                .search(&query_vector, limit + offset, min_score, realm)
+                .await?
         };
 
         // Apply pagination
@@ -473,29 +519,57 @@ impl Engine {
         let bump = self.config.slumber.touch_importance_bump;
         let _ = self.store.track_access_batch(&touch_ids, bump).await;
 
+        // Spreading activation: bump associated memories too
+        let spread_bump = self.config.slumber.spreading_activation_bump;
+        if spread_bump > 0.0 {
+            let associated_ids: Vec<&str> = results
+                .iter()
+                .flat_map(|r| r.payload.related_memory_ids.iter().map(|s| s.as_str()))
+                .collect();
+            if !associated_ids.is_empty() {
+                let _ = self
+                    .store
+                    .track_access_batch(&associated_ids, spread_bump)
+                    .await;
+            }
+        }
+
         {
             let mut state = self.slumber_state.write().await;
             state.last_query = chrono::Utc::now();
         }
         self.touch_activity().await;
 
-        Ok(results.into_iter().map(|r| MemoryResult {
-            id: r.payload.id,
-            content: r.payload.content,
-            heading: r.payload.heading,
-            realm_name: r.payload.realm_name,
-            importance: r.payload.importance,
-            score: r.score,
-            last_accessed: r.payload.last_accessed,
-            access_count: r.payload.access_count,
-        }).collect())
+        Ok(results
+            .into_iter()
+            .map(|r| MemoryResult {
+                id: r.payload.id,
+                content: r.payload.content,
+                heading: r.payload.heading,
+                realm_name: r.payload.realm_name,
+                importance: r.payload.importance,
+                score: r.score,
+                last_accessed: r.payload.last_accessed,
+                access_count: r.payload.access_count,
+            })
+            .collect())
     }
 
-    pub async fn get_memory(&self, id: &str) -> anyhow::Result<crate::storage::qdrant::MemoryPoint> {
-        self.store.get_memory(id).await?.ok_or_else(|| anyhow::anyhow!("Memory not found: {}", id))
+    pub async fn get_memory(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<crate::storage::qdrant::MemoryPoint> {
+        self.store
+            .get_memory(id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", id))
     }
 
-    pub async fn recall(&self, limit: usize, realm: Option<&str>) -> anyhow::Result<Vec<MemoryResult>> {
+    pub async fn recall(
+        &self,
+        limit: usize,
+        realm: Option<&str>,
+    ) -> anyhow::Result<Vec<MemoryResult>> {
         // Scroll all memories and sort by importance × recency score
         let memories = self.store.scroll_all_memories().await?;
 
@@ -522,6 +596,21 @@ impl Engine {
         let touch_ids: Vec<&str> = top.iter().map(|(m, _)| m.id.as_str()).collect();
         let bump = self.config.slumber.touch_importance_bump;
         let _ = self.store.track_access_batch(&touch_ids, bump).await;
+
+        // Spreading activation: bump associated memories too
+        let spread_bump = self.config.slumber.spreading_activation_bump;
+        if spread_bump > 0.0 {
+            let associated_ids: Vec<&str> = top
+                .iter()
+                .flat_map(|(m, _)| m.related_memory_ids.iter().map(|s| s.as_str()))
+                .collect();
+            if !associated_ids.is_empty() {
+                let _ = self
+                    .store
+                    .track_access_batch(&associated_ids, spread_bump)
+                    .await;
+            }
+        }
 
         Ok(scored
             .into_iter()
@@ -552,17 +641,31 @@ impl Engine {
         let id = uuid::Uuid::new_v4().to_string();
         // Use a zero vector as initial centroid; will be updated during slumber
         let centroid = vec![0.0; self.config.embedding.dimensions as usize];
-        self.store.store_realm(&id, &centroid, name, description, true).await
+        self.store
+            .store_realm(&id, &centroid, name, description, true)
+            .await
     }
 
-    pub async fn show_realm(&self, name: &str) -> anyhow::Result<crate::storage::qdrant::RealmPoint> {
-        self.store.find_realm_by_name(name).await?.ok_or_else(|| anyhow::anyhow!("Realm not found: {}", name))
+    pub async fn show_realm(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<crate::storage::qdrant::RealmPoint> {
+        self.store
+            .find_realm_by_name(name)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Realm not found: {}", name))
     }
 
     pub async fn merge_realms(&self, target: &str, source: &str) -> anyhow::Result<()> {
-        let target_realm = self.store.find_realm_by_name(target).await?
+        let target_realm = self
+            .store
+            .find_realm_by_name(target)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Target realm not found: {}", target))?;
-        let source_realm = self.store.find_realm_by_name(source).await?
+        let source_realm = self
+            .store
+            .find_realm_by_name(source)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Source realm not found: {}", source))?;
 
         tracing::info!("Merging realm '{}' into '{}'", source, target);
@@ -600,14 +703,18 @@ impl Engine {
         let memory = self.get_memory(id).await?;
         let new_upvotes = memory.upvotes + 1;
         let new_importance = (memory.importance + 0.1).min(1.0);
-        self.store.update_upvotes(id, new_upvotes, new_importance).await
+        self.store
+            .update_upvotes(id, new_upvotes, new_importance)
+            .await
     }
 
     pub async fn downvote(&self, id: &str) -> anyhow::Result<()> {
         let memory = self.get_memory(id).await?;
         let new_upvotes = (memory.upvotes as i64 - 1).max(0) as u32;
         let new_importance = (memory.importance - 0.1).max(0.01);
-        self.store.update_upvotes(id, new_upvotes, new_importance).await
+        self.store
+            .update_upvotes(id, new_upvotes, new_importance)
+            .await
     }
 
     pub async fn prune_queue(&self) -> anyhow::Result<Vec<crate::storage::qdrant::MemoryPoint>> {
@@ -648,17 +755,19 @@ impl Engine {
 
         let existing = self.get_memory(id).await?;
         let realm_id = existing.realm_id.as_deref().unwrap_or("");
-        self.store.store_memory(
-            id,
-            &vector,
-            new_content,
-            existing.heading.as_deref(),
-            existing.source_file.as_deref(),
-            realm_id,
-            &existing.realm_name,
-            &existing.source_hash,
-            &existing.chunk_type,
-        ).await?;
+        self.store
+            .store_memory(
+                id,
+                &vector,
+                new_content,
+                existing.heading.as_deref(),
+                existing.source_file.as_deref(),
+                realm_id,
+                &existing.realm_name,
+                &existing.source_hash,
+                &existing.chunk_type,
+            )
+            .await?;
 
         tracing::info!("Updated memory {}", id);
         Ok(())
@@ -676,17 +785,17 @@ impl Engine {
         }
     }
 
-    pub async fn trigger_slumber(&self, force_consolidation: bool) -> anyhow::Result<slumber::SlumberReport> {
+    pub async fn trigger_slumber(
+        &self,
+        force_consolidation: bool,
+    ) -> anyhow::Result<slumber::SlumberReport> {
         {
             let mut state = self.slumber_state.write().await;
             state.status = "running".into();
         }
 
         tracing::info!("💤 Slumber started...");
-        let slumber = slumber::SlumberEngine::new(
-            self.config.clone(),
-            self.store.clone_store(),
-        );
+        let slumber = slumber::SlumberEngine::new(self.config.clone(), self.store.clone_store());
         let report = slumber.run_full_pipeline(force_consolidation).await?;
 
         {
@@ -711,7 +820,10 @@ impl Engine {
     }
 
     pub async fn stats(&self) -> anyhow::Result<SystemStats> {
-        let mem_stats = self.store.get_collection_stats(&self.config.qdrant.collection_memories).await?;
+        let mem_stats = self
+            .store
+            .get_collection_stats(&self.config.qdrant.collection_memories)
+            .await?;
         let realms = self.store.list_realms().await?;
         let slumber = self.slumber_status().await;
 
@@ -755,17 +867,19 @@ impl Engine {
 
         let source_str = source.unwrap_or("manual");
 
-        self.store.store_memory(
-            &id,
-            &vector,
-            content,
-            None,
-            Some(source_str),
-            &realm_id,
-            &realm_name,
-            "",
-            "manual",
-        ).await?;
+        self.store
+            .store_memory(
+                &id,
+                &vector,
+                content,
+                None,
+                Some(source_str),
+                &realm_id,
+                &realm_name,
+                "",
+                "manual",
+            )
+            .await?;
 
         Ok(id)
     }
@@ -814,17 +928,19 @@ impl Engine {
                 let count = memories.len();
                 for m in &memories {
                     let realm_id = m.memory.realm_id.as_deref().unwrap_or("");
-                    self.store.store_memory(
-                        &m.memory.id,
-                        &m.vector,
-                        &m.memory.content,
-                        m.memory.heading.as_deref(),
-                        m.memory.source_file.as_deref(),
-                        realm_id,
-                        &m.memory.realm_name,
-                        &m.memory.source_hash,
-                        &m.memory.chunk_type,
-                    ).await?;
+                    self.store
+                        .store_memory(
+                            &m.memory.id,
+                            &m.vector,
+                            &m.memory.content,
+                            m.memory.heading.as_deref(),
+                            m.memory.source_file.as_deref(),
+                            realm_id,
+                            &m.memory.realm_name,
+                            &m.memory.source_hash,
+                            &m.memory.chunk_type,
+                        )
+                        .await?;
                 }
                 tracing::info!("Imported {} memories with vectors from {}", count, path);
                 return Ok(count);
@@ -839,17 +955,19 @@ impl Engine {
         for mem in &memories {
             let vector = embedder.embed(&mem.content).await?;
             let realm_id = mem.realm_id.as_deref().unwrap_or("");
-            self.store.store_memory(
-                &mem.id,
-                &vector,
-                &mem.content,
-                mem.heading.as_deref(),
-                mem.source_file.as_deref(),
-                realm_id,
-                &mem.realm_name,
-                &mem.source_hash,
-                &mem.chunk_type,
-            ).await?;
+            self.store
+                .store_memory(
+                    &mem.id,
+                    &vector,
+                    &mem.content,
+                    mem.heading.as_deref(),
+                    mem.source_file.as_deref(),
+                    realm_id,
+                    &mem.realm_name,
+                    &mem.source_hash,
+                    &mem.chunk_type,
+                )
+                .await?;
         }
 
         tracing::info!("Imported {} memories from {}", count, path);
@@ -881,5 +999,9 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 { 0.0 } else { dot / (norm_a * norm_b) }
+    if norm_a == 0.0 || norm_b == 0.0 {
+        0.0
+    } else {
+        dot / (norm_a * norm_b)
+    }
 }

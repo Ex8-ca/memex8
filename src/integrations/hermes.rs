@@ -1,11 +1,7 @@
 use crate::config::AppConfig;
 
 /// Print the webhook config users paste into their Hermes config.
-pub fn configure(
-    _config: &AppConfig,
-    base_url: &str,
-    api_key: &str,
-) -> anyhow::Result<()> {
+pub fn configure(_config: &AppConfig, base_url: &str, api_key: &str) -> anyhow::Result<()> {
     println!("🧠 Add this to ~/.hermes/config.yaml:");
     println!();
     println!("webhooks:");

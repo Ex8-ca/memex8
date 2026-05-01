@@ -40,7 +40,8 @@ impl OpenAiEmbedder {
 #[async_trait]
 impl Embedder for OpenAiEmbedder {
     async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
-        let resp = self.client
+        let resp = self
+            .client
             .post("https://api.openai.com/v1/embeddings")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&OpenAiRequest {
@@ -58,14 +59,18 @@ impl Embedder for OpenAiEmbedder {
         }
 
         let result: OpenAiResponse = resp.json().await?;
-        result.data.into_iter().next()
+        result
+            .data
+            .into_iter()
+            .next()
             .map(|d| d.embedding)
             .ok_or_else(|| anyhow::anyhow!("No embedding in OpenAI response"))
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
         let input: Vec<&str> = texts.to_vec();
-        let resp = self.client
+        let resp = self
+            .client
             .post("https://api.openai.com/v1/embeddings")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&serde_json::json!({

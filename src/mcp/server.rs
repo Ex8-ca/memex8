@@ -39,10 +39,15 @@ pub async fn run_stdio(config: AppConfig) -> anyhow::Result<()> {
         let request: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                write_response(&mut stdout, None, json!({
-                    "code": -32700,
-                    "message": format!("Parse error: {}", e)
-                })).await?;
+                write_response(
+                    &mut stdout,
+                    None,
+                    json!({
+                        "code": -32700,
+                        "message": format!("Parse error: {}", e)
+                    }),
+                )
+                .await?;
                 continue;
             }
         };
@@ -59,15 +64,26 @@ pub async fn run_stdio(config: AppConfig) -> anyhow::Result<()> {
             "tools/list" => Ok(json!({ "tools": tools_list })),
             "tools/call" => {
                 let Some(ref e) = engine else {
-                    write_error(&mut stdout, id.clone(), -32603,
-                        "Qdrant unavailable — memory operations not accessible".into()).await?;
+                    write_error(
+                        &mut stdout,
+                        id.clone(),
+                        -32603,
+                        "Qdrant unavailable — memory operations not accessible".into(),
+                    )
+                    .await?;
                     continue;
                 };
                 handle_tool_call(e, &params).await
             }
             "ping" => Ok(json!({})),
             _ => {
-                write_error(&mut stdout, id.clone(), -32601, format!("Method not found: {}", method)).await?;
+                write_error(
+                    &mut stdout,
+                    id.clone(),
+                    -32601,
+                    format!("Method not found: {}", method),
+                )
+                .await?;
                 continue;
             }
         };
@@ -100,8 +116,13 @@ fn handle_initialize() -> anyhow::Result<serde_json::Value> {
     }))
 }
 
-async fn handle_tool_call(engine: &Engine, params: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
-    let name = params.get("name").and_then(|v| v.as_str())
+async fn handle_tool_call(
+    engine: &Engine,
+    params: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing tool name"))?;
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
@@ -109,42 +130,69 @@ async fn handle_tool_call(engine: &Engine, params: &serde_json::Value) -> anyhow
 
     match name {
         "memex8_search" => {
-            let query = arguments.get("query").and_then(|v| v.as_str())
+            let query = arguments
+                .get("query")
+                .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Missing 'query' parameter"))?;
-            let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            let limit = arguments
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10) as usize;
             let realm = arguments.get("realm").and_then(|v| v.as_str());
-            let min_score = arguments.get("min_score").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
+            let min_score = arguments
+                .get("min_score")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.3) as f32;
 
-            let results = engine.search(query, realm, None, limit, 0, min_score).await?;
+            let results = engine
+                .search(query, realm, None, limit, 0, min_score)
+                .await?;
             Ok(format_results(results))
         }
         "memex8_store" => {
-            let content = arguments.get("content").and_then(|v| v.as_str())
+            let content = arguments
+                .get("content")
+                .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Missing 'content' parameter"))?;
-            let tags = arguments.get("tags").and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect());
+            let tags = arguments.get("tags").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            });
             let realm_hint = arguments.get("realm_hint").and_then(|v| v.as_str());
 
-            let id = engine.store_memory(content, tags, realm_hint, Some("mcp")).await?;
+            let id = engine
+                .store_memory(content, tags, realm_hint, Some("mcp"))
+                .await?;
             Ok(json!({ "id": id, "status": "stored" }))
         }
         "memex8_recall" => {
-            let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            let limit = arguments
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10) as usize;
             let realm = arguments.get("realm").and_then(|v| v.as_str());
 
             let results = engine.recall(limit, realm).await?;
             Ok(format_results(results))
         }
         "memex8_get" => {
-            let id = arguments.get("id").and_then(|v| v.as_str())
+            let id = arguments
+                .get("id")
+                .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Missing 'id' parameter"))?;
             let memory = engine.get_memory(id).await?;
             Ok(json!({ "memory": memory }))
         }
         "memex8_ingest" => {
-            let path = arguments.get("path").and_then(|v| v.as_str())
+            let path = arguments
+                .get("path")
+                .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
-            let chunk_by = arguments.get("chunk_by").and_then(|v| v.as_str()).unwrap_or("section");
+            let chunk_by = arguments
+                .get("chunk_by")
+                .and_then(|v| v.as_str())
+                .unwrap_or("section");
             let realm_hint = arguments.get("realm_hint").and_then(|v| v.as_str());
 
             engine.ingest_path(path, chunk_by, realm_hint).await?;
@@ -155,13 +203,17 @@ async fn handle_tool_call(engine: &Engine, params: &serde_json::Value) -> anyhow
             Ok(json!({ "realms": realms }))
         }
         "memex8_realms_show" => {
-            let name = arguments.get("name").and_then(|v| v.as_str())
+            let name = arguments
+                .get("name")
+                .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Missing 'name' parameter"))?;
             let realm = engine.show_realm(name).await?;
             Ok(json!({ "realm": realm }))
         }
         "memex8_upvote" => {
-            let id = arguments.get("id").and_then(|v| v.as_str())
+            let id = arguments
+                .get("id")
+                .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Missing 'id' parameter"))?;
             engine.upvote(id).await?;
             Ok(json!({ "upvoted": id }))
@@ -175,7 +227,9 @@ async fn handle_tool_call(engine: &Engine, params: &serde_json::Value) -> anyhow
             Ok(json!({ "status": status }))
         }
         "memex8_graph_search" => {
-            let entity = arguments.get("entity").and_then(|v| v.as_str())
+            let entity = arguments
+                .get("entity")
+                .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Missing 'entity' parameter"))?;
             let relationship = arguments.get("relationship").and_then(|v| v.as_str());
             let depth = arguments.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;

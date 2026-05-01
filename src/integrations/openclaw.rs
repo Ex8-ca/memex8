@@ -1,11 +1,7 @@
 use crate::config::AppConfig;
 
 /// Print the webhook config users paste into their OpenClaw config.
-pub fn configure(
-    _config: &AppConfig,
-    base_url: &str,
-    api_key: &str,
-) -> anyhow::Result<()> {
+pub fn configure(_config: &AppConfig, base_url: &str, api_key: &str) -> anyhow::Result<()> {
     println!("🦞 Add this to your OpenClaw config:");
     println!();
     println!("hooks:");

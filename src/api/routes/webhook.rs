@@ -26,24 +26,16 @@ pub async fn conversation_end(
         }
     }
 
-    let tags = vec![
-        "conversation".to_string(),
-        format!("platform:{}", platform),
-    ];
+    let tags = vec!["conversation".to_string(), format!("platform:{}", platform)];
 
     let realm_hint = payload.realm_hint.clone();
 
-    let id = state.engine.store_memory(
-        &content,
-        Some(tags),
-        realm_hint.as_deref(),
-        Some(source),
-    ).await?;
+    let id = state
+        .engine
+        .store_memory(&content, Some(tags), realm_hint.as_deref(), Some(source))
+        .await?;
 
-    tracing::info!(
-        "📥 Webhook: stored {} conversation (id: {})",
-        platform, id
-    );
+    tracing::info!("📥 Webhook: stored {} conversation (id: {})", platform, id);
 
     Ok(Json(serde_json::json!({
         "status": "stored",
@@ -68,19 +60,26 @@ pub async fn skill_executed(
 
     let tags = vec![
         "skill".to_string(),
-        payload.skill_category.clone().unwrap_or_else(|| "general".to_string()),
+        payload
+            .skill_category
+            .clone()
+            .unwrap_or_else(|| "general".to_string()),
     ];
 
-    let id = state.engine.store_memory(
-        &content,
-        Some(tags),
-        payload.realm_hint.as_deref(),
-        Some("openclaw"),
-    ).await?;
+    let id = state
+        .engine
+        .store_memory(
+            &content,
+            Some(tags),
+            payload.realm_hint.as_deref(),
+            Some("openclaw"),
+        )
+        .await?;
 
     tracing::info!(
         "📥 Webhook: stored skill execution (id: {}, skill: {})",
-        id, payload.skill_name
+        id,
+        payload.skill_name
     );
 
     Ok(Json(serde_json::json!({

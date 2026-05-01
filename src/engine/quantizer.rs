@@ -422,7 +422,9 @@ mod tests {
             assert!(
                 report.cosine_similarity >= prev_cosine - 0.02,
                 "{:.1}-bit cosine {:.4} worse than previous {:.4}",
-                bits, report.cosine_similarity, prev_cosine
+                bits,
+                report.cosine_similarity,
+                prev_cosine
             );
             prev_cosine = report.cosine_similarity;
         }

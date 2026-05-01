@@ -161,7 +161,9 @@ fn parse_duration(s: &str) -> anyhow::Result<Duration> {
     }
 
     let (num_str, unit) = s.split_at(s.len() - 1);
-    let num: u64 = num_str.parse().map_err(|_| anyhow::anyhow!("Invalid duration: {}", s))?;
+    let num: u64 = num_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid duration: {}", s))?;
 
     match unit {
         "s" => Ok(Duration::from_secs(num)),
@@ -181,9 +183,9 @@ fn parse_cron_to_duration(cron_expr: &str) -> anyhow::Result<Duration> {
     // Handle "*/N * * * *" pattern (every N minutes)
     if let Some(star_n) = cron_expr.strip_prefix("*/") {
         if let Some(space_idx) = star_n.find(' ') {
-            let minutes: u64 = star_n[..space_idx].parse().map_err(|_| {
-                anyhow::anyhow!("Invalid cron expression: {}", cron_expr)
-            })?;
+            let minutes: u64 = star_n[..space_idx]
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid cron expression: {}", cron_expr))?;
             return Ok(Duration::from_secs(minutes * 60));
         }
     }
@@ -291,7 +293,8 @@ fn matches_field(field: &str, value: u64) -> bool {
 
     // Handle comma-separated values
     if field.contains(',') {
-        return field.split(',')
+        return field
+            .split(',')
             .map(|s| s.trim())
             .any(|s| matches_field(s, value));
     }

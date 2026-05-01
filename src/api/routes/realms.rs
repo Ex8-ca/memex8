@@ -21,7 +21,10 @@ pub async fn create(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRealmRequest>,
 ) -> Result<Json<serde_json::Value>, crate::api::error::ApiError> {
-    state.engine.create_realm(&req.name, req.description.as_deref()).await?;
+    state
+        .engine
+        .create_realm(&req.name, req.description.as_deref())
+        .await?;
     Ok(Json(serde_json::json!({"created": req.name})))
 }
 

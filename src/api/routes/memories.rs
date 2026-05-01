@@ -40,12 +40,15 @@ pub async fn store(
     State(state): State<Arc<AppState>>,
     Json(req): Json<StoreRequest>,
 ) -> Result<Json<StoreResponse>, crate::api::error::ApiError> {
-    let id = state.engine.store_memory(
-        &req.content,
-        req.tags,
-        req.realm_hint.as_deref(),
-        req.source.as_deref(),
-    ).await?;
+    let id = state
+        .engine
+        .store_memory(
+            &req.content,
+            req.tags,
+            req.realm_hint.as_deref(),
+            req.source.as_deref(),
+        )
+        .await?;
     Ok(Json(StoreResponse {
         id,
         status: "stored".into(),
@@ -59,14 +62,17 @@ pub async fn search(
     let limit = req.limit.unwrap_or(10);
     let offset = req.offset.unwrap_or(0);
     let tags_ref = req.tags.clone();
-    let results = state.engine.search(
-        &req.query,
-        req.realm.as_deref(),
-        tags_ref.as_deref().map(|t| t.as_ref()),
-        limit,
-        offset,
-        req.min_score.unwrap_or(0.3),
-    ).await?;
+    let results = state
+        .engine
+        .search(
+            &req.query,
+            req.realm.as_deref(),
+            tags_ref.as_deref().map(|t| t.as_ref()),
+            limit,
+            offset,
+            req.min_score.unwrap_or(0.3),
+        )
+        .await?;
     let total = results.len();
     Ok(Json(SearchResponse {
         results,
@@ -106,10 +112,10 @@ pub async fn recall(
 ) -> Result<Json<RecallResponse>, crate::api::error::ApiError> {
     let limit = params.limit.unwrap_or(10);
     let offset = params.offset.unwrap_or(0);
-    let all_results = state.engine.recall(
-        limit + offset,
-        params.realm.as_deref(),
-    ).await?;
+    let all_results = state
+        .engine
+        .recall(limit + offset, params.realm.as_deref())
+        .await?;
     let total = all_results.len();
     let results: Vec<_> = all_results.into_iter().skip(offset).take(limit).collect();
     Ok(Json(RecallResponse {
@@ -135,7 +141,11 @@ pub async fn tags(
 ) -> Result<Json<Vec<TagSuggestion>>, crate::api::error::ApiError> {
     let limit = params.limit.unwrap_or(20);
     let tags = state.engine.get_tag_suggestions(limit).await?;
-    Ok(Json(tags.into_iter().map(|(tag, count)| TagSuggestion { tag, count }).collect()))
+    Ok(Json(
+        tags.into_iter()
+            .map(|(tag, count)| TagSuggestion { tag, count })
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -160,12 +170,17 @@ pub async fn ingest(
     State(state): State<Arc<AppState>>,
     Json(req): Json<IngestRequest>,
 ) -> Result<Json<serde_json::Value>, crate::api::error::ApiError> {
-    state.engine.ingest_path(
-        &req.path,
-        req.chunk_by.as_deref().unwrap_or("section"),
-        req.realm_hint.as_deref(),
-    ).await?;
-    Ok(Json(serde_json::json!({"status": "ingested", "path": req.path})))
+    state
+        .engine
+        .ingest_path(
+            &req.path,
+            req.chunk_by.as_deref().unwrap_or("section"),
+            req.realm_hint.as_deref(),
+        )
+        .await?;
+    Ok(Json(
+        serde_json::json!({"status": "ingested", "path": req.path}),
+    ))
 }
 
 pub async fn upvote(

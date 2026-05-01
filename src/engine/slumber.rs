@@ -20,6 +20,10 @@ pub struct SlumberReport {
     pub memories_consolidated: usize,
     pub index_optimized: usize,
     pub digest_md_written: usize,
+    /// Memories whose importance was decayed.
+    pub decayed: usize,
+    /// Association links created.
+    pub associated: usize,
 }
 
 impl SlumberEngine {
@@ -31,7 +35,10 @@ impl SlumberEngine {
     /// `force_consolidation` is set by the scheduler when the consolidation
     /// wall-clock schedule matches — avoids the timing drift bug where the
     /// 5-minute cron ingest ticks never align with "0 3 * * *" exactly.
-    pub async fn run_full_pipeline(&self, force_consolidation: bool) -> anyhow::Result<SlumberReport> {
+    pub async fn run_full_pipeline(
+        &self,
+        force_consolidation: bool,
+    ) -> anyhow::Result<SlumberReport> {
         let mut report = SlumberReport::default();
 
         // Phase 1: Deduplicate near-identical memories
@@ -76,6 +83,14 @@ impl SlumberEngine {
         tracing::info!("💤 Slumber phase 7: Qdrant index optimization");
         report.index_optimized = self.optimize_qdrant_index().await?;
 
+        // Phase 8: Memory decay (aging)
+        tracing::info!("💤 Slumber phase 8: Memory decay");
+        report.decayed = self.decay_memories().await?;
+
+        // Phase 9: Build associations (semantic linking)
+        tracing::info!("💤 Slumber phase 9: Build associations");
+        report.associated = self.build_associations().await?;
+
         // Phase 7: Write master memex8.md digest
         if self.config.digest_md.enabled {
             tracing::info!("💤 Slumber phase 7: Write digest md");
@@ -86,7 +101,9 @@ impl SlumberEngine {
                 &all_memories,
                 &realms,
                 &report,
-            ).await {
+            )
+            .await
+            {
                 Ok(n) => n,
                 Err(e) => {
                     tracing::warn!("  Digest md write failed: {}", e);
@@ -96,7 +113,7 @@ impl SlumberEngine {
         }
 
         tracing::info!(
-            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={}",
+            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={}",
             report.memories_scanned,
             report.deduplicated,
             report.quantized,
@@ -107,6 +124,8 @@ impl SlumberEngine {
             report.memex8_md_written,
             report.index_optimized,
             report.digest_md_written,
+            report.decayed,
+            report.associated,
         );
 
         Ok(report)
@@ -126,7 +145,10 @@ impl SlumberEngine {
             std::collections::HashMap::new();
         for mem in &all {
             if !mem.source_hash.is_empty() {
-                by_hash.entry(mem.source_hash.clone()).or_default().push(mem);
+                by_hash
+                    .entry(mem.source_hash.clone())
+                    .or_default()
+                    .push(mem);
             }
         }
 
@@ -180,20 +202,34 @@ impl SlumberEngine {
 
             // Only store if quality is acceptable
             if cosine > 0.7 {
-                self.store.store_quantized(&mem_with_vec.memory.id, &reconstructed, &mem_with_vec.memory).await?;
+                self.store
+                    .store_quantized(
+                        &mem_with_vec.memory.id,
+                        &reconstructed,
+                        &mem_with_vec.memory,
+                    )
+                    .await?;
                 quantized += 1;
             } else {
                 tracing::warn!(
                     "  Low quality quantization for {}: cosine={:.3}",
-                    mem_with_vec.memory.id, cosine
+                    mem_with_vec.memory.id,
+                    cosine
                 );
             }
         }
 
-        let avg_cosine = if quantized > 0 { total_cosine / quantized as f32 } else { 0.0 };
+        let avg_cosine = if quantized > 0 {
+            total_cosine / quantized as f32
+        } else {
+            0.0
+        };
         tracing::info!(
             "  Quantized {} / {} memories at {:.1} bits (avg cosine={:.3})",
-            quantized, all.len(), bit_width, avg_cosine
+            quantized,
+            all.len(),
+            bit_width,
+            avg_cosine
         );
         Ok(quantized)
     }
@@ -229,13 +265,21 @@ impl SlumberEngine {
                     // Could merge, but for now just log
                     tracing::debug!(
                         "  Merge candidate: '{}' ({}) ↔ '{}' ({})",
-                        a.name, a.memory_count, b.name, b.memory_count
+                        a.name,
+                        a.memory_count,
+                        b.name,
+                        b.memory_count
                     );
                 }
             }
         }
 
-        tracing::info!("  Updated {} realm centroids, {} realms total, {} merge candidates", centroids_updated, realms.len(), merges);
+        tracing::info!(
+            "  Updated {} realm centroids, {} realms total, {} merge candidates",
+            centroids_updated,
+            realms.len(),
+            merges
+        );
 
         // Check for realm splits (large realms)
         let splits = self.split_large_realms(&realms).await?;
@@ -247,7 +291,10 @@ impl SlumberEngine {
     // ─── Phase 3b: Split Large Realms ────────────────────────────────────────
 
     /// Split realms that exceed the split_threshold using k-means (k=2).
-    async fn split_large_realms(&self, realms: &[crate::storage::qdrant::RealmPoint]) -> anyhow::Result<usize> {
+    async fn split_large_realms(
+        &self,
+        realms: &[crate::storage::qdrant::RealmPoint],
+    ) -> anyhow::Result<usize> {
         let threshold = self.config.realms.split_threshold;
         let mut splits = 0;
 
@@ -259,7 +306,12 @@ impl SlumberEngine {
                 continue;
             }
 
-            tracing::info!("  Splitting realm '{}' ({} memories, threshold={})", realm.name, realm.memory_count, threshold);
+            tracing::info!(
+                "  Splitting realm '{}' ({} memories, threshold={})",
+                realm.name,
+                realm.memory_count,
+                threshold
+            );
 
             // Get all memories with vectors for this realm
             let all = self.store.scroll_all_memories_with_vectors().await?;
@@ -281,7 +333,11 @@ impl SlumberEngine {
 
             // Both clusters need at least 5 memories
             if count_a < 5 || count_b < 5 {
-                tracing::info!("  Skipping split: cluster sizes {} and {} too small", count_a, count_b);
+                tracing::info!(
+                    "  Skipping split: cluster sizes {} and {} too small",
+                    count_a,
+                    count_b
+                );
                 continue;
             }
 
@@ -291,8 +347,12 @@ impl SlumberEngine {
             let name_a = format!("{}-a", realm.name);
             let name_b = format!("{}-b", realm.name);
 
-            self.store.store_realm(&id_a, &c1, &name_a, None, false).await?;
-            self.store.store_realm(&id_b, &c2, &name_b, None, false).await?;
+            self.store
+                .store_realm(&id_a, &c1, &name_a, None, false)
+                .await?;
+            self.store
+                .store_realm(&id_b, &c2, &name_b, None, false)
+                .await?;
 
             // Reassign memories to new realms
             let realm_mems: Vec<_> = all
@@ -310,7 +370,9 @@ impl SlumberEngine {
                 })
                 .try_into()
                 .unwrap_or_default();
-                self.store.update_memory_payload(&mem.memory.id, payload).await?;
+                self.store
+                    .update_memory_payload(&mem.memory.id, payload)
+                    .await?;
             }
 
             // Delete old realm
@@ -318,7 +380,11 @@ impl SlumberEngine {
 
             tracing::info!(
                 "  Split '{}' → '{}' ({}) + '{}' ({})",
-                realm.name, name_a, count_a, name_b, count_b
+                realm.name,
+                name_a,
+                count_a,
+                name_b,
+                count_b
             );
             splits += 1;
         }
@@ -331,7 +397,8 @@ impl SlumberEngine {
     /// Rename realms with human-readable names using LLM, then merge similar realms
     /// and redistribute memories to their best-matching realm.
     async fn rename_realms(&self) -> anyhow::Result<usize> {
-        let llm_url = std::env::var("LOCAL_LLM_URL").unwrap_or_else(|_| "http://192.168.1.8:8888".into());
+        let llm_url =
+            std::env::var("LOCAL_LLM_URL").unwrap_or_else(|_| "http://192.168.1.8:8888".into());
         let llm_key = std::env::var("LOCAL_LLM_API_KEY").ok();
 
         let realms = self.store.list_realms().await?;
@@ -346,7 +413,8 @@ impl SlumberEngine {
 
             // Get memories in this realm
             let all = self.store.scroll_all_memories().await?;
-            let realm_mems: Vec<_> = all.iter()
+            let realm_mems: Vec<_> = all
+                .iter()
                 .filter(|m| m.realm_id.as_deref() == Some(&realm.id))
                 .collect();
 
@@ -355,10 +423,17 @@ impl SlumberEngine {
             }
 
             let new_name = if llm_key.is_some() {
-                match self.llm_name_realm(&llm_url, llm_key.as_deref(), &realm_mems).await {
+                match self
+                    .llm_name_realm(&llm_url, llm_key.as_deref(), &realm_mems)
+                    .await
+                {
                     Ok(name) => name,
                     Err(e) => {
-                        tracing::warn!("  LLM naming failed for '{}', using fallback: {}", realm.name, e);
+                        tracing::warn!(
+                            "  LLM naming failed for '{}', using fallback: {}",
+                            realm.name,
+                            e
+                        );
                         Self::summarize_realm_freq(&realm_mems)
                     }
                 }
@@ -368,10 +443,7 @@ impl SlumberEngine {
 
             if new_name != realm.name && !new_name.is_empty() {
                 self.store.update_realm_name(&realm.id, &new_name).await?;
-                tracing::info!(
-                    "  Renamed realm '{}' → '{}'",
-                    realm.name, new_name
-                );
+                tracing::info!("  Renamed realm '{}' → '{}'", realm.name, new_name);
                 renamed += 1;
             }
         }
@@ -382,15 +454,29 @@ impl SlumberEngine {
 
         // Step 3: Redistribute memories to best-matching realms
         let redistributed = self.redistribute_memories().await?;
-        tracing::info!("  Redistributed {} memories to better-matching realms", redistributed);
+        tracing::info!(
+            "  Redistributed {} memories to better-matching realms",
+            redistributed
+        );
 
-        tracing::info!("  Renamed {} realms, merged {} pairs, redistributed {} memories", renamed, merged, redistributed);
+        tracing::info!(
+            "  Renamed {} realms, merged {} pairs, redistributed {} memories",
+            renamed,
+            merged,
+            redistributed
+        );
         Ok(renamed)
     }
 
     /// Use LLM to generate a descriptive realm name.
-    async fn llm_name_realm(&self, base_url: &str, api_key: Option<&str>, memories: &[&crate::storage::qdrant::MemoryPoint]) -> anyhow::Result<String> {
-        let memory_texts: Vec<String> = memories.iter()
+    async fn llm_name_realm(
+        &self,
+        base_url: &str,
+        api_key: Option<&str>,
+        memories: &[&crate::storage::qdrant::MemoryPoint],
+    ) -> anyhow::Result<String> {
+        let memory_texts: Vec<String> = memories
+            .iter()
             .take(5) // limit context
             .map(|m| {
                 let content = if m.content.chars().count() > 300 {
@@ -412,7 +498,9 @@ impl SlumberEngine {
             memory_texts.join("\n")
         );
 
-        let result = self.call_local_llm(base_url, api_key, None, &prompt).await?;
+        let result = self
+            .call_local_llm(base_url, api_key, None, &prompt)
+            .await?;
         // Clean up the response
         let name = result.trim().trim_matches('"').trim();
         if name.len() > 50 || name.is_empty() {
@@ -452,7 +540,9 @@ impl SlumberEngine {
                     if sim > merge_threshold {
                         tracing::info!(
                             "  Merging similar realms: '{}' ↔ '{}' (sim={:.3})",
-                            a.name, b.name, sim
+                            a.name,
+                            b.name,
+                            sim
                         );
                         if let Err(e) = self.merge_realm_into(&b.id, &a.id, &a.name).await {
                             tracing::warn!("  Failed to merge realms: {}", e);
@@ -468,7 +558,11 @@ impl SlumberEngine {
                 if sim > merge_threshold {
                     tracing::info!(
                         "  Merging similar realms: '{}' ({}) ↔ '{}' ({}) (sim={:.3})",
-                        a.name, a.memory_count, b.name, b.memory_count, sim
+                        a.name,
+                        a.memory_count,
+                        b.name,
+                        b.memory_count,
+                        sim
                     );
                     if let Err(e) = self.merge_realm_into(&b.id, &a.id, &a.name).await {
                         tracing::warn!("  Failed to merge realms: {}", e);
@@ -483,9 +577,15 @@ impl SlumberEngine {
     }
 
     /// Helper: merge all memories from source realm into target realm, then delete source.
-    async fn merge_realm_into(&self, source_id: &str, target_id: &str, target_name: &str) -> anyhow::Result<()> {
+    async fn merge_realm_into(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        target_name: &str,
+    ) -> anyhow::Result<()> {
         let all = self.store.scroll_all_memories().await?;
-        let source_mems: Vec<_> = all.iter()
+        let source_mems: Vec<_> = all
+            .iter()
             .filter(|m| m.realm_id.as_deref() == Some(source_id))
             .collect();
 
@@ -567,110 +667,682 @@ impl SlumberEngine {
     fn summarize_realm_freq(memories: &[&crate::storage::qdrant::MemoryPoint]) -> String {
         // Common English stopwords + technical noise words
         let stopwords: std::collections::HashSet<&str> = [
-            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
-            "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
-            "being", "have", "has", "had", "do", "does", "did", "will", "would",
-            "could", "should", "may", "might", "shall", "can", "need", "must",
-            "that", "this", "these", "those", "it", "its", "i", "me", "my", "we",
-            "our", "you", "your", "he", "him", "his", "she", "her", "they", "them",
-            "their", "what", "which", "who", "whom", "when", "where", "why", "how",
-            "not", "no", "yes", "so", "if", "then", "than", "too", "very", "just",
-            "about", "also", "all", "any", "as", "into", "like", "more", "most",
-            "only", "other", "out", "over", "own", "same", "some", "such", "up",
-            "down", "after", "before", "between", "through", "during", "below",
-            "above", "here", "there", "once", "while", "until", "unless", "because",
-            "since", "even", "well", "back", "still", "already", "much", "many",
-            "new", "use", "used", "using", "get", "got", "make", "made", "one",
-            "two", "first", "last", "next", "each", "every", "both", "few",
-            "way", "thing", "things", "work", "want", "need", "know", "think",
-            "see", "come", "go", "take", "give", "tell", "say", "says", "said",
-            "told", "help", "run", "went", "going", "set", "show", "find", "call",
-            "try", "ask", "put", "keep", "let", "begin", "seem", "leave", "turn",
-            "end", "right", "left", "old", "big", "small", "good", "bad", "high",
-            "low", "long", "short", "done", "fix", "fixed", "added", "update",
-            "updated", "changes", "change", "issue", "issues", "fixes", "fixing",
-            "commit", "commits", "pushed", "push", "committing", "github", "repo",
-            "repository", "branch", "main", "master", "merge", "pull", "request",
-            "pr", "bug", "feature", "task", "tasks", "todo", "completed", "finished",
-            "working", "implemented", "implementation", "build", "built", "testing",
-            "tested", "test", "tests", "check", "checked", "checking", "review",
-            "reviewed", "please", "thanks", "thank", "ok", "okay", "sure", "cool",
-            "awesome", "perfect", "exactly", "correct", "wrong", "hey", "hi",
-            "hello", "hello", "hello", "hello", "hey", "hi", "hi", "hi",
-            "md", "txt", "rs", "py", "js", "ts", "html", "css", "json", "yaml",
-            "yml", "toml", "cfg", "conf", "ini", "env", "git", "docker", "compose",
-            "file", "files", "directory", "directories", "folder", "path", "paths",
-            "src", "lib", "bin", "build", "target", "node", "modules", "package",
-            "packages", "install", "installed", "installing", "run", "running",
-            "start", "started", "starting", "stop", "stopped", "stopping", "restart",
-            "restarted", "restarting", "deploy", "deployed", "deploying", "deployment",
-            "config", "configuration", "settings", "setup", "setting", "server",
-            "client", "api", "endpoint", "endpoints", "url", "urls", "http", "https",
-            "localhost", "port", "ports", "host", "hosts", "app", "apps", "application",
-            "applications", "project", "projects", "code", "coding", "program",
-            "programming", "software", "system", "systems", "service", "services",
-            "function", "functions", "method", "methods", "class", "classes", "object",
-            "objects", "type", "types", "string", "strings", "number", "numbers",
-            "int", "float", "bool", "bools", "array", "arrays", "list", "lists",
-            "map", "maps", "dict", "dicts", "hash", "hashes", "hashmap", "hashmaps",
-            "vec", "vectors", "vector", "embed", "embedding", "embeddings", "model",
-            "models", "llm", "llms", "ai", "ml", "agent", "agents", "bot", "bots",
-            "memex8", "hermes", "openclaw", "plugin", "plugins", "skill", "skills",
-            "memory", "memories", "memo", "memos", "note", "notes", "data", "database",
-            "db", "store", "storage", "stored", "stores", "saving", "save", "saved",
-            "reads", "read", "writes", "write", "written", "content", "contents",
-            "text", "texts", "words", "word", "sentence", "sentences", "paragraph",
-            "paragraphs", "page", "pages", "line", "lines", "character", "characters",
-            "char", "chars", "symbol", "symbols", "token", "tokens", "chunk", "chunks",
-            "section", "sections", "header", "headers", "title", "titles", "heading",
-            "headings", "user", "users", "assistant", "assistant", "system", "message",
-            "messages", "chat", "chats", "conversation", "conversations", "turn",
-            "turns", "prompt", "prompts", "response", "responses", "output", "outputs",
-            "input", "inputs", "error", "errors", "warning", "warnings", "info",
-            "information", "detail", "details", "log", "logs", "logging", "logged",
-            "trace", "traces", "debug", "debugging", "bug", "bugs", "crash", "crashes",
-            "crashed", "fail", "fails", "failed", "failure", "failures", "success",
-            "successful", "succeed", "succeeded", "succeeds", "improve", "improved",
-            "improvement", "improvements", "optimize", "optimized", "optimization",
-            "performance", "speed", "fast", "faster", "fastest", "slow", "slower",
-            "slowest", "time", "times", "second", "seconds", "minute", "minutes",
-            "hour", "hours", "day", "days", "week", "weeks", "month", "months",
-            "year", "years", "now", "today", "tomorrow", "yesterday", "soon", "later",
-            "early", "earlier", "late", "recent", "recently", "current", "currently",
-            "future", "past", "previous", "following", "preceding", "however",
-            "whatever", "whenever", "wherever", "whoever", "whomever", "whichever",
-            "although", "though", "whether", "therefore", "thus", "hence",
-            "consequently", "accordingly", "nevertheless", "nonetheless",
-            "notwithstanding", "otherwise", "meanwhile", "furthermore", "moreover",
-            "besides", "additionally", "either", "neither", "nor", "except", "save",
-            "barring", "excluding", "including", "concerning", "regarding", "respecting",
-            "touching", "versus", "via", "per", "throughout", "across", "along",
-            "around", "near", "nearer", "nearest", "beside", "beyond", "beneath",
-            "under", "underneath", "overhead", "onto", "upon", "towards", "away",
-            "off", "forth", "forward", "backward", "behind", "ahead", "ago", "yet",
-            "always", "often", "frequently", "usually", "generally", "normally",
-            "commonly", "rarely", "seldom", "occasionally", "sometimes", "hardly",
-            "scarcely", "barely", "merely", "simply", "quite", "rather", "fairly",
-            "pretty", "somewhat", "extremely", "exceedingly", "remarkably",
-            "exceptionally", "particularly", "especially", "mainly", "mostly",
-            "largely", "chiefly", "primarily", "principally", "essentially",
-            "fundamentally", "basically", "virtually", "practically", "nearly",
-            "almost", "approximately", "roughly", "circa", "precisely", "specifically",
-            "namely", "namely",
-        ].into_iter().collect();
+            "the",
+            "a",
+            "an",
+            "and",
+            "or",
+            "but",
+            "in",
+            "on",
+            "at",
+            "to",
+            "for",
+            "of",
+            "with",
+            "by",
+            "from",
+            "is",
+            "are",
+            "was",
+            "were",
+            "be",
+            "been",
+            "being",
+            "have",
+            "has",
+            "had",
+            "do",
+            "does",
+            "did",
+            "will",
+            "would",
+            "could",
+            "should",
+            "may",
+            "might",
+            "shall",
+            "can",
+            "need",
+            "must",
+            "that",
+            "this",
+            "these",
+            "those",
+            "it",
+            "its",
+            "i",
+            "me",
+            "my",
+            "we",
+            "our",
+            "you",
+            "your",
+            "he",
+            "him",
+            "his",
+            "she",
+            "her",
+            "they",
+            "them",
+            "their",
+            "what",
+            "which",
+            "who",
+            "whom",
+            "when",
+            "where",
+            "why",
+            "how",
+            "not",
+            "no",
+            "yes",
+            "so",
+            "if",
+            "then",
+            "than",
+            "too",
+            "very",
+            "just",
+            "about",
+            "also",
+            "all",
+            "any",
+            "as",
+            "into",
+            "like",
+            "more",
+            "most",
+            "only",
+            "other",
+            "out",
+            "over",
+            "own",
+            "same",
+            "some",
+            "such",
+            "up",
+            "down",
+            "after",
+            "before",
+            "between",
+            "through",
+            "during",
+            "below",
+            "above",
+            "here",
+            "there",
+            "once",
+            "while",
+            "until",
+            "unless",
+            "because",
+            "since",
+            "even",
+            "well",
+            "back",
+            "still",
+            "already",
+            "much",
+            "many",
+            "new",
+            "use",
+            "used",
+            "using",
+            "get",
+            "got",
+            "make",
+            "made",
+            "one",
+            "two",
+            "first",
+            "last",
+            "next",
+            "each",
+            "every",
+            "both",
+            "few",
+            "way",
+            "thing",
+            "things",
+            "work",
+            "want",
+            "need",
+            "know",
+            "think",
+            "see",
+            "come",
+            "go",
+            "take",
+            "give",
+            "tell",
+            "say",
+            "says",
+            "said",
+            "told",
+            "help",
+            "run",
+            "went",
+            "going",
+            "set",
+            "show",
+            "find",
+            "call",
+            "try",
+            "ask",
+            "put",
+            "keep",
+            "let",
+            "begin",
+            "seem",
+            "leave",
+            "turn",
+            "end",
+            "right",
+            "left",
+            "old",
+            "big",
+            "small",
+            "good",
+            "bad",
+            "high",
+            "low",
+            "long",
+            "short",
+            "done",
+            "fix",
+            "fixed",
+            "added",
+            "update",
+            "updated",
+            "changes",
+            "change",
+            "issue",
+            "issues",
+            "fixes",
+            "fixing",
+            "commit",
+            "commits",
+            "pushed",
+            "push",
+            "committing",
+            "github",
+            "repo",
+            "repository",
+            "branch",
+            "main",
+            "master",
+            "merge",
+            "pull",
+            "request",
+            "pr",
+            "bug",
+            "feature",
+            "task",
+            "tasks",
+            "todo",
+            "completed",
+            "finished",
+            "working",
+            "implemented",
+            "implementation",
+            "build",
+            "built",
+            "testing",
+            "tested",
+            "test",
+            "tests",
+            "check",
+            "checked",
+            "checking",
+            "review",
+            "reviewed",
+            "please",
+            "thanks",
+            "thank",
+            "ok",
+            "okay",
+            "sure",
+            "cool",
+            "awesome",
+            "perfect",
+            "exactly",
+            "correct",
+            "wrong",
+            "hey",
+            "hi",
+            "hello",
+            "hello",
+            "hello",
+            "hello",
+            "hey",
+            "hi",
+            "hi",
+            "hi",
+            "md",
+            "txt",
+            "rs",
+            "py",
+            "js",
+            "ts",
+            "html",
+            "css",
+            "json",
+            "yaml",
+            "yml",
+            "toml",
+            "cfg",
+            "conf",
+            "ini",
+            "env",
+            "git",
+            "docker",
+            "compose",
+            "file",
+            "files",
+            "directory",
+            "directories",
+            "folder",
+            "path",
+            "paths",
+            "src",
+            "lib",
+            "bin",
+            "build",
+            "target",
+            "node",
+            "modules",
+            "package",
+            "packages",
+            "install",
+            "installed",
+            "installing",
+            "run",
+            "running",
+            "start",
+            "started",
+            "starting",
+            "stop",
+            "stopped",
+            "stopping",
+            "restart",
+            "restarted",
+            "restarting",
+            "deploy",
+            "deployed",
+            "deploying",
+            "deployment",
+            "config",
+            "configuration",
+            "settings",
+            "setup",
+            "setting",
+            "server",
+            "client",
+            "api",
+            "endpoint",
+            "endpoints",
+            "url",
+            "urls",
+            "http",
+            "https",
+            "localhost",
+            "port",
+            "ports",
+            "host",
+            "hosts",
+            "app",
+            "apps",
+            "application",
+            "applications",
+            "project",
+            "projects",
+            "code",
+            "coding",
+            "program",
+            "programming",
+            "software",
+            "system",
+            "systems",
+            "service",
+            "services",
+            "function",
+            "functions",
+            "method",
+            "methods",
+            "class",
+            "classes",
+            "object",
+            "objects",
+            "type",
+            "types",
+            "string",
+            "strings",
+            "number",
+            "numbers",
+            "int",
+            "float",
+            "bool",
+            "bools",
+            "array",
+            "arrays",
+            "list",
+            "lists",
+            "map",
+            "maps",
+            "dict",
+            "dicts",
+            "hash",
+            "hashes",
+            "hashmap",
+            "hashmaps",
+            "vec",
+            "vectors",
+            "vector",
+            "embed",
+            "embedding",
+            "embeddings",
+            "model",
+            "models",
+            "llm",
+            "llms",
+            "ai",
+            "ml",
+            "agent",
+            "agents",
+            "bot",
+            "bots",
+            "memex8",
+            "hermes",
+            "openclaw",
+            "plugin",
+            "plugins",
+            "skill",
+            "skills",
+            "memory",
+            "memories",
+            "memo",
+            "memos",
+            "note",
+            "notes",
+            "data",
+            "database",
+            "db",
+            "store",
+            "storage",
+            "stored",
+            "stores",
+            "saving",
+            "save",
+            "saved",
+            "reads",
+            "read",
+            "writes",
+            "write",
+            "written",
+            "content",
+            "contents",
+            "text",
+            "texts",
+            "words",
+            "word",
+            "sentence",
+            "sentences",
+            "paragraph",
+            "paragraphs",
+            "page",
+            "pages",
+            "line",
+            "lines",
+            "character",
+            "characters",
+            "char",
+            "chars",
+            "symbol",
+            "symbols",
+            "token",
+            "tokens",
+            "chunk",
+            "chunks",
+            "section",
+            "sections",
+            "header",
+            "headers",
+            "title",
+            "titles",
+            "heading",
+            "headings",
+            "user",
+            "users",
+            "assistant",
+            "assistant",
+            "system",
+            "message",
+            "messages",
+            "chat",
+            "chats",
+            "conversation",
+            "conversations",
+            "turn",
+            "turns",
+            "prompt",
+            "prompts",
+            "response",
+            "responses",
+            "output",
+            "outputs",
+            "input",
+            "inputs",
+            "error",
+            "errors",
+            "warning",
+            "warnings",
+            "info",
+            "information",
+            "detail",
+            "details",
+            "log",
+            "logs",
+            "logging",
+            "logged",
+            "trace",
+            "traces",
+            "debug",
+            "debugging",
+            "bug",
+            "bugs",
+            "crash",
+            "crashes",
+            "crashed",
+            "fail",
+            "fails",
+            "failed",
+            "failure",
+            "failures",
+            "success",
+            "successful",
+            "succeed",
+            "succeeded",
+            "succeeds",
+            "improve",
+            "improved",
+            "improvement",
+            "improvements",
+            "optimize",
+            "optimized",
+            "optimization",
+            "performance",
+            "speed",
+            "fast",
+            "faster",
+            "fastest",
+            "slow",
+            "slower",
+            "slowest",
+            "time",
+            "times",
+            "second",
+            "seconds",
+            "minute",
+            "minutes",
+            "hour",
+            "hours",
+            "day",
+            "days",
+            "week",
+            "weeks",
+            "month",
+            "months",
+            "year",
+            "years",
+            "now",
+            "today",
+            "tomorrow",
+            "yesterday",
+            "soon",
+            "later",
+            "early",
+            "earlier",
+            "late",
+            "recent",
+            "recently",
+            "current",
+            "currently",
+            "future",
+            "past",
+            "previous",
+            "following",
+            "preceding",
+            "however",
+            "whatever",
+            "whenever",
+            "wherever",
+            "whoever",
+            "whomever",
+            "whichever",
+            "although",
+            "though",
+            "whether",
+            "therefore",
+            "thus",
+            "hence",
+            "consequently",
+            "accordingly",
+            "nevertheless",
+            "nonetheless",
+            "notwithstanding",
+            "otherwise",
+            "meanwhile",
+            "furthermore",
+            "moreover",
+            "besides",
+            "additionally",
+            "either",
+            "neither",
+            "nor",
+            "except",
+            "save",
+            "barring",
+            "excluding",
+            "including",
+            "concerning",
+            "regarding",
+            "respecting",
+            "touching",
+            "versus",
+            "via",
+            "per",
+            "throughout",
+            "across",
+            "along",
+            "around",
+            "near",
+            "nearer",
+            "nearest",
+            "beside",
+            "beyond",
+            "beneath",
+            "under",
+            "underneath",
+            "overhead",
+            "onto",
+            "upon",
+            "towards",
+            "away",
+            "off",
+            "forth",
+            "forward",
+            "backward",
+            "behind",
+            "ahead",
+            "ago",
+            "yet",
+            "always",
+            "often",
+            "frequently",
+            "usually",
+            "generally",
+            "normally",
+            "commonly",
+            "rarely",
+            "seldom",
+            "occasionally",
+            "sometimes",
+            "hardly",
+            "scarcely",
+            "barely",
+            "merely",
+            "simply",
+            "quite",
+            "rather",
+            "fairly",
+            "pretty",
+            "somewhat",
+            "extremely",
+            "exceedingly",
+            "remarkably",
+            "exceptionally",
+            "particularly",
+            "especially",
+            "mainly",
+            "mostly",
+            "largely",
+            "chiefly",
+            "primarily",
+            "principally",
+            "essentially",
+            "fundamentally",
+            "basically",
+            "virtually",
+            "practically",
+            "nearly",
+            "almost",
+            "approximately",
+            "roughly",
+            "circa",
+            "precisely",
+            "specifically",
+            "namely",
+            "namely",
+        ]
+        .into_iter()
+        .collect();
 
         // Count word frequencies across all memories
-        let mut word_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut word_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         for mem in memories {
             // Use heading if available, otherwise first 200 chars of content
-            let text = mem.heading.clone().unwrap_or_else(|| {
-                mem.content.chars().take(200).collect()
-            });
+            let text = mem
+                .heading
+                .clone()
+                .unwrap_or_else(|| mem.content.chars().take(200).collect());
 
             // Extract words: alphanumeric sequences of 3+ chars
             for word in text.split_whitespace() {
-                let cleaned: String = word.chars()
+                let cleaned: String = word
+                    .chars()
                     .filter(|c| c.is_alphanumeric())
                     .collect::<String>()
                     .to_lowercase();
@@ -686,7 +1358,8 @@ impl SlumberEngine {
         sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         // Take top 2-3 words and format as title case
-        let top_words: Vec<String> = sorted.iter()
+        let top_words: Vec<String> = sorted
+            .iter()
             .take(3)
             .map(|(w, _)| {
                 let mut chars = w.chars();
@@ -698,7 +1371,14 @@ impl SlumberEngine {
             .collect();
 
         if top_words.is_empty() {
-            return format!("topic-{}", &memories[0].realm_id.as_ref().map(|s| s.chars().take(8).collect::<String>()).unwrap_or("unknown".to_string()));
+            return format!(
+                "topic-{}",
+                &memories[0]
+                    .realm_id
+                    .as_ref()
+                    .map(|s| s.chars().take(8).collect::<String>())
+                    .unwrap_or("unknown".to_string())
+            );
         }
 
         top_words.join(" ")
@@ -733,7 +1413,9 @@ impl SlumberEngine {
             {
                 tracing::debug!(
                     "  Prune flag: id={} age={}d importance={:.2}",
-                    mem.id, age_days, mem.importance
+                    mem.id,
+                    age_days,
+                    mem.importance
                 );
                 flagged += 1;
             }
@@ -802,7 +1484,9 @@ impl SlumberEngine {
 
             // Truncate long content (UTF-8 safe)
             let content = if mem.content.len() > 500 {
-                let safe_end = mem.content.char_indices()
+                let safe_end = mem
+                    .content
+                    .char_indices()
                     .take_while(|(i, _)| *i < 500)
                     .last()
                     .map_or(mem.content.len(), |(i, c)| i + c.len_utf8());
@@ -813,10 +1497,7 @@ impl SlumberEngine {
             md.push_str(&content);
             md.push_str("\n\n");
 
-            md.push_str(&format!(
-                "- **Realm**: {}\n",
-                mem.realm_name
-            ));
+            md.push_str(&format!("- **Realm**: {}\n", mem.realm_name));
             md.push_str(&format!("- **Importance**: {:.2}\n", mem.importance));
             md.push_str(&format!("- **Ingested**: {}\n", mem.ingested_at));
 
@@ -872,14 +1553,20 @@ impl SlumberEngine {
 
             // Build the prompt (limit to top 10 memories by importance)
             let mut sorted = memories.to_vec();
-            sorted.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+            sorted.sort_by(|a, b| {
+                b.importance
+                    .partial_cmp(&a.importance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             sorted.truncate(10);
 
             let memory_texts: Vec<String> = sorted
                 .iter()
                 .map(|m| {
                     let content = if m.content.len() > 500 {
-                        let safe_end = m.content.char_indices()
+                        let safe_end = m
+                            .content
+                            .char_indices()
                             .take_while(|(i, _)| *i < 500)
                             .last()
                             .map_or(m.content.len(), |(i, c)| i + c.len_utf8());
@@ -922,12 +1609,15 @@ impl SlumberEngine {
                         return Ok(consolidated);
                     }
                     let openai_model = model.as_deref().unwrap_or("gpt-4o-mini");
-                    self.call_openai(&api_key.unwrap(), openai_model, &prompt).await
+                    self.call_openai(&api_key.unwrap(), openai_model, &prompt)
+                        .await
                 }
                 "local" => {
-                    let llm_url = std::env::var("LOCAL_LLM_URL").unwrap_or_else(|_| "http://192.168.1.8:8888".into());
+                    let llm_url = std::env::var("LOCAL_LLM_URL")
+                        .unwrap_or_else(|_| "http://192.168.1.8:8888".into());
                     let llm_key = std::env::var("LOCAL_LLM_API_KEY").ok();
-                    self.call_local_llm(&llm_url, llm_key.as_deref(), model.as_deref(), &prompt).await
+                    self.call_local_llm(&llm_url, llm_key.as_deref(), model.as_deref(), &prompt)
+                        .await
                 }
                 _ => {
                     tracing::warn!("  Unknown consolidation backend: {}", backend);
@@ -948,7 +1638,11 @@ impl SlumberEngine {
             }
 
             // Get centroid vector BEFORE deleting (for placement in vector space)
-            let first_realm_id = memories.first().and_then(|m| m.realm_id.as_deref()).unwrap_or("").to_string();
+            let first_realm_id = memories
+                .first()
+                .and_then(|m| m.realm_id.as_deref())
+                .unwrap_or("")
+                .to_string();
             let first_vector = self
                 .store
                 .compute_realm_centroid(&first_realm_id)
@@ -982,11 +1676,18 @@ impl SlumberEngine {
                     )
                     .await
                 {
-                    tracing::warn!("  Failed to store consolidated memory for '{}': {}", realm_name, e);
+                    tracing::warn!(
+                        "  Failed to store consolidated memory for '{}': {}",
+                        realm_name,
+                        e
+                    );
                     continue;
                 }
             } else {
-                tracing::warn!("  No vector available for consolidated memory in '{}', skipping", realm_name);
+                tracing::warn!(
+                    "  No vector available for consolidated memory in '{}', skipping",
+                    realm_name
+                );
                 continue;
             }
 
@@ -1055,7 +1756,12 @@ impl SlumberEngine {
     }
 
     /// Call OpenAI API to generate a summary.
-    async fn call_openai(&self, api_key: &str, model: &str, prompt: &str) -> anyhow::Result<String> {
+    async fn call_openai(
+        &self,
+        api_key: &str,
+        model: &str,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
         let client = reqwest::Client::new();
         let response = client
             .post("https://api.openai.com/v1/chat/completions")
@@ -1093,7 +1799,13 @@ impl SlumberEngine {
         Ok(content)
     }
 
-    async fn call_local_llm(&self, base_url: &str, api_key: Option<&str>, model: Option<&str>, prompt: &str) -> anyhow::Result<String> {
+    async fn call_local_llm(
+        &self,
+        base_url: &str,
+        api_key: Option<&str>,
+        model: Option<&str>,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
         let client = reqwest::Client::new();
         let url = base_url.trim_end_matches('/');
         let mut req = client
@@ -1122,7 +1834,11 @@ impl SlumberEngine {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("Local LLM API error ({}): {}", status, body));
+            return Err(anyhow::anyhow!(
+                "Local LLM API error ({}): {}",
+                status,
+                body
+            ));
         }
 
         let body: serde_json::Value = response.json().await?;
@@ -1137,6 +1853,123 @@ impl SlumberEngine {
         }
 
         Ok(content)
+    }
+
+    // ─── Phase 8: Memory Decay ────────────────────────────────────────────────
+
+    /// Apply time-based decay to all memories. Memories that haven't been accessed
+    /// slowly lose importance, creating a natural "forgetting curve".
+    async fn decay_memories(&self) -> anyhow::Result<usize> {
+        let all = self.store.scroll_all_memories().await?;
+        let now = chrono::Utc::now();
+        let decay_rate = self.config.slumber.decay_rate_per_day;
+        let min_importance = 0.05f32;
+        let mut decayed = 0;
+
+        let mut updates: Vec<(&str, qdrant_client::Payload)> = Vec::new();
+
+        for mem in &all {
+            let last_accessed = chrono::DateTime::parse_from_rfc3339(&mem.last_accessed)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| now);
+
+            let days_since = (now - last_accessed).num_seconds() as f32 / 86400.0;
+            if days_since <= 0.0 {
+                continue;
+            }
+
+            let new_importance = (mem.importance - (days_since * decay_rate)).max(min_importance);
+            let delta = (new_importance - mem.importance).abs();
+
+            // Only update if importance changed meaningfully
+            if delta > 0.001 {
+                let payload: qdrant_client::Payload = serde_json::json!({
+                    "importance": new_importance,
+                })
+                .try_into()
+                .unwrap_or_default();
+                updates.push((mem.id.as_str(), payload));
+                decayed += 1;
+            }
+        }
+
+        if !updates.is_empty() {
+            // Batch update in chunks to avoid overwhelming Qdrant
+            const BATCH_SIZE: usize = 100;
+            for chunk in updates.chunks(BATCH_SIZE) {
+                if let Err(e) = self.store.batch_update_payload(chunk).await {
+                    tracing::warn!("  Batch decay update failed: {}", e);
+                }
+            }
+        }
+
+        tracing::info!(
+            "  Decayed {} memories (rate={:.4}/day, min={:.2})",
+            decayed,
+            decay_rate,
+            min_importance
+        );
+        Ok(decayed)
+    }
+
+    // ─── Phase 9: Build Associations ──────────────────────────────────────────
+
+    /// Build semantic associations between memories by finding nearest neighbors.
+    /// Creates bidirectional links with cosine similarity as strength.
+    async fn build_associations(&self) -> anyhow::Result<usize> {
+        let all = self.store.scroll_all_memories().await?;
+        let top_k = self.config.slumber.association_top_k as usize;
+        let min_strength = self.config.slumber.association_min_strength;
+        let mut total_links = 0;
+
+        for mem in &all {
+            // Skip memories with no content
+            if mem.content.is_empty() {
+                continue;
+            }
+
+            let similar = match self.store.find_similar(&mem.id, top_k).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("  find_similar failed for {}: {}", mem.id, e);
+                    continue;
+                }
+            };
+
+            // Filter by minimum strength
+            let links: Vec<_> = similar
+                .into_iter()
+                .filter(|(_id, strength)| *strength >= min_strength)
+                .collect();
+
+            if links.is_empty() {
+                continue;
+            }
+
+            let related_ids: Vec<String> = links.iter().map(|(id, _)| id.clone()).collect();
+            let strengths: Vec<f32> = links.iter().map(|(_, s)| *s).collect();
+
+            let payload: qdrant_client::Payload = serde_json::json!({
+                "related_memory_ids": related_ids,
+                "association_strengths": strengths,
+            })
+            .try_into()
+            .unwrap_or_default();
+
+            if let Err(e) = self.store.update_memory_payload(&mem.id, payload).await {
+                tracing::warn!("  Failed to store associations for {}: {}", mem.id, e);
+            } else {
+                total_links += links.len();
+            }
+        }
+
+        tracing::info!(
+            "  Created {} association links (top_k={}, min_strength={:.2})",
+            total_links,
+            top_k,
+            min_strength
+        );
+        Ok(total_links)
     }
 }
 

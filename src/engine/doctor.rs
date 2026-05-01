@@ -5,7 +5,11 @@ pub async fn run(config: &AppConfig) -> anyhow::Result<()> {
 
     // Check Qdrant connectivity
     print!("  Qdrant ({}) ... ", config.qdrant.url);
-    match reqwest::Client::new().get(&format!("{}/healthz", config.qdrant.url)).send().await {
+    match reqwest::Client::new()
+        .get(&format!("{}/healthz", config.qdrant.url))
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => println!("✅ OK"),
         Ok(resp) => println!("❌ HTTP {}", resp.status()),
         Err(e) => println!("❌ Connection failed: {}", e),
@@ -30,7 +34,10 @@ pub async fn run(config: &AppConfig) -> anyhow::Result<()> {
                     if has_model {
                         println!("✅ Model '{}' found", config.embedding.model);
                     } else {
-                        println!("⚠️  Model '{}' not found. Available: {:?}", config.embedding.model, models);
+                        println!(
+                            "⚠️  Model '{}' not found. Available: {:?}",
+                            config.embedding.model, models
+                        );
                         println!("     Run: ollama pull {}", config.embedding.model);
                     }
                 }
@@ -45,7 +52,10 @@ pub async fn run(config: &AppConfig) -> anyhow::Result<()> {
                 None => println!("❌ OPENAI_API_KEY not set"),
             }
         }
-        _ => println!("⚠️  Unknown embedding provider: {}", config.embedding.provider),
+        _ => println!(
+            "⚠️  Unknown embedding provider: {}",
+            config.embedding.provider
+        ),
     }
 
     // Check config validity

@@ -57,7 +57,13 @@ fn chunk_by_heading(
                     if let Some(ref h_heading) = chunk_start_heading {
                         let h_level = h_heading.0;
                         let h_text = h_heading.1.clone();
-                        flush_chunk(&mut chunks, &mut current_content, h_level, Some(&h_text), &heading_stack);
+                        flush_chunk(
+                            &mut chunks,
+                            &mut current_content,
+                            h_level,
+                            Some(&h_text),
+                            &heading_stack,
+                        );
                     }
                     chunk_start_heading = None;
                 }
@@ -124,9 +130,7 @@ fn chunk_by_heading(
             Event::InlineMath(text) | Event::DisplayMath(text) => {
                 current_content.push_str(text);
             }
-            Event::TaskListMarker(_checked) => {
-                current_content.push_str("[ ] ")
-            }
+            Event::TaskListMarker(_checked) => current_content.push_str("[ ] "),
 
             Event::Rule => {
                 current_content.push_str("\n---\n");
@@ -146,7 +150,13 @@ fn chunk_by_heading(
                     if let Some(ref h_heading) = chunk_start_heading {
                         let h_level = h_heading.0;
                         let h_text = h_heading.1.clone();
-                        flush_chunk(&mut chunks, &mut first_part.clone(), h_level, Some(&h_text), &heading_stack);
+                        flush_chunk(
+                            &mut chunks,
+                            &mut first_part.clone(),
+                            h_level,
+                            Some(&h_text),
+                            &heading_stack,
+                        );
                     }
                     current_content = second_part;
                 } else {
@@ -158,7 +168,13 @@ fn chunk_by_heading(
                         if let Some(ref h_heading) = chunk_start_heading {
                             let h_level = h_heading.0;
                             let h_text = h_heading.1.clone();
-                            flush_chunk(&mut chunks, &mut first_part.clone(), h_level, Some(&h_text), &heading_stack);
+                            flush_chunk(
+                                &mut chunks,
+                                &mut first_part.clone(),
+                                h_level,
+                                Some(&h_text),
+                                &heading_stack,
+                            );
                         }
                         current_content = second_part;
                     }
@@ -174,7 +190,13 @@ fn chunk_by_heading(
             .map(|(l, _)| *l)
             .unwrap_or(HeadingLevel::H1);
         let h_text = chunk_start_heading.as_ref().map(|(_, t)| t.as_str());
-        flush_chunk(&mut chunks, &mut current_content, h_level, h_text, &heading_stack);
+        flush_chunk(
+            &mut chunks,
+            &mut current_content,
+            h_level,
+            h_text,
+            &heading_stack,
+        );
     }
 
     // If no chunks were produced, fall back to single-file chunk
@@ -341,7 +363,12 @@ mod tests {
     fn test_simple_headings() {
         let md = "# Title\n\nSome intro text.\n\n## Section A\n\nContent for section A.\n\n## Section B\n\nContent for section B.";
         let chunks = chunk(md, "section", 1000).unwrap();
-        assert_eq!(chunks.len(), 2, "Should have 2 H2 chunks, got {}", chunks.len());
+        assert_eq!(
+            chunks.len(),
+            2,
+            "Should have 2 H2 chunks, got {}",
+            chunks.len()
+        );
         assert_eq!(chunks[0].heading.as_deref(), Some("Section A"));
         assert_eq!(chunks[1].heading.as_deref(), Some("Section B"));
     }
@@ -350,9 +377,18 @@ mod tests {
     fn test_heading_hierarchy() {
         let md = "# Guide\n\nIntro.\n\n## API\n\nAPI details.\n\n### Auth\n\nAuth details.\n\n### Rate Limit\n\nRate limit details.\n\n## CLI\n\nCLI details.";
         let chunks = chunk(md, "section", 1000).unwrap();
-        assert_eq!(chunks.len(), 2, "Should have 2 H2 chunks, got {}", chunks.len());
+        assert_eq!(
+            chunks.len(),
+            2,
+            "Should have 2 H2 chunks, got {}",
+            chunks.len()
+        );
 
-        let all_content: String = chunks.iter().map(|c| c.content.clone()).collect::<Vec<_>>().join("\n");
+        let all_content: String = chunks
+            .iter()
+            .map(|c| c.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(all_content.contains("Auth"));
         assert!(all_content.contains("Rate Limit"));
         assert!(all_content.contains("CLI details"));
@@ -362,7 +398,12 @@ mod tests {
     fn test_parent_chain() {
         let md = "# Project\n\n## Setup\n\n### Prerequisites\n\nInstall Rust.\n\n### Install\n\nRun cargo.";
         let chunks = chunk(md, "section", 1000).unwrap();
-        assert_eq!(chunks.len(), 1, "Should have 1 H2 chunk, got {}", chunks.len());
+        assert_eq!(
+            chunks.len(),
+            1,
+            "Should have 1 H2 chunk, got {}",
+            chunks.len()
+        );
         assert_eq!(chunks[0].parent_chain.len(), 2);
         assert_eq!(chunks[0].parent_chain[0], "Project");
         assert_eq!(chunks[0].parent_chain[1], "Setup");
@@ -389,7 +430,12 @@ mod tests {
     fn test_chunk_by_h1() {
         let md = "# Doc One\n\nContent 1.\n\n# Doc Two\n\nContent 2.";
         let chunks = chunk(md, "h1", 1000).unwrap();
-        assert_eq!(chunks.len(), 2, "Should split at H1 boundaries, got {}", chunks.len());
+        assert_eq!(
+            chunks.len(),
+            2,
+            "Should split at H1 boundaries, got {}",
+            chunks.len()
+        );
     }
 
     #[test]

@@ -3,7 +3,6 @@
 //! Watches configured directories for file changes, debounces events at 500ms,
 //! compares SHA-256 hashes to skip unchanged files, and reports which files changed.
 
-
 use crate::config::WatchConfig;
 use notify::{
     event::{AccessKind, AccessMode, ModifyKind},
@@ -86,9 +85,9 @@ impl FileWatcher {
 
         for watch_config in watches {
             let path = PathBuf::from(&watch_config.path);
-            let abs_path = path.canonicalize().or_else(|_| {
-                Ok::<_, std::io::Error>(path.clone())
-            })?;
+            let abs_path = path
+                .canonicalize()
+                .or_else(|_| Ok::<_, std::io::Error>(path.clone()))?;
 
             let hashes = Self::scan_directory(&abs_path)?;
             tracing::info!(
@@ -146,14 +145,19 @@ impl FileWatcher {
             *guard = Some(notify_watcher);
         }
 
-        tracing::info!("👁️  File watcher started: {} directories registered", registered);
+        tracing::info!(
+            "👁️  File watcher started: {} directories registered",
+            registered
+        );
         Ok(())
     }
 
     /// Add a directory to the watch list at runtime.
     pub async fn add_watch(&self, config: WatchConfig) -> anyhow::Result<()> {
         let path = PathBuf::from(&config.path);
-        let abs_path = path.canonicalize().or_else(|_| Ok::<_, std::io::Error>(path.clone()))?;
+        let abs_path = path
+            .canonicalize()
+            .or_else(|_| Ok::<_, std::io::Error>(path.clone()))?;
 
         if self.watches.read().await.contains_key(&abs_path) {
             tracing::info!("Already watching: {}", abs_path.display());
@@ -175,14 +179,20 @@ impl FileWatcher {
             }
         }
 
-        tracing::info!("📂 Added watch: {} (chunk: {})", abs_path.display(), config.chunk_by);
+        tracing::info!(
+            "📂 Added watch: {} (chunk: {})",
+            abs_path.display(),
+            config.chunk_by
+        );
         Ok(())
     }
 
     /// Remove a directory from the watch list.
     pub async fn remove_watch(&self, path: &str) -> anyhow::Result<()> {
         let path = PathBuf::from(path);
-        let abs_path = path.canonicalize().or_else(|_| Ok::<_, std::io::Error>(path.clone()))?;
+        let abs_path = path
+            .canonicalize()
+            .or_else(|_| Ok::<_, std::io::Error>(path.clone()))?;
 
         if let Some(watcher) = self.notify_watcher.lock().await.as_mut() {
             let _ = watcher.unwatch(&abs_path);
@@ -211,7 +221,12 @@ impl FileWatcher {
 
     /// Get watch configs.
     pub async fn get_watch_configs(&self) -> Vec<WatchConfig> {
-        self.watches.read().await.values().map(|e| e.config.clone()).collect()
+        self.watches
+            .read()
+            .await
+            .values()
+            .map(|e| e.config.clone())
+            .collect()
     }
 
     /// Check which files have actually changed and return the list of modified paths.
@@ -222,9 +237,9 @@ impl FileWatcher {
 
         for path in paths {
             // Find which watch this file belongs to
-            let matching = watches.iter().find(|(watch_path, _)| {
-                path.starts_with(watch_path.as_path())
-            });
+            let matching = watches
+                .iter()
+                .find(|(watch_path, _)| path.starts_with(watch_path.as_path()));
 
             let Some((_watch_path, entry)) = matching else {
                 continue;
@@ -278,7 +293,11 @@ impl FileWatcher {
             drop(known_hashes);
 
             // Update the hash
-            entry.known_hashes.write().await.insert(path.clone(), new_hash);
+            entry
+                .known_hashes
+                .write()
+                .await
+                .insert(path.clone(), new_hash);
         }
 
         events
@@ -297,8 +316,10 @@ impl FileWatcher {
                 let path = entry.path();
                 if path.is_dir() {
                     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with('.') || name == "node_modules"
-                            || name == "target" || name == ".git"
+                        if name.starts_with('.')
+                            || name == "node_modules"
+                            || name == "target"
+                            || name == ".git"
                         {
                             continue;
                         }
@@ -324,8 +345,8 @@ impl FileWatcher {
     pub async fn persist_watches(&self, config_path: &str) -> anyhow::Result<()> {
         let watches = self.get_watch_configs().await;
 
-        let content = std::fs::read_to_string(config_path)
-            .unwrap_or_else(|_| Self::default_config_content());
+        let content =
+            std::fs::read_to_string(config_path).unwrap_or_else(|_| Self::default_config_content());
 
         let mut config_toml: toml::Value =
             toml::from_str(&content).unwrap_or(toml::Value::Table(Default::default()));
@@ -335,8 +356,14 @@ impl FileWatcher {
             .map(|w| {
                 let mut table = toml::map::Map::new();
                 table.insert("path".to_string(), toml::Value::String(w.path.clone()));
-                table.insert("chunk_by".to_string(), toml::Value::String(w.chunk_by.clone()));
-                table.insert("poll_interval".to_string(), toml::Value::String(w.poll_interval.clone()));
+                table.insert(
+                    "chunk_by".to_string(),
+                    toml::Value::String(w.chunk_by.clone()),
+                );
+                table.insert(
+                    "poll_interval".to_string(),
+                    toml::Value::String(w.poll_interval.clone()),
+                );
                 if let Some(ref hint) = w.realm_hint {
                     table.insert("realm_hint".to_string(), toml::Value::String(hint.clone()));
                 }
@@ -350,7 +377,11 @@ impl FileWatcher {
 
         let new_content = toml::to_string_pretty(&config_toml)?;
         std::fs::write(config_path, new_content)?;
-        tracing::info!("💾 Persisted {} watch configs to {}", watches.len(), config_path);
+        tracing::info!(
+            "💾 Persisted {} watch configs to {}",
+            watches.len(),
+            config_path
+        );
         Ok(())
     }
 

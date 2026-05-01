@@ -71,7 +71,9 @@ fn inject_api_key(html: &[u8], api_key: Option<&str>) -> Vec<u8> {
     match api_key {
         Some(key) => {
             let html_str = String::from_utf8_lossy(html);
-            html_str.replace(placeholder, &format!("'{}'", key.replace('\'', "\\'"))).into_bytes()
+            html_str
+                .replace(placeholder, &format!("'{}'", key.replace('\'', "\\'")))
+                .into_bytes()
         }
         None => {
             // No key configured — leave the placeholder so JS prompts the user

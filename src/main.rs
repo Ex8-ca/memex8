@@ -273,7 +273,9 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let mut engine = engine::Engine::new(config).await?;
             engine.set_config_path(&cli.config);
-            engine.ingest_path(&path, &chunk_by, realm_hint.as_deref()).await?;
+            engine
+                .ingest_path(&path, &chunk_by, realm_hint.as_deref())
+                .await?;
             if watch {
                 engine.watch_path(&path).await?;
             }
@@ -309,14 +311,19 @@ async fn main() -> anyhow::Result<()> {
             min_score,
         } => {
             let engine = engine::Engine::new(config).await?;
-            let results = engine.search(&query, realm.as_deref(), None, limit, 0, min_score).await?;
+            let results = engine
+                .search(&query, realm.as_deref(), None, limit, 0, min_score)
+                .await?;
             for (i, result) in results.iter().enumerate() {
                 println!(
                     "{}. [{}] {:.2} — {}",
                     i + 1,
                     result.realm_name,
                     result.score,
-                    result.heading.as_deref().unwrap_or(&result.content.chars().take(80).collect::<String>())
+                    result
+                        .heading
+                        .as_deref()
+                        .unwrap_or(&result.content.chars().take(80).collect::<String>())
                 );
                 println!("   ID: {}", result.id);
                 println!();
@@ -332,7 +339,14 @@ async fn main() -> anyhow::Result<()> {
             let engine = engine::Engine::new(config).await?;
             let memories = engine.recall(limit, realm.as_deref()).await?;
             for m in &memories {
-                println!("• [{}] (importance: {:.2}) {}", m.realm_name, m.importance, m.heading.as_deref().unwrap_or(&m.content.chars().take(80).collect::<String>()));
+                println!(
+                    "• [{}] (importance: {:.2}) {}",
+                    m.realm_name,
+                    m.importance,
+                    m.heading
+                        .as_deref()
+                        .unwrap_or(&m.content.chars().take(80).collect::<String>())
+                );
             }
         }
         Commands::Realms { action } => {
@@ -372,8 +386,10 @@ async fn main() -> anyhow::Result<()> {
             let queue = engine.prune_queue().await?;
             println!("⚠️  Prune review queue ({} items):\n", queue.len());
             for m in &queue {
-                println!("• {} [{}] — importance: {:.2}, last accessed: {}",
-                    m.id, m.realm_name, m.importance, m.last_accessed);
+                println!(
+                    "• {} [{}] — importance: {:.2}, last accessed: {}",
+                    m.id, m.realm_name, m.importance, m.last_accessed
+                );
             }
         }
         Commands::Archive { id } => {
@@ -404,9 +420,7 @@ async fn main() -> anyhow::Result<()> {
             let tmp = std::env::temp_dir().join(format!("memex8_edit_{}.md", id));
             std::fs::write(&tmp, &memory.content)?;
 
-            let status = std::process::Command::new(&editor)
-                .arg(&tmp)
-                .status()?;
+            let status = std::process::Command::new(&editor).arg(&tmp).status()?;
 
             if status.success() {
                 let new_content = std::fs::read_to_string(&tmp)?;
@@ -455,7 +469,8 @@ async fn main() -> anyhow::Result<()> {
             let scheduler_config = config.clone();
             let scheduler_engine = engine.clone();
             tokio::spawn(async move {
-                let scheduler = engine::scheduler::Scheduler::new(scheduler_engine, scheduler_config);
+                let scheduler =
+                    engine::scheduler::Scheduler::new(scheduler_engine, scheduler_config);
                 if let Err(e) = scheduler.run().await {
                     tracing::error!("Scheduler error: {}", e);
                 }
@@ -483,16 +498,14 @@ async fn main() -> anyhow::Result<()> {
                 handle.abort();
             }
         }
-        Commands::Mcp { transport, port } => {
-            match transport.as_str() {
-                "stdio" => mcp::server::run_stdio(config.clone()).await?,
-                "sse" => {
-                    let p = port.unwrap_or(config.server.mcp_port);
-                    mcp::server::run_sse(config.clone(), p).await?;
-                }
-                _ => anyhow::bail!("Unknown MCP transport: {}", transport),
+        Commands::Mcp { transport, port } => match transport.as_str() {
+            "stdio" => mcp::server::run_stdio(config.clone()).await?,
+            "sse" => {
+                let p = port.unwrap_or(config.server.mcp_port);
+                mcp::server::run_sse(config.clone(), p).await?;
             }
-        }
+            _ => anyhow::bail!("Unknown MCP transport: {}", transport),
+        },
         Commands::Daemon => {
             let engine = std::sync::Arc::new(engine::Engine::new(config.clone()).await?);
             tracing::info!("🧠 memex8 daemon starting...");
@@ -542,13 +555,22 @@ async fn main() -> anyhow::Result<()> {
             engine.export(&path).await?;
             println!("📤 Exported to: {}", path);
         }
-        Commands::Import { path, reuse_vectors } => {
+        Commands::Import {
+            path,
+            reuse_vectors,
+        } => {
             let engine = engine::Engine::new(config).await?;
             let count = engine.import(&path, reuse_vectors).await?;
             if reuse_vectors {
-                println!("📥 Imported {} memories from: {} (vectors reused)", count, path);
+                println!(
+                    "📥 Imported {} memories from: {} (vectors reused)",
+                    count, path
+                );
             } else {
-                println!("📥 Imported {} memories from: {} (re-embedded)", count, path);
+                println!(
+                    "📥 Imported {} memories from: {} (re-embedded)",
+                    count, path
+                );
             }
         }
         Commands::Doctor => {
