@@ -946,17 +946,26 @@
                 }
             });
 
-            // Memory-to-memory edges (same realm, high importance)
-            memories.forEach((m1, i) => {
-                memories.slice(i + 1).forEach((m2) => {
-                    if (m1.realm_name && m1.realm_name === m2.realm_name) {
-                        const imp = Math.min((m1.importance || 0) + (m2.importance || 0), 1);
-                        if (imp > 0.6) {
-                            gEdges.push({ source: m1.id, target: m2.id, strength: imp });
+            // Memory-to-memory edges from Phase 9 associations
+            // Each memory has related_memory_ids and association_strengths arrays (same order)
+            const memoryIds = new Set(memories.map(m => m.id));
+            let associationEdgeCount = 0;
+            memories.forEach((m) => {
+                const related = m.related_memory_ids || [];
+                const strengths = m.association_strengths || [];
+                related.forEach((targetId, idx) => {
+                    // Only create edge if target memory is actually loaded
+                    if (memoryIds.has(targetId)) {
+                        const strength = strengths[idx] || 0.5;
+                        // Only add if source < target to avoid duplicate edges
+                        if (m.id < targetId) {
+                            gEdges.push({ source: m.id, target: targetId, strength: strength });
+                            associationEdgeCount++;
                         }
                     }
                 });
             });
+            console.log(`Graph: ${gNodes.length} nodes, ${gEdges.length} edges (${associationEdgeCount} associations)`);
         }
 
         // Physics: run N steps of force simulation (Obsidian-style gentle forces)
