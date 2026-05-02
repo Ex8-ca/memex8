@@ -1,6 +1,7 @@
 use crate::config::AppConfig;
 use crate::engine::memex8_md::write_digest_md;
 use crate::engine::quantizer::AdaptiveScalarQuantizer;
+use crate::engine::reactions::reaction_boost;
 use crate::storage::qdrant::{MemoryPoint, QdrantStore};
 
 pub struct SlumberEngine {
@@ -1878,7 +1879,14 @@ impl SlumberEngine {
                 continue;
             }
 
-            let new_importance = (mem.importance - (days_since * decay_rate)).max(min_importance);
+            // Apply reaction boost: positive reactions slow decay, negative speed it up
+            let reaction = mem.reaction_score;
+            let boost = reaction_boost(reaction);
+
+            // Base decay: importance decreases with time
+            // Boosted decay: negative reactions decay faster, positive reactions decay slower
+            let decayed_importance = mem.importance - (days_since * decay_rate * boost);
+            let new_importance = decayed_importance.max(min_importance);
             let delta = (new_importance - mem.importance).abs();
 
             // Only update if importance changed meaningfully

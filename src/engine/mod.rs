@@ -7,6 +7,7 @@ pub mod memex8_md;
 pub mod providers;
 pub mod quantizer;
 pub mod realms;
+pub mod reactions;
 pub mod scheduler;
 pub mod slumber;
 pub mod watcher;
@@ -196,6 +197,9 @@ impl Engine {
             let realm = self.store.get_realm(&realm_id).await?;
             let realm_name = realm.map(|r| r.name.clone()).unwrap_or_default();
 
+            // Infer reaction score from content
+            let reaction_score = crate::engine::reactions::infer_reaction(&chunk.content);
+
             self.store
                 .store_memory(
                     &id,
@@ -207,6 +211,7 @@ impl Engine {
                     &realm_name,
                     &chunk.source_hash,
                     &chunk.chunk_type,
+                    reaction_score,
                 )
                 .await?;
 
@@ -429,6 +434,9 @@ impl Engine {
             let realm = self.store.get_realm(&realm_id).await?;
             let realm_name = realm.map(|r| r.name.clone()).unwrap_or_default();
 
+            // Infer reaction score from content
+            let reaction_score = crate::engine::reactions::infer_reaction(&chunk.content);
+
             self.store
                 .store_memory(
                     &id,
@@ -440,6 +448,7 @@ impl Engine {
                     &realm_name,
                     &chunk.source_hash,
                     &chunk.chunk_type,
+                    reaction_score,
                 )
                 .await?;
         }
@@ -768,6 +777,10 @@ impl Engine {
 
         let existing = self.get_memory(id).await?;
         let realm_id = existing.realm_id.as_deref().unwrap_or("");
+
+        // Infer reaction score from new content
+        let reaction_score = crate::engine::reactions::infer_reaction(new_content);
+
         self.store
             .store_memory(
                 id,
@@ -779,6 +792,7 @@ impl Engine {
                 &existing.realm_name,
                 &existing.source_hash,
                 &existing.chunk_type,
+                reaction_score,
             )
             .await?;
 
@@ -880,6 +894,9 @@ impl Engine {
 
         let source_str = source.unwrap_or("manual");
 
+        // Infer reaction score from content
+        let reaction_score = crate::engine::reactions::infer_reaction(content);
+
         self.store
             .store_memory(
                 &id,
@@ -891,6 +908,7 @@ impl Engine {
                 &realm_name,
                 "",
                 "manual",
+                reaction_score,
             )
             .await?;
 
@@ -941,6 +959,7 @@ impl Engine {
                 let count = memories.len();
                 for m in &memories {
                     let realm_id = m.memory.realm_id.as_deref().unwrap_or("");
+                    let reaction_score = crate::engine::reactions::infer_reaction(&m.memory.content);
                     self.store
                         .store_memory(
                             &m.memory.id,
@@ -952,6 +971,7 @@ impl Engine {
                             &m.memory.realm_name,
                             &m.memory.source_hash,
                             &m.memory.chunk_type,
+                            reaction_score,
                         )
                         .await?;
                 }
@@ -968,6 +988,7 @@ impl Engine {
         for mem in &memories {
             let vector = embedder.embed(&mem.content).await?;
             let realm_id = mem.realm_id.as_deref().unwrap_or("");
+            let reaction_score = crate::engine::reactions::infer_reaction(&mem.content);
             self.store
                 .store_memory(
                     &mem.id,
@@ -979,6 +1000,7 @@ impl Engine {
                     &mem.realm_name,
                     &mem.source_hash,
                     &mem.chunk_type,
+                    reaction_score,
                 )
                 .await?;
         }

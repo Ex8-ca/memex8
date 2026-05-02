@@ -34,6 +34,10 @@ pub struct MemoryPoint {
     /// Cosine similarity strengths for each related memory (same order as related_memory_ids).
     #[serde(default)]
     pub association_strengths: Vec<f32>,
+    /// Reaction score inferred from engagement patterns (-1.0 to 1.0).
+    /// Positive = engaged/positive, Negative = disengaged/negative.
+    #[serde(default)]
+    pub reaction_score: f32,
 }
 
 /// Memory with its embedding vector (internal use only, not serialized).
@@ -221,6 +225,7 @@ fn memory_to_payload(mem: &MemoryPoint) -> Payload {
         "source_hash": mem.source_hash,
         "related_memory_ids": mem.related_memory_ids,
         "association_strengths": mem.association_strengths,
+        "reaction_score": mem.reaction_score,
     });
     Payload::try_from(json).unwrap_or_default()
 }
@@ -244,6 +249,7 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
         source_hash: map_str(map, "source_hash").unwrap_or_default(),
         related_memory_ids: map_str_vec(map, "related_memory_ids"),
         association_strengths: map_f32_vec(map, "association_strengths"),
+        reaction_score: map_f32(map, "reaction_score"),
     }
 }
 
@@ -382,6 +388,7 @@ impl QdrantStore {
         realm_name: &str,
         source_hash: &str,
         chunk_type: &str,
+        reaction_score: f32,
     ) -> anyhow::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let mem = MemoryPoint {
@@ -402,6 +409,7 @@ impl QdrantStore {
             source_hash: source_hash.to_string(),
             related_memory_ids: vec![],
             association_strengths: vec![],
+            reaction_score,
         };
         let payload = memory_to_payload(&mem);
         let point = PointStruct::new(id.to_string(), vector.to_vec(), payload);
@@ -507,6 +515,7 @@ impl QdrantStore {
             "chunk_type": "consolidated",
             "related_memory_ids": Vec::<String>::new(),
             "association_strengths": Vec::<f32>::new(),
+            "reaction_score": 0.0f32,
         })
         .try_into()
         .unwrap_or_default();
