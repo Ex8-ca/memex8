@@ -80,6 +80,10 @@ fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
             "/memories",
+            axum::routing::get(crate::api::routes::memories::list),
+        )
+        .route(
+            "/memories",
             axum::routing::post(crate::api::routes::memories::store),
         )
         .route(

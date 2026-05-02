@@ -652,6 +652,44 @@ impl Engine {
             .collect())
     }
 
+    /// List all memories with optional realm filter and sort, without recency weighting.
+    pub async fn list_memories(
+        &self,
+        realm: Option<&str>,
+        sort: &str,
+        descending: bool,
+    ) -> anyhow::Result<Vec<crate::storage::qdrant::MemoryPoint>> {
+        let all = self.store.scroll_all_memories().await?;
+
+        // Filter by realm if specified
+        let filtered: Vec<_> = match realm {
+            Some(r) => all.into_iter().filter(|m| &m.realm_name == r).collect(),
+            None => all,
+        };
+
+        // Sort
+        let mut sorted = filtered;
+        match sort {
+            "importance" => sorted.sort_by(|a, b| {
+                let cmp = a.importance.partial_cmp(&b.importance).unwrap();
+                if descending { cmp } else { cmp.reverse() }
+            }),
+            "last_accessed" => sorted.sort_by(|a, b| {
+                let cmp = a.last_accessed.cmp(&b.last_accessed);
+                if descending { cmp } else { cmp.reverse() }
+            }),
+            "access_count" => sorted.sort_by(|a, b| {
+                let cmp = a.access_count.cmp(&b.access_count);
+                if descending { cmp } else { cmp.reverse() }
+            }),
+            _ => sorted.sort_by(|a, b| {
+                let cmp = a.ingested_at.cmp(&b.ingested_at);
+                if descending { cmp } else { cmp.reverse() }
+            }),
+        }
+        Ok(sorted)
+    }
+
     /// Get the most commonly used tags.
     pub async fn get_tag_suggestions(&self, limit: usize) -> anyhow::Result<Vec<(String, u32)>> {
         self.store.get_tag_suggestions(limit).await

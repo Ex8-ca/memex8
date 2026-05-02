@@ -166,6 +166,54 @@ pub struct RecallParams {
     pub realm: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct ListParams {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub realm: Option<String>,
+    /// Sort field: "ingested_at", "importance", "last_accessed", "access_count". Default: "ingested_at"
+    #[serde(default = "default_sort")]
+    pub sort: String,
+    /// Sort direction: "asc" or "desc". Default: "desc" (newest first)
+    #[serde(default = "default_dir")]
+    pub direction: String,
+}
+
+fn default_sort() -> String {
+    "ingested_at".into()
+}
+fn default_dir() -> String {
+    "desc".into()
+}
+
+/// GET /api/v1/memories — List all memories with optional sort/filter, no recency bias.
+pub async fn list(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ListParams>,
+) -> Result<Json<ListResponse>, crate::api::error::ApiError> {
+    let limit = params.limit.unwrap_or(50);
+    let offset = params.offset.unwrap_or(0);
+    let sort_field = params.sort.as_str();
+    let descending = params.direction.as_str() != "asc";
+
+    let memories = state
+        .engine
+        .list_memories(params.realm.as_deref(), &params.sort, params.direction.as_str() != "asc")
+        .await?;
+    let total = memories.len();
+    let page: Vec<_> = memories.into_iter().skip(offset).take(limit).collect();
+
+    Ok(Json(ListResponse { memories: page, total, limit, offset }))
+}
+
+#[derive(Serialize)]
+pub struct ListResponse {
+    pub memories: Vec<crate::storage::qdrant::MemoryPoint>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+}
+
 pub async fn ingest(
     State(state): State<Arc<AppState>>,
     Json(req): Json<IngestRequest>,
