@@ -197,7 +197,8 @@ memex8 stats         # System statistics
 
 || Method | Endpoint | Description |
 |--------|----------|-------------|
-|| `POST` | `/api/v1/memories` | Store a new memory |
+| `GET`  | `/api/v1/memories` | List all memories (sort: `ingested_at`, `importance`, `last_accessed`, `access_count`) |
+| `POST` | `/api/v1/memories` | Store a new memory |
 || `POST` | `/api/v1/memories/search` | Semantic search |
 || `GET`  | `/api/v1/memories/recall` | Top memories |
 || `GET`  | `/api/v1/memories/{id}` | Get memory by ID |
