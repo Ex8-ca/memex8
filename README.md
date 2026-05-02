@@ -63,6 +63,11 @@ The result: an AI agent that remembers what matters, forgets what doesn't, and c
 - **3D force-directed graph** — interactive visualization of memory associations
 - **MCP server** — works with Claude Code, Opencode, and any MCP-compatible agent
 - **REST API** — full CRUD + search with auth and pagination
+- **Reaction tracking** — upvote/downvote memories to reinforce or suppress importance
+- **Semantic associations** — auto-generated links between related memories (FillGap, TemporalNext, Prerequisite, Companion)
+- **Knowledge gap detection** — slumber phase identifies underexplored topic areas
+- **Proactive inference API** — suggests what to explore based on existing knowledge
+- **Session-end extraction** — LLM-powered summary of decisions and follow-ups from conversations
 
 ### 🔌 Embedding Providers
 
@@ -73,7 +78,7 @@ The result: an AI agent that remembers what matters, forgets what doesn't, and c
 
 ### 💤 Slumber Consolidation
 
-Nightly "sleep" pipeline (9 phases): deduplicate → compress → re-cluster → rename/merge realms → prune stale → **LLM consolidation** → index optimization → apply decay → build associations.
+Nightly "sleep" pipeline (11 phases): deduplicate → scalar quantization → re-cluster realms → rename/merge realms → prune stale → **LLM consolidation** → index optimization → spreading activation → **associate memories** → **detect gaps** → **session review**.
 
 | Backend | Model | Notes |
 |---------|-------|-------|
@@ -188,18 +193,36 @@ memex8 stats         # System statistics
 
 ## REST API
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/v1/memories` | Store a new memory |
-| `POST` | `/api/v1/memories/search` | Semantic search |
-| `GET`  | `/api/v1/memories/recall` | Top memories |
-| `GET`  | `/api/v1/memories/{id}` | Get memory by ID |
-| `DELETE` | `/api/v1/memories/{id}` | Delete memory |
-| `GET`  | `/api/v1/realms` | List realms |
-| `POST` | `/api/v1/slumber/trigger` | Trigger slumber |
-| `GET`  | `/api/v1/health` | Health check (no auth) |
+### Memories & Realms
 
-All endpoints (except `/health`) require `Authorization: Bearer ***`.
+|| Method | Endpoint | Description |
+|--------|----------|-------------|
+|| `POST` | `/api/v1/memories` | Store a new memory |
+|| `POST` | `/api/v1/memories/search` | Semantic search |
+|| `GET`  | `/api/v1/memories/recall` | Top memories |
+|| `GET`  | `/api/v1/memories/{id}` | Get memory by ID |
+|| `DELETE` | `/api/v1/memories/{id}` | Delete memory |
+|| `GET`  | `/api/v1/realms` | List realms |
+|| `POST` | `/api/v1/slumber/trigger` | Trigger slumber |
+|| `GET`  | `/api/v1/health` | Health check (no auth) |
+
+### Reactions & Associations
+
+|| Method | Endpoint | Description |
+|--------|----------|-------------|
+|| `POST` | `/api/v1/memories/{id}/react` | Upvote or downvote a memory |
+|| `GET`  | `/api/v1/memories/{id}/associations` | Get semantic links for a memory |
+
+### Proactive Inference
+
+|| Method | Endpoint | Description |
+|--------|----------|-------------|
+|| `GET`  | `/api/v1/inference/gaps` | List open knowledge gaps |
+|| `POST` | `/api/v1/inference/suggest` | Get gap suggestions for a topic |
+|| `POST` | `/api/v1/inference/gaps/{id}/resolve` | Mark a gap as resolved |
+|| `POST` | `/api/v1/inference/gaps/{id}/dismiss` | Dismiss a gap |
+
+All endpoints (except `/health`) require `Authorization: Bearer <key>`
 
 ---
 
@@ -226,11 +249,11 @@ memex8/
 Realm Assignment (cosine similarity) → Qdrant Store
 ```
 
-### Slumber Pipeline (9 Phases)
+### Slumber Pipeline (11 Phases)
 
 ```
-Trigger → Deduplicate → Compress → Re-cluster → Rename/Merge →
-Prune Stale → LLM Consolidation → Index Optimization → Decay → Associations
+Trigger → Deduplicate → Quantize → Re-cluster → Rename/Merge →
+Prune Stale → LLM Consolidation → Index Opt → Spreading → Associate → Gap Detect → Session Review
 ```
 
 ---
