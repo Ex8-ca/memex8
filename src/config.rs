@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub digest_md: DigestMdConfig,
     pub web: WebConfig,
     #[serde(default)]
+    pub inference: InferenceConfig,
+    #[serde(default)]
     pub watch: Vec<WatchConfig>,
 }
 
@@ -171,6 +173,46 @@ pub struct SlumberConfig {
     /// Importance bump for associated memories during spreading activation.
     #[serde(default = "default_spreading_activation_bump")]
     pub spreading_activation_bump: f32,
+    /// Number of topic clusters to detect (k for k-means).
+    #[serde(default = "default_topic_clusters_k")]
+    pub topic_clusters_k: u32,
+    /// Similarity threshold for inferring associations.
+    #[serde(default = "default_inference_similarity_threshold")]
+    pub inference_similarity_threshold: f32,
+}
+
+fn default_topic_clusters_k() -> u32 {
+    8
+}
+fn default_inference_similarity_threshold() -> f32 {
+    0.5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceConfig {
+    /// Number of topic clusters to detect (k for k-means).
+    #[serde(default = "default_topic_clusters_k")]
+    pub topic_clusters_k: u32,
+    /// Minimum cosine similarity to create an inferred link.
+    #[serde(default = "default_inference_similarity_threshold")]
+    pub inference_similarity_threshold: f32,
+    /// Whether to enable proactive gap detection.
+    #[serde(default = "default_gap_detection_enabled")]
+    pub gap_detection_enabled: bool,
+}
+
+fn default_gap_detection_enabled() -> bool {
+    true
+}
+
+impl Default for InferenceConfig {
+    fn default() -> Self {
+        Self {
+            topic_clusters_k: 8,
+            inference_similarity_threshold: 0.5,
+            gap_detection_enabled: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -391,6 +433,8 @@ impl Default for AppConfig {
                 association_top_k: 5,
                 association_min_strength: 0.6,
                 spreading_activation_bump: 0.005,
+                topic_clusters_k: 8,
+                inference_similarity_threshold: 0.5,
             },
             memex8_md: Memex8MdConfig {
                 enabled: true,
@@ -402,6 +446,7 @@ impl Default for AppConfig {
                 enabled: true,
                 theme: "dark".into(),
             },
+            inference: InferenceConfig::default(),
             watch: vec![],
         }
     }

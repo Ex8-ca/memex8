@@ -2,7 +2,7 @@ use crate::config::AppConfig;
 use crate::engine::memex8_md::write_digest_md;
 use crate::engine::quantizer::AdaptiveScalarQuantizer;
 use crate::engine::reactions::reaction_boost;
-use crate::storage::qdrant::{MemoryPoint, QdrantStore};
+use crate::storage::qdrant::{GapPoint, MemoryPoint, QdrantStore};
 
 pub struct SlumberEngine {
     config: AppConfig,
@@ -25,6 +25,8 @@ pub struct SlumberReport {
     pub decayed: usize,
     /// Association links created.
     pub associated: usize,
+    /// Knowledge gaps detected.
+    pub gaps_detected: usize,
 }
 
 impl SlumberEngine {
@@ -92,6 +94,16 @@ impl SlumberEngine {
         tracing::info!("💤 Slumber phase 9: Build associations");
         report.associated = self.build_associations().await?;
 
+        // Phase 10: Topic clusters & gap detection
+        tracing::info!("💤 Slumber phase 10: Topic clusters & gap detection");
+        report.gaps_detected = match self.detect_gaps().await? {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("  Gap detection failed: {}", e);
+                0
+            }
+        };
+
         // Phase 7: Write master memex8.md digest
         if self.config.digest_md.enabled {
             tracing::info!("💤 Slumber phase 7: Write digest md");
@@ -114,7 +126,7 @@ impl SlumberEngine {
         }
 
         tracing::info!(
-            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={}",
+            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={} gaps={}",
             report.memories_scanned,
             report.deduplicated,
             report.quantized,
@@ -127,6 +139,7 @@ impl SlumberEngine {
             report.digest_md_written,
             report.decayed,
             report.associated,
+            report.gaps_detected,
         );
 
         Ok(report)
@@ -1978,6 +1991,125 @@ impl SlumberEngine {
             min_strength
         );
         Ok(total_links)
+    }
+
+    // ─── Phase 10: Topic Clusters & Gap Detection ────────────────────────────────
+
+    /// Detect topic clusters using k-means clustering.
+    /// Returns (cluster_id, Vec<memory_id>) mappings.
+    async fn detect_topic_clusters(&self) -> anyhow::Result<anyhow::Result<Vec<(String, Vec<String>)>>> {
+        use crate::engine::associations::detect_topic_clusters;
+
+        let all_with_vectors = match self.store.scroll_all_memories_with_vectors().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("  scroll_all_memories_with_vectors failed: {}", e);
+                return Ok(Err(anyhow::anyhow!("Failed to get memories with vectors: {}", e)));
+            }
+        };
+
+        if all_with_vectors.is_empty() {
+            tracing::info!("  No memories to cluster");
+            return Ok(Ok(vec![]));
+        }
+
+        // Convert MemoryWithVector to the tuple format expected by detect_topic_clusters
+        let memories_tuples: Vec<(String, MemoryPoint, Vec<f32>)> = all_with_vectors
+            .iter()
+            .map(|m| (m.memory.id.clone(), m.memory.clone(), m.vector.clone()))
+            .collect();
+
+        let k = self.config.inference.topic_clusters_k.max(2).min(20) as usize;
+        let clusters = detect_topic_clusters(&memories_tuples, k);
+
+        // Update each memory's topic_clusters field
+        for cluster in &clusters {
+            for memory_id in &cluster.memory_ids {
+                // Get current memory
+                if let Ok(Some(mut mem)) = self.store.get_memory(memory_id).await {
+                    mem.topic_clusters.retain(|c| c != &cluster.id);
+                    mem.topic_clusters.push(cluster.id.clone());
+
+                    let payload: qdrant_client::Payload = serde_json::json!({
+                        "topic_clusters": mem.topic_clusters,
+                    })
+                    .try_into()
+                    .unwrap_or_default();
+
+                    let _ = self.store.update_memory_payload(memory_id, payload).await;
+                }
+            }
+        }
+
+        let result: Vec<(String, Vec<String>)> = clusters
+            .into_iter()
+            .map(|c| (c.id, c.memory_ids))
+            .collect();
+
+        Ok(Ok(result))
+    }
+
+    /// Detect knowledge gaps based on cluster analysis.
+    async fn detect_gaps(&self) -> anyhow::Result<anyhow::Result<usize>> {
+        use crate::engine::associations::detect_gaps;
+
+        if !self.config.inference.gap_detection_enabled {
+            return Ok(Ok(0));
+        }
+
+        let all_with_vectors = match self.store.scroll_all_memories_with_vectors().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("  scroll_all_memories_with_vectors failed: {}", e);
+                return Ok(Err(anyhow::anyhow!("Failed to get memories with vectors: {}", e)));
+            }
+        };
+
+        if all_with_vectors.is_empty() {
+            return Ok(Ok(0));
+        }
+
+        // First detect clusters
+        let k = self.config.inference.topic_clusters_k.max(2).min(20) as usize;
+        let all_as_tuples: Vec<(String, MemoryPoint, Vec<f32>)> = all_with_vectors
+            .iter()
+            .map(|m| (m.memory.id.clone(), m.memory.clone(), m.vector.clone()))
+            .collect();
+        let clusters = crate::engine::associations::detect_topic_clusters(&all_as_tuples, k);
+
+        // Build memories slice and memory_vectors hashmap
+        let memories: Vec<_> = all_with_vectors.iter().map(|m| m.memory.clone()).collect();
+        let memory_vectors: std::collections::HashMap<String, Vec<f32>> = all_with_vectors
+            .iter()
+            .map(|m| (m.memory.id.clone(), m.vector.clone()))
+            .collect();
+
+        // Now detect gaps
+        let gaps = detect_gaps(&clusters, &memories, &memory_vectors);
+
+        let mut stored = 0;
+        for gap in gaps {
+            let gap_point = GapPoint {
+                id: gap.id,
+                vector: vec![], // gaps don't need vectors
+                gap_type: gap.missing_link_type.as_str().to_string(),
+                status: "open".to_string(),
+                cluster_id: gap.from_cluster.clone(),
+                suggested_topic: gap.to_cluster.clone(),
+                description: gap.description.clone(),
+                related_memory_ids: vec![], // not available from Gap
+                suggested_search_queries: vec![],
+                importance: gap.confidence,
+                created_at: gap.detected_at,
+            };
+
+            if self.store.store_gap(&gap_point).await.is_ok() {
+                stored += 1;
+            }
+        }
+
+        tracing::info!("  Detected and stored {} knowledge gaps", stored);
+        Ok(Ok(stored))
     }
 }
 

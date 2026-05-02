@@ -1,3 +1,4 @@
+pub mod associations;
 pub mod chunker;
 pub mod doctor;
 pub mod embedder;

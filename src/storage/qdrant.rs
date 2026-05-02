@@ -38,6 +38,9 @@ pub struct MemoryPoint {
     /// Positive = engaged/positive, Negative = disengaged/negative.
     #[serde(default)]
     pub reaction_score: f32,
+    /// Topic cluster IDs this memory belongs to (from Phase 10 clustering).
+    #[serde(default)]
+    pub topic_clusters: Vec<String>,
 }
 
 /// Memory with its embedding vector (internal use only, not serialized).
@@ -78,6 +81,22 @@ pub struct CollectionStats {
     pub size_bytes: u64,
 }
 
+/// A detected knowledge gap stored in Qdrant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GapPoint {
+    pub id: String,
+    pub vector: Vec<f32>,
+    pub gap_type: String,           // "MissingPrerequisite", "TemporalNext", "UndiscoveredTopic"
+    pub status: String,             // "open", "resolved", "dismissed"
+    pub cluster_id: String,         // which topic cluster this gap belongs to
+    pub suggested_topic: String,    // human-readable suggested topic to explore
+    pub description: String,        // detailed explanation of the gap
+    pub related_memory_ids: Vec<String>,
+    pub suggested_search_queries: Vec<String>,
+    pub importance: f32,
+    pub created_at: String,
+}
+
 // ─── Store ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -88,6 +107,7 @@ pub struct QdrantStore {
 const MEMORIES: &str = "memories";
 const REALMS: &str = "realms";
 const QUANTIZED: &str = "memories_quantized";
+const GAPS: &str = "gaps";
 
 /// Helper: convert PointId to String.
 fn point_id_to_string(id: Option<&qdrant_client::qdrant::PointId>) -> String {
@@ -226,6 +246,7 @@ fn memory_to_payload(mem: &MemoryPoint) -> Payload {
         "related_memory_ids": mem.related_memory_ids,
         "association_strengths": mem.association_strengths,
         "reaction_score": mem.reaction_score,
+        "topic_clusters": mem.topic_clusters,
     });
     Payload::try_from(json).unwrap_or_default()
 }
@@ -250,6 +271,7 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
         related_memory_ids: map_str_vec(map, "related_memory_ids"),
         association_strengths: map_f32_vec(map, "association_strengths"),
         reaction_score: map_f32(map, "reaction_score"),
+        topic_clusters: map_str_vec(map, "topic_clusters"),
     }
 }
 
@@ -372,6 +394,31 @@ impl QdrantStore {
                 .await?;
         }
 
+        // ── gaps ──
+        if !self.client.collection_exists(GAPS).await? {
+            tracing::info!("Creating {} collection", GAPS);
+            self.client
+                .create_collection(
+                    CreateCollectionBuilder::new(GAPS)
+                        .vectors_config(VectorParamsBuilder::new(dims, Distance::Cosine))
+                        .on_disk_payload(true),
+                )
+                .await?;
+            // Index gap fields for filtering
+            for (field, schema) in &[
+                ("gap_type", FieldType::Keyword),
+                ("status", FieldType::Keyword),
+                ("cluster_id", FieldType::Keyword),
+            ] {
+                self.client
+                    .create_field_index(CreateFieldIndexCollectionBuilder::new(
+                        GAPS, *field, *schema,
+                    ))
+                    .await?;
+            }
+            tracing::info!("  + indexes created for {}", GAPS);
+        }
+
         Ok(())
     }
 
@@ -410,6 +457,7 @@ impl QdrantStore {
             related_memory_ids: vec![],
             association_strengths: vec![],
             reaction_score,
+            topic_clusters: vec![],
         };
         let payload = memory_to_payload(&mem);
         let point = PointStruct::new(id.to_string(), vector.to_vec(), payload);
@@ -516,6 +564,7 @@ impl QdrantStore {
             "related_memory_ids": Vec::<String>::new(),
             "association_strengths": Vec::<f32>::new(),
             "reaction_score": 0.0f32,
+            "topic_clusters": Vec::<String>::new(),
         })
         .try_into()
         .unwrap_or_default();
@@ -1145,5 +1194,107 @@ impl QdrantStore {
             .collect();
 
         Ok(results)
+    }
+
+    // ── Gap Storage ─────────────────────────────────────────────────────────────
+
+    /// Store a detected knowledge gap.
+    pub async fn store_gap(&self, gap: &GapPoint) -> anyhow::Result<()> {
+        let payload: qdrant_client::Payload = serde_json::json!({
+            "gap_type": gap.gap_type,
+            "status": gap.status,
+            "cluster_id": gap.cluster_id,
+            "suggested_topic": gap.suggested_topic,
+            "description": gap.description,
+            "related_memory_ids": gap.related_memory_ids,
+            "suggested_search_queries": gap.suggested_search_queries,
+            "importance": gap.importance,
+            "created_at": gap.created_at,
+        })
+        .try_into()
+        .unwrap_or_default();
+
+        self.client
+            .upsert_points(
+                UpsertPointsBuilder::new(GAPS, vec![PointStruct::new(
+                    gap.id.clone(),
+                    gap.vector.clone(),
+                    payload,
+                )]),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// List all gaps, optionally filtered by status.
+    pub async fn list_gaps(&self, status: Option<&str>) -> anyhow::Result<Vec<GapPoint>> {
+        let filter = match status {
+            Some(s) => Filter::must([Condition::matches("status", s.to_string())]),
+            None => Filter::must([]),
+        };
+
+        let resp = self
+            .client
+            .search_points(
+                SearchPointsBuilder::new(GAPS, vec![0.0f32; 768], 100)
+                    .with_payload(true)
+                    .with_vectors(false)
+                    .filter(filter)
+            )
+            .await?;
+
+        let gaps: Vec<GapPoint> = resp
+            .result
+            .into_iter()
+            .filter_map(|p| {
+                let map = map_to_json(&p.payload);
+                Some(GapPoint {
+                    id: point_id_to_string(p.id.as_ref()),
+                    vector: vec![],
+                    gap_type: map_str(&map, "gap_type").unwrap_or_default(),
+                    status: map_str(&map, "status").unwrap_or_default(),
+                    cluster_id: map_str(&map, "cluster_id").unwrap_or_default(),
+                    suggested_topic: map_str(&map, "suggested_topic").unwrap_or_default(),
+                    description: map_str(&map, "description").unwrap_or_default(),
+                    related_memory_ids: map_tags(&map, "related_memory_ids"),
+                    suggested_search_queries: map_tags(&map, "suggested_search_queries"),
+                    importance: map_f32(&map, "importance"),
+                    created_at: map_str(&map, "created_at").unwrap_or_default(),
+                })
+            })
+            .collect();
+        Ok(gaps)
+    }
+
+    /// Update gap status (resolve or dismiss).
+    pub async fn update_gap_status(&self, gap_id: &str, status: &str) -> anyhow::Result<()> {
+        let payload: qdrant_client::Payload = serde_json::json!({
+            "status": status,
+        })
+        .try_into()
+        .unwrap_or_default();
+
+        self.client
+            .set_payload(
+                SetPayloadPointsBuilder::new(GAPS, payload)
+                    .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
+                        ids: vec![gap_id.into()],
+                    }))
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Delete a gap.
+    pub async fn delete_gap(&self, gap_id: &str) -> anyhow::Result<()> {
+        let filter = Filter::must([Condition::matches("id", gap_id.to_string())]);
+        self.client
+            .delete_points(
+                DeletePointsBuilder::new(GAPS)
+                    .points(PointsSelectorOneOf::Filter(filter)),
+            )
+            .await?;
+        Ok(())
     }
 }
