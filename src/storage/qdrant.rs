@@ -486,6 +486,25 @@ impl QdrantStore {
         Ok(None)
     }
 
+    /// Set the importance score for a memory.
+    pub async fn set_memory_importance(&self, id: &str, importance: f32) -> anyhow::Result<()> {
+        let payload: qdrant_client::Payload = serde_json::json!({
+            "importance": importance,
+        })
+        .try_into()
+        .unwrap_or_default();
+
+        self.client
+            .set_payload(
+                SetPayloadPointsBuilder::new(MEMORIES, payload)
+                    .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
+                        ids: vec![id.into()],
+                    })),
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn search(
         &self,
         query_vector: &[f32],

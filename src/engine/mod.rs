@@ -10,6 +10,7 @@ pub mod quantizer;
 pub mod realms;
 pub mod reactions;
 pub mod scheduler;
+pub mod session;
 pub mod slumber;
 pub mod watcher;
 
@@ -1133,6 +1134,18 @@ impl Engine {
         suggestions.truncate(limit);
 
         Ok(suggestions)
+    }
+
+    /// Run session-end extraction: LLM-assisted extraction of decisions, follow-ups,
+    /// and insights from a conversation session. Results are stored as high-importance
+    /// memories in a dedicated realm.
+    pub async fn run_session_end(
+        &self,
+        input: crate::engine::session::SessionInput,
+    ) -> anyhow::Result<crate::engine::session::SessionReport> {
+        let session_engine =
+            crate::engine::session::SessionEngine::new(self.config.clone(), self.store.clone());
+        session_engine.run_session_end(input).await
     }
 }
 

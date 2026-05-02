@@ -27,6 +27,8 @@ pub struct SlumberReport {
     pub associated: usize,
     /// Knowledge gaps detected.
     pub gaps_detected: usize,
+    /// Session memories reviewed and re-weighted.
+    pub sessions_reviewed: usize,
 }
 
 impl SlumberEngine {
@@ -104,6 +106,11 @@ impl SlumberEngine {
             }
         };
 
+        // Phase 11: Session memory review — re-weight session summaries based on
+        // continued engagement (follow-up messages found in recent memories).
+        tracing::info!("💤 Slumber phase 11: Session memory review");
+        report.sessions_reviewed = self.review_session_memories().await?;
+
         // Phase 7: Write master memex8.md digest
         if self.config.digest_md.enabled {
             tracing::info!("💤 Slumber phase 7: Write digest md");
@@ -126,7 +133,7 @@ impl SlumberEngine {
         }
 
         tracing::info!(
-            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={} gaps={}",
+            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={} gaps={} sessions_reviewed={}",
             report.memories_scanned,
             report.deduplicated,
             report.quantized,
@@ -140,6 +147,7 @@ impl SlumberEngine {
             report.decayed,
             report.associated,
             report.gaps_detected,
+            report.sessions_reviewed,
         );
 
         Ok(report)
@@ -2110,6 +2118,79 @@ impl SlumberEngine {
 
         tracing::info!("  Detected and stored {} knowledge gaps", stored);
         Ok(Ok(stored))
+    }
+
+    // ─── Phase 11: Session Memory Review ───────────────────────────────────
+
+    /// Review session summary memories and re-weight them based on continued engagement.
+    /// If a session's topic was followed up on (found in recent memories with matching realm/content),
+    /// boost its importance. If no follow-up found after a week, slightly reduce importance.
+    async fn review_session_memories(&self) -> anyhow::Result<usize> {
+        use crate::storage::qdrant::MemoryPoint;
+
+        let all = self.store.scroll_all_memories().await?;
+
+        // Find session summary memories (chunk_type = "session_summary")
+        let session_summaries: Vec<_> = all
+            .iter()
+            .filter(|m| m.chunk_type == "session_summary")
+            .collect();
+
+        if session_summaries.is_empty() {
+            return Ok(0);
+        }
+
+        let now = chrono::Utc::now().timestamp() as f64;
+        let mut reviewed = 0;
+
+        for mem in session_summaries {
+            let ingested_ts = chrono::DateTime::parse_from_rfc3339(&mem.ingested_at)
+                .map(|dt| dt.timestamp() as f64)
+                .unwrap_or(now);
+
+            let days_old = ((now - ingested_ts) / 86400.0).max(0.0);
+
+            let recent_cutoff = now - (7.0 * 86400.0);
+            let recent_memories: Vec<_> = all
+                .iter()
+                .filter(|m| {
+                    let mem_ts = chrono::DateTime::parse_from_rfc3339(&m.ingested_at)
+                        .map(|dt| dt.timestamp() as f64)
+                        .unwrap_or(0.0);
+                    mem_ts >= recent_cutoff && m.id != mem.id
+                })
+                .collect();
+
+            let has_followup = recent_memories.iter().any(|r| {
+                r.realm_name == mem.realm_name
+                    || r.content.contains(&mem.content[..mem.content.len().min(100)])
+            });
+
+            let current_importance = mem.importance;
+            let new_importance = if days_old > 7.0 && !has_followup {
+                (current_importance * 0.95).max(0.5)
+            } else if has_followup {
+                (current_importance * 1.1).min(3.0)
+            } else {
+                current_importance
+            };
+
+            if (new_importance - current_importance).abs() > 0.01 {
+                self.store
+                    .set_memory_importance(&mem.id, new_importance)
+                    .await?;
+                tracing::debug!(
+                    "  Session {} importance: {:.2} → {:.2}",
+                    &mem.id[..8],
+                    current_importance,
+                    new_importance
+                );
+                reviewed += 1;
+            }
+        }
+
+        tracing::info!("  Reviewed {} session memories", reviewed);
+        Ok(reviewed)
     }
 }
 

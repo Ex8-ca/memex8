@@ -166,6 +166,10 @@ fn api_routes() -> Router<Arc<AppState>> {
             "/inference/gaps/{id}/dismiss",
             axum::routing::post(crate::api::routes::inference::dismiss_gap),
         )
+        .route(
+            "/sessions/end",
+            axum::routing::post(crate::api::routes::session::session_end),
+        )
         .route("/health", axum::routing::get(health))
 }
 
