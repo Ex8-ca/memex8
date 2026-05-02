@@ -22,6 +22,15 @@ A self-hosted memory system that models how **human memory actually works**: mem
 
 ---
 
+<img width="1867" height="756" alt="image" src="https://github.com/user-attachments/assets/b6f58404-7e13-48c2-bbcc-aeee32b6a5c3" />
+
+
+<img width="1867" height="756" alt="image" src="https://github.com/user-attachments/assets/4e7a2029-e403-4409-ac29-8b03d0227e16" />
+
+
+<img width="1902" height="366" alt="image" src="https://github.com/user-attachments/assets/9862f523-2172-4ac6-90c2-031da43f2153" />
+
+
 ## Why This Exists
 
 Most AI memory systems treat every stored fact as equally important forever. That's not how memory works. memex8 models three real cognitive behaviors:
