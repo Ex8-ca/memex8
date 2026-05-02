@@ -277,12 +277,13 @@
 
         /* Graph view */
         #graph-container {
+            position: relative;
+            height: calc(100dvh - 120px);
+            min-height: 400px;
             width: 100%;
-            height: calc(100vh - 120px);
-            border-radius: 8px;
             overflow: hidden;
             border: 1px solid var(--border);
-            position: relative;
+            border-radius: 8px;
         }
 
         #graph-canvas {
@@ -1346,6 +1347,58 @@
                 gPanning = false;
                 gWasDragged = false;
                 document.getElementById('graph-tooltip').style.display = 'none';
+                drawGraph();
+            });
+
+            // ─── Touch interactions (mobile) ──────────────────────
+            canvas.addEventListener('touchstart', e => {
+                e.preventDefault();
+                const touch = e.touches[0];
+                const rect = canvas.getBoundingClientRect();
+                const sx = touch.clientX - rect.left;
+                const sy = touch.clientY - rect.top;
+                const hit = nodeAt(sx, sy);
+                if (hit) {
+                    gDrag = hit;
+                    gSelected = hit;
+                    gDragOffset = { x: sx, y: sy };
+                } else {
+                    gPanning = true;
+                    gPanStart = { x: touch.clientX - gTransform.x, y: touch.clientY - gTransform.y };
+                }
+                drawGraph();
+            }, { passive: false });
+
+            canvas.addEventListener('touchmove', e => {
+                e.preventDefault();
+                const touch = e.touches[0];
+                const rect = canvas.getBoundingClientRect();
+                const sx = touch.clientX - rect.left;
+                const sy = touch.clientY - rect.top;
+
+                if (gDrag) {
+                    const pos = screenToGraph(sx, sy);
+                    gDrag.x = pos.x;
+                    gDrag.y = pos.y;
+                    gDrag.vx = 0;
+                    gDrag.vy = 0;
+                    gWasDragged = true;
+                    drawGraph();
+                    return;
+                }
+
+                if (gPanning) {
+                    gTransform.x = touch.clientX - gPanStart.x;
+                    gTransform.y = touch.clientY - gPanStart.y;
+                    drawGraph();
+                    return;
+                }
+            }, { passive: false });
+
+            canvas.addEventListener('touchend', () => {
+                gDrag = null;
+                gPanning = false;
+                gWasDragged = false;
                 drawGraph();
             });
 
