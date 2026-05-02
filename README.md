@@ -1,190 +1,142 @@
-# memex8 — Self-Hosted AI Memory System
+# memex8 — Human-Like Memory for AI Agents
 
-> A Rust-based memory palace for AI agents. Ingest your notes, documents, and skills into organized knowledge realms. Powered by Qdrant vector storage, **slumber-based memory consolidation**, **human-like memory evolution** (decay, associations, spreading activation), auto-discovered semantic clusters, and real-time file watching.
+> **Personal project.** Shared because the ideas are worth discussing — not a product, no support commitments. Fork it, adapt it, use it at your own risk.
 
-[![Rust](https://img.shields.io/badge/Rust-1.94+-orange.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Qdrant](https://img.shields.io/badge/Qdrant-1.17-2296F3.svg)](https://qdrant.tech/)
-
-## Overview
-
-> **Personal project.** No guarantees, no SLA, no support commitments. Shared because I think the ideas are worth discussing. Use it, fork it, adapt it — at your own risk.
-
-**memex8** gives AI agents (OpenClaw, Hermes, pi.dev, Claude Code, Opencode, or any MCP-compatible agent) persistent, searchable memory. Instead of re-reading thousands of files on every session, agents query memex8 for relevant context — fast, semantic, and self-organizing.
+A self-hosted memory system that models how **human memory actually works**: memories fade over time, related ideas connect automatically, and scattered fragments consolidate into dense summaries.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    AI Agent (any MCP)                    │
-│   OpenClaw · Hermes · pi.dev · Claude Code · Opencode   │
-├─────────────────────────────────────────────────────────┤
-│  MCP/REST API                                            │
-│  ┌─────────┐ ┌──────────┐ ┌──────────┐ ┌─────────────┐ │
-│  │ search  │ │  store   │ │  recall  │ │   ingest    │ │
-│  └────┬────┘ └────┬─────┘ └────┬─────┘ └──────┬──────┘ │
-├───────┴───────────┴────────────┴──────────────┴────────┤
-│                      Engine                             │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐  │
-│  │ Embedder │ │ Chunker  │ │ Realms   │ │  Slumber  │  │
-│  │Ollama/Open│ │pulldown-c│ │Auto-clus.│ │Evolution  │  │
-│  └────┬─────┘ └──────────┘ └────┬─────┘ └─────┬─────┘  │
-│       │     File Watcher ◄────────────────────┘         │
-├───────┴─────────────────────────────────────────────────┤
-│                    Qdrant Storage                        │
-│  ┌──────────┐  ┌──────────┐                              │
-│  │ memories │  │  realms  │                              │
-│  │ (vector) │  │(centroid)│                              │
-│  └──────────┘  └──────────┘                              │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────┐     ┌──────────────────────┐     ┌──────────────────────┐
+│   AI Agent (Hermes)   │────▶│     memex8 Engine     │────▶│     Qdrant DB        │
+│   or any MCP client   │◀────│  decay + associations │◀────│  vector storage      │
+└──────────────────────┘     │  consolidation + SL   │     └──────────────────────┘
+                             └──────────────────────┘
+                                      │
+                                      ▼
+                             ┌──────────────────────┐
+                             │     Web UI Graph      │
+                             │  memory visualization │
+                             └──────────────────────┘
 ```
 
-## Features
-
-### Core
-- **Vector Memory** — Semantic search across all memories using embeddings
-- **Slumber-Based Memory Consolidation** — The system periodically "sleeps" and reviews its own memories through a 9-phase pipeline: deduplicate, compress, re-cluster, rename/merge realms, prune stale memories, LLM consolidation, index optimization, apply memory decay, and build semantic associations. Closer to how biological memory works than the typical "save → search → retrieve" pipeline.
-- **Human-Like Memory Evolution** — Memories age, strengthen, and connect over time:
-  - **Touch Layer** — Every search/recall auto-increments access count and importance (like rehearsal strengthening memory)
-  - **Memory Decay** — Untouched memories slowly lose importance via a forgetting curve (default: 0.001/day, floor at 0.05). Frequently used memories stay strong.
-  - **Memory Associations** — During slumber, each memory links to its 5 nearest neighbors by vector similarity, creating a semantic knowledge graph (configurable top-K, min 0.60 strength).
-  - **Spreading Activation** — When a memory is recalled, its associated memories get a small importance bump too (default: 0.005). "Related things come to mind."
-- **Auto-Discovered Realms** — Memories self-organize into knowledge clusters via cosine similarity; realms auto-split via k-means when they grow too large
-- **File Watching** — Real-time directory monitoring with `notify`; debounced at 500ms, SHA-256 dedup, auto-reingest on change, persistent watch configs
-- **Master Digest (`memex8.md`)** — Slumber writes a dated digest log to `~/.memex8/memex8.md` summarizing what was worked on each session, realm overview, and top memories by importance
-- **Augment, Don't Replace** — Writes `MEMEX8.md` back to project directories for model context pickup
-- **Experimental: ScalarQuant Compression** — Adaptive scalar vector quantization inspired by [arXiv:2504.19874](https://arxiv.org/abs/2504.19874). Code exists but is not yet production-ready — results vary at higher dimensions.
-
-### Embedding & Consolidation Flexibility
-- **Embeddings — Cloud first** — OpenAI `text-embedding-3-small` (1536d), fast and accurate
-- **Embeddings — Local fallback** — Ollama with `nomic-embed-text` (768d), zero cost, fully private
-- **Slumber Consolidation — Cloud** — OpenAI `gpt-4o-mini` (default, cheap, no local GPU needed)
-- **Slumber Consolidation — Local** — Any OpenAI-compatible endpoint (Ollama, Text Generation Inference, etc.) for fully private consolidation
-- **Pluggable** — Trait-based design, add any embedding or LLM provider
-
-### Integrations
-- **Hermes Agent** — Native memory provider plugin (replaces built-in `MEMORY.md`). This is the primary integration — the plugin handles memory calls in-process so the agent doesn't make unnecessary tool calls. Memory is just *there* when needed.
-- **MCP Server** — JSON-RPC 2.0 over stdio, works with any MCP-compatible agent (Claude Code, Opencode, etc.). Available but the plugin path is preferred for Hermes.
-- **REST API** — Full CRUD + search with authentication, tag filtering, and pagination
-- **OpenClaw** — Webhook hooks for auto-ingesting conversation summaries
-- **pi.dev** — TypeScript extension for the pi coding agent
+**[⭐ Star on GitHub](https://github.com/Ex8-ca/memex8) · [Source (GitLab)](https://gitlab.chillygeek.com/marcus2004/memex8) · [Report Issue](https://github.com/Ex8-ca/memex8/issues)**
 
 ---
 
-## Quick Start: Get memex8 Running
+## Why This Exists
+
+Most AI memory systems treat every stored fact as equally important forever. That's not how memory works. memex8 models three real cognitive behaviors:
+
+1. **You forget things** — untouch memories slowly decay
+2. **Related things connect** — semantic associations form automatically
+3. **Fragments become summaries** — raw conversations consolidate into clean memories
+
+The result: an AI agent that remembers what matters, forgets what doesn't, and connects related ideas without manual tagging.
+
+---
+
+## Key Features
+
+### 🧠 Memory Evolution (What Makes This Different)
+
+| Feature | What It Does | Configurable |
+|---------|-------------|--------------|
+| **Memory Decay** | Untouched memories lose importance over time (forgetting curve). Floor at 0.05 — nothing is ever fully deleted | Decay rate: 0.001/day |
+| **Semantic Associations** | During nightly "slumber", each memory links to its 5 nearest neighbors by vector similarity | Top-K: 5, Min strength: 0.6 |
+| **Spreading Activation** | Recalling a memory bumps its associated memories too (0.005). Like how "Tesla" primes "Skar speakers" | Activation bump: 0.005 |
+| **Consolidation** | Raw conversation fragments merge into dense summaries. 98 scattered snippets → 5 clean summaries | Trigger: cron or API |
+
+### 🔧 Core
+
+- **Rust binary** with embedded web UI — single deployable artifact
+- **Qdrant** for vector storage and semantic search
+- **Auto-discovered realms** — memories self-organize into knowledge clusters
+- **File watching** — real-time directory monitoring, auto-reingest on change
+- **3D force-directed graph** — interactive visualization of memory associations
+- **MCP server** — works with Claude Code, Opencode, and any MCP-compatible agent
+- **REST API** — full CRUD + search with auth and pagination
+
+### 🔌 Embedding Providers
+
+| Provider | Model | Dimensions | Notes |
+|----------|-------|------------|-------|
+| **OpenAI** | `text-embedding-3-small` | 1536 | Fast, accurate, cloud-based |
+| **Ollama** | `nomic-embed-text` | 768 | Fully local, zero cost, sovereign |
+
+### 💤 Slumber Consolidation
+
+Nightly "sleep" pipeline (9 phases): deduplicate → compress → re-cluster → rename/merge realms → prune stale → **LLM consolidation** → index optimization → apply decay → build associations.
+
+| Backend | Model | Notes |
+|---------|-------|-------|
+| **OpenAI** | `gpt-4o-mini` | Default, cheap, no GPU needed |
+| **Local** | Any OpenAI-compatible endpoint | Fully private consolidation |
+
+---
+
+## Quick Start
 
 ### Prerequisites
-- [Docker & Docker Compose](https://docs.docker.com/compose/install/)
-- An [OpenAI API key](https://platform.openai.com/api-keys) *(or use Ollama for local embeddings)*
 
-### 1. Clone and configure
+- Docker & Docker Compose
+- OpenAI API key *(or Ollama for fully local embeddings)*
+
+### 1. Clone
+
 ```bash
-git clone https://gitlab.chillygeek.com/marcus2004/memex8.git
+git clone https://github.com/Ex8-ca/memex8.git
 cd memex8
-cp .env.example .env  # only needed for local binary runs (optional)
 ```
 
-### 2. Configure the API key
+### 2. Configure
 
-All runtime config comes from **`~/.hermes/.env`** (the same file Hermes Agent uses):
-
-```bash
-nano ~/.hermes/.env
-```
-
-Add or update these values:
+Add to `~/.hermes/.env`:
 
 ```bash
-MEMEX8_API_KEY=your-key-here
+MEMEX8_API_KEY=your-secret-key
 MEMEX8_BASE_URL=http://localhost:8080
-OPENAI_API_KEY=your-openai-key-here
+OPENAI_API_KEY=sk-...          # for OpenAI embeddings
+# EMBEDDING_PROVIDER=ollama    # optional: use local embeddings
 ```
 
-> **Security**: Change `MEMEX8_API_KEY` from the default `memex8-dev-key` to a random string.
+### 3. Run
 
-### 2. Start everything
 ```bash
 docker compose up -d
 ```
 
-That's it. memex8 + Qdrant are running.
+### 4. Verify
 
-> **Using local embeddings?** Add `--profile local-embeddings` to start Ollama:
-> ```bash
-> docker compose --profile local-embeddings up -d
-> ```
-
-### 3. Verify it's working
 ```bash
-# Check services
-docker compose ps
-
-# Health check
 curl http://localhost:8080/health
-# Expected: {"status":"healthy"}
+# {"status":"healthy"}
 ```
 
-### 4. (Optional) Build the local CLI binary
+### 5. Open the Web UI
 
-Requires [Rust](https://rustup.rs/). Used for file watching, ingesting files, and diagnostics.
-
-```bash
-cd memex8
-cargo build --release
-# Binary at: ./target/release/memex8
-
-# Run diagnostics
-cargo run --release -- doctor
-```
-
-### 5. Open the web UI
 ```
 http://localhost:8080
 ```
 
-The API key from `~/.hermes/.env` is automatically injected — no login needed.
+The API key is auto-injected from `.env` — no login needed.
 
-### Web UI features
-
-- **Cards view** — Browse memories by importance with upvote and delete buttons
-- **Search** — Semantic search across all memories
-- **3D Graph** — Interactive force-directed knowledge graph with realm coloring
-- **Realms** — Filter memories by knowledge realm
-- **Memory detail modal** — Click any card to view full content, then delete directly from the modal
-- **Delete** — Each card has a 🗑 Delete button; clicking it shows a confirmation dialog before permanently removing the memory
+**Web UI features:** Cards view, semantic search, interactive 3D graph, realm filtering, memory detail modal with delete.
 
 ---
 
 ## Hermes Agent Integration
 
-The deepest integration — memex8 replaces Hermes' built-in memory system entirely.
+This is the primary use case — memex8 replaces Hermes' built-in memory system entirely.
 
-### Step 1: Install the plugin
-
-Copy the plugin to your Hermes plugins directory:
+### Install the Plugin
 
 ```bash
 mkdir -p ~/.hermes/plugins
 cp -r ~/memex8/plugins/memex8 ~/.hermes/plugins/
 ```
 
-Verify it's in place:
-```bash
-ls ~/.hermes/plugins/memex8/__init__.py
-```
+### Configure
 
-### Step 2: Set environment variables
-
-The memex8 plugin needs to know how to reach your memex8 server. Add these to your `~/.hermes/.env` (or create the file if it doesn't exist):
-
-```bash
-MEMEX8_API_KEY=your-key-here
-MEMEX8_BASE_URL=http://localhost:8080
-```
-
-> **Important**: Use the **same `MEMEX8_API_KEY`** that you set in `~/.hermes/.env`. The Docker container reads this file directly at startup.
-
-### Step 3: Activate the plugin
-
-Edit `~/.hermes/config.yaml`:
+Add to `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
@@ -192,240 +144,53 @@ memory:
   memory_enabled: true
 ```
 
-### Step 4: Reference memex8.md from your SOUL.md
-
-Add this to the end of your agent's `SOUL.md`:
-
-```markdown
-## Memory
-
-This agent uses **memex8** for persistent memory. See `memex8.md` in the
-same directory for:
-- How to use memex8 (search, remember, recall, forget)
-- Daily slumber digests (dates, summaries of what was worked on)
-- Top memories by importance
-
-Read `memex8.md` before each session for wake-up context.
-```
-
-> **Note**: The `memex8.md` file is auto-generated by slumber and lives in
-> `~/.memex8/memex8.md` (or your configured `digest_md.path`).
-
-### Step 5: Restart Hermes
-
-New sessions will use memex8 for all memory operations.
-
-### What happens automatically
+### What Happens Automatically
 
 | Trigger | Action |
 |---------|--------|
-| Before each turn | Background recall of relevant memories → injected as context |
-| After each turn | Conversation facts stored as searchable memories |
-| Trivial messages | Skipped — "ok", "thanks", etc. are not stored |
-| Session ends | Full conversation summary sent to memex8 via webhook |
-| Built-in `memory` tool | Writes are mirrored to memex8 as well |
+| Before each turn | Background recall → injected as context |
+| After each turn | Conversation facts stored as memories |
+| Session ends | Full conversation summary sent via webhook |
+| Trivial messages | Skipped ("ok", "thanks" aren't stored) |
 
-### Available tools
+### Available MCP Tools
 
-| Tool | Description |
-|------|-------------|
-| `memex8_search` | Semantic search across all memories |
-| `memex8_remember` | Store a new memory fact |
-| `memex8_recall` | Get high-importance memories (wakeup context) |
-| `memex8_realms` | List all knowledge realms |
-| `memex8_forget` | Delete a memory by ID |
-| `memex8_get` | Get a specific memory by ID |
-
----
-
-## Other Integrations
-
-### MCP Server (stdio)
-
-For any MCP-compatible agent (Claude Code, Opencode, etc.):
-
-```bash
-# Start the MCP server
-memex8 mcp
-# Or via config:
-memex8 integration hermes  # outputs config to paste into agent config
-```
-
-### REST API
-
-```bash
-# Search
-curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "how to deploy", "limit": 5}' \
-  http://localhost:8080/api/v1/memories/search
-
-# Store
-curl -X POST -H "Authorization: Bearer $MEMEX8_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"content": "# Deployment\nUse docker compose..."}' \
-  http://localhost:8080/api/v1/memories
-```
-
-Full REST API docs: [see below](#rest-api-reference)
-
-### OpenClaw (Webhooks)
-
-```bash
-memex8 integration openclaw
-# Copy output → paste into OpenClaw config → restart
-```
-
-### pi.dev
-
-```bash
-docker compose exec memex8 memex8 integration pi > ~/.pi/agent/extensions/memex8.ts
-```
-
----
-
-## File Watching
-
-memex8 can watch directories for changes and automatically re-ingest modified files. Powered by the `notify` crate, it debounces events at 500ms and uses SHA-256 comparison to skip unchanged files.
-
-```bash
-# Add a directory to watch
-memex8 watch add /home/user/projects
-
-# With options
-memex8 watch add /home/user/notes --chunk-by file --realm-hint personal
-
-# List active watches
-memex8 watch list
-
-# Remove a watch
-memex8 watch remove /home/user/notes
-
-# Ingest + watch in one command
-memex8 ingest /home/user/docs --watch
-```
-
-**How it works:**
-
-1. On add, memex8 scans all `.md` files and records SHA-256 hashes
-2. The `notify` crate watches for filesystem events (recursive)
-3. Events are debounced at 500ms — rapid saves don't trigger multiple ingests
-4. Before re-ingesting, the file is re-hashed; unchanged files are skipped
-5. Watch configs persist to `config.toml` automatically
-6. In `memex8 daemon` mode, all configured watchers start automatically
-
-**Watched directories stay in sync:** edit a file → memex8 detects the change → re-chunks, re-embeds, updates memory — no manual `memex8 ingest` needed.
-
----
-
-## Configuration
-
-### Environment variables (`~/.hermes/.env`)
-
-| Variable | Purpose | Default |
-|----------|---------|---------|
-| `MEMEX8_BASE_URL` | memex8 REST API URL | `http://localhost:8080` |
-| `MEMEX8_API_KEY` | Auth token for REST/MCP and web UI | *(none — required for production)* |
-| `OPENAI_API_KEY` | OpenAI embeddings API key | *(empty)* |
-| `EMBEDDING_PROVIDER` | `openai` or `ollama` | `openai` |
-| `EMBEDDING_MODEL` | Model name | `text-embedding-3-small` |
-| `EMBEDDING_DIMENSIONS` | Vector dimension | `1536` |
-| `QDRANT_URL` | Qdrant connection | `http://qdrant:6334` |
-
-See [`.env.example`](.env.example) for the full template.
-
-### TOML config (`config.toml`)
-
-See [`config.example.toml`](config.example.toml) for all options. Key settings:
-
-```toml
-[embedding]
-provider = "openai"          # or "ollama"
-model = "text-embedding-3-small"
-dimensions = 1536
-
-[embedding.openai]
-api_key_env = "OPENAI_API_KEY"
-
-[slumber]
-idle_timeout = "10m"
-quantize_bit_width = 3.5     # ScalarQuant bit-width (2.5-4)
-auto_archive_days = 90
-
-# Slumber consolidation (Phase 6): runs on schedule (default: daily at 3am)
-# backend: "openai" (default, uses OPENAI_API_KEY + gpt-4o-mini)
-#          "local" (uses LOCAL_LLM_URL + LOCAL_LLM_API_KEY)
-[slumber.consolidation]
-backend = "openai"
-model = "gpt-4o-mini"        # openai model name, or local model name
-```
-
-Watch configs are added automatically via `memex8 watch add`.
+`memex8_search` · `memex8_remember` · `memex8_recall` · `memex8_realms` · `memex8_forget` · `memex8_get`
 
 ---
 
 ## CLI Reference
 
 ```bash
-$ memex8 --help
-Self-hosted AI memory system with Qdrant and slumber consolidation
-
-Commands:
-  init           Interactive setup wizard
-  config-show    Show current configuration
-  ingest         Ingest a .md file or directory
-  watch          Manage persistent file watchers (add, list, remove)
-  search         Semantic search across all memories
-  get            Get a specific memory by ID
-  recall         Get highest-importance memories (wakeup context)
-  realms         Manage knowledge realms (list, create, show, merge, split)
-  upvote         Upvote a memory (increase importance)
-  prune          Show prune review queue
-  archive        Archive a memory
-  delete         Permanently delete a memory
-  edit           Edit a memory in $EDITOR
-  slumber        Slumber management (status, trigger, pause, resume)
-  serve          Start REST API + WebSocket server
-  mcp            Start MCP server (stdio or SSE transport)
-  daemon         Start background daemon (cron + idle scheduler + file watchers)
-  integration    Generate integration configuration
-  stats          Show system statistics
-  export         Export all memories as JSON
-  import         Import memories from JSON
-  doctor         Diagnose connectivity issues
+memex8 init          # Interactive setup wizard
+memex8 ingest ./docs # Ingest files or directories
+memex8 watch add .   # Persistent file watcher
+memex8 search "query" # Semantic search
+memex8 recall        # Wakeup context (top memories)
+memex8 slumber status # Slumber status
+memex8 slumber trigger # Run maintenance now
+memex8 doctor        # Diagnose issues
+memex8 serve         # Start REST API server
+memex8 mcp           # Start MCP server
+memex8 stats         # System statistics
 ```
 
 ---
 
-## REST API Reference
-
-The REST API runs on `http://localhost:8080` by default. All endpoints except `/health` require Bearer token authentication when `MEMEX8_API_KEY` is set.
+## REST API
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/v1/memories` | Store a new memory |
-| `POST` | `/api/v1/memories/search` | Search with optional tags, pagination |
-| `GET`  | `/api/v1/memories/recall` | Get high-importance memories |
-| `POST` | `/api/v1/memories/ingest` | Ingest file or directory |
-| `GET`  | `/api/v1/memories/tags` | Get tag suggestions |
+| `POST` | `/api/v1/memories/search` | Semantic search |
+| `GET`  | `/api/v1/memories/recall` | Top memories |
 | `GET`  | `/api/v1/memories/{id}` | Get memory by ID |
-| `POST` | `/api/v1/memories/{id}/upvote` | Upvote a memory |
-| `POST` | `/api/v1/memories/{id}/archive` | Archive a memory |
-| `DELETE` | `/api/v1/memories/{id}` | Delete a memory |
-| `GET`  | `/api/v1/realms` | List all realms |
-| `POST` | `/api/v1/realms` | Create a realm |
-| `GET`  | `/api/v1/realms/{name}` | Show realm details |
-| `GET`  | `/api/v1/slumber/status` | Slumber status |
+| `DELETE` | `/api/v1/memories/{id}` | Delete memory |
+| `GET`  | `/api/v1/realms` | List realms |
 | `POST` | `/api/v1/slumber/trigger` | Trigger slumber |
-| `GET`  | `/api/v1/stats` | System statistics |
 | `GET`  | `/api/v1/health` | Health check (no auth) |
 
-### Authentication
-```bash
-curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
-  http://localhost:8080/api/v1/memories/search \
-  -d '{"query": "async Rust"}'
-```
+All endpoints (except `/health`) require `Authorization: Bearer ***`.
 
 ---
 
@@ -434,143 +199,49 @@ curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
 ```
 memex8/
 ├── src/
-│   ├── main.rs              # CLI entry point (clap)
-│   ├── config.rs            # TOML configuration
-│   ├── lib.rs               # Library exports
-│   ├── api/                 # REST API (Axum 0.8)
-│   │   ├── server.rs        # HTTP server setup + auth
-│   │   ├── auth.rs          # Bearer token middleware
-│   │   ├── error.rs         # Error handling
-│   │   └── routes/          # Route handlers
-│   ├── mcp/                 # MCP server (JSON-RPC 2.0)
-│   │   ├── server.rs        # Stdio transport + tool dispatch
-│   │   └── tools.rs         # Tool definitions (11 tools)
-│   ├── engine/              # Core logic
-│   │   ├── mod.rs           # Engine orchestrator
-│   │   ├── embedder.rs      # Embedding abstraction
-│   │   ├── chunker.rs       # AST-based markdown chunking (pulldown-cmark)
-│   │   ├── ingester.rs      # File/directory ingestion
-│   │   ├── watcher.rs       # File watcher (notify crate, SHA-256 dedup)
-│   │   ├── realms.rs        # Realm management
-│   │   ├── slumber.rs       # Background maintenance pipeline
-│   │   ├── scheduler.rs     # Cron + idle trigger daemon
-│   │   ├── quantizer.rs     # ScalarQuant compression *(experimental)*
-│   │   ├── compressor.rs    # LLM-based summarization for slumber consolidation
-│   │   ├── search.rs        # Search orchestration
-│   │   ├── graph.rs         # Knowledge graph
-│   │   ├── doctor.rs        # Diagnostics
-│   │   ├── memex8_md.rs     # MEMEX8.md write-back
-│   │   └── providers/       # Embedding backends
-│   │       ├── ollama.rs    # Ollama API client
-│   │       └── openai.rs    # OpenAI API client
-│   ├── storage/             # Qdrant integration
-│   │   ├── mod.rs           # Module exports
-│   │   ├── qdrant.rs        # Qdrant client wrapper (full CRUD)
-│   │   └── migrations.rs    # Collection setup
-│   ├── integrations/        # Integration generators
-│   │   ├── openclaw.rs      # OpenClaw webhook config
-│   │   ├── hermes.rs        # Hermes MCP config
-│   │   └── pi.rs            # pi.dev extension
-│   └── web/                 # Web UI (cards, 3D graph, search, upvote)
-├── plugins/memex8/          # Hermes memory provider plugin
-│   ├── __init__.py          # MemoryProvider ABC implementation
-│   ├── plugin.yaml          # Plugin metadata
-│   └── README.md            # Plugin setup docs
-├── web-dist/                # Web UI static assets (embedded in binary)
-├── docker-compose.yml       # Qdrant + memex8 (+ optional Ollama)
-├── Dockerfile               # Multi-stage Rust build
-├── Cargo.toml
-├── config.example.toml
-└── .env.example
+│   ├── api/          # REST API (Axum)
+│   ├── engine/       # Core logic (embedder, chunker, slumber, realms)
+│   ├── storage/      # Qdrant integration
+│   ├── mcp/          # MCP server (JSON-RPC 2.0)
+│   └── web/          # Embedded web UI
+├── plugins/memex8/   # Hermes plugin
+├── docker-compose.yml
+├── Dockerfile        # Multi-stage Rust build
+└── config.example.toml
 ```
-
-## How It Works
 
 ### Ingestion Pipeline
+
 ```
 .md file → Chunker (pulldown-cmark AST) → Embedder (OpenAI/Ollama) →
-Realm Assignment (cosine similarity vs centroids) → Qdrant Store
+Realm Assignment (cosine similarity) → Qdrant Store
 ```
 
-### File Watcher Pipeline
-```
-Directory watch (notify crate) → File modified event →
-500ms debounce → SHA-256 hash compare → (skip if unchanged) →
-Re-chunk → Re-embed → Auto-realm → Update in Qdrant
-```
+### Slumber Pipeline (9 Phases)
 
-### Chunker Strategies
-- **section** (default) — Split at H2 headings, preserve code blocks/tables
-- **h1** — Split at H1 only (larger chunks)
-- **h3** — Split at H3 (smaller chunks)
-- **paragraph** — Split at paragraph boundaries
-- **file** — One chunk per file
-
-### Search Pipeline
 ```
-Query → Embedder → Qdrant Vector Search → Rank by Score → Filter by tags/realm → Paginate → Results
+Trigger → Deduplicate → Compress → Re-cluster → Rename/Merge →
+Prune Stale → LLM Consolidation → Index Optimization → Decay → Associations
 ```
-
-### Recall Pipeline
-```
-All Memories → Score(importance × recency × access_count) → Sort → Top N → Results
-```
-
-### Slumber Mode (Background Maintenance)
-```
-Trigger (idle timeout / cron) →
-  1. Deduplicate (hash-based, keep highest importance)
-  2. **LLM Memory Consolidation** — Groups memories by realm, sends batches to OpenAI for summarization, merges fragmented conversation summaries into clean, dense memories
-  3. Recompute realm centroids from actual memory vectors
-  4. Split large realms via k-means (k=2)
-  5. Prune flagging (age × importance × access scoring)
-  6. Update MEMEX8.md files per directory
-  7. Write master memex8.md digest (slumber log + realm overview)
-```
-
-### ScalarQuant Compression *(Experimental)*
-
-Based on [arXiv:2504.19874](https://arxiv.org/abs/2504.19874): random orthogonal rotation + Lloyd-Max scalar quantization on the induced Beta distribution.
-
-> ⚠️ **Not production-ready.** The code exists in `src/engine/quantizer.rs` and is called during slumber, but results are inconsistent at higher embedding dimensions. We pulled TurboQuant integration after it proved unreliable. If you have experience with vector quantization that actually works in practice, we'd love your input.
-
-| Bits | Cosine (768d) | MSE | Packed Size | Compression |
-|------|---------------|-----|-------------|-------------|
-| 2.0 | 0.79 | 0.0005 | 192 B | 14.5x |
-| 2.5 | 0.81 | 0.0005 | 288 B | 10.0x |
-| 3.0 | 0.81 | 0.0005 | 288 B | 10.0x |
-| 3.5 | 0.90 | 0.0003 | 384 B | 7.6x |
-| 4.0 | 0.93 | 0.0002 | 384 B | 7.6x |
 
 ---
 
 ## Troubleshooting
 
-### "Connection refused"
-memex8 isn't running:
+**Container won't start:**
 ```bash
-cd ~/memex8 && docker compose ps
 docker compose logs memex8
 ```
 
-### "Unauthorized"
-Check your API key:
+**Unauthorized errors:**
 ```bash
-curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
-  http://localhost:8080/health
+curl -H "Authorization: Bearer $MEMEX8_API_KEY" http://localhost:8080/health
 ```
 
-### Plugin not found
-```bash
-ls ~/.hermes/plugins/memex8/__init__.py
-# Should exist. If not:
-cp -r /path/to/memex8/plugins/memex8 ~/.hermes/plugins/
-```
-
-### Memories not being recalled
+**No memories showing up:**
 ```bash
 memex8 stats
-memex8 search "your query"
+memex8 search "test"
 ```
 
 ---
@@ -581,15 +252,6 @@ MIT
 
 ## Contributing
 
-This is a personal project shared for reference. No guarantees, no SLA, no support commitments. If you find it useful, fork it, adapt it, or build on the ideas.
+Personal project shared for reference. No guarantees, no SLA, no support. Fork it, adapt it, build on the ideas.
 
-See [TODO.md](TODO.md) and [PLAN.md](PLAN.md) for the current roadmap.
-
-## Roadmap / Planned Features
-
-- [ ] **Ollama embeddings** — Use local Ollama (e.g. `nomic-embed-text`) instead of OpenAI for embeddings. Reduces cost and keeps data local.
-- [ ] **LLM consolidation via Ollama** — Run Phase 6 memory consolidation (summarize fragmented memories) using a local LLM instead of OpenAI.
-- [ ] **Memory pruning scheduler** — Auto-prune memories below importance threshold after N days of inactivity.
-- [ ] **Realm merge UI** — Web interface to manually merge two realms together.
-- [ ] **Import/export** — JSON backup/restore of all memories and realms for migration between instances.
-- [ ] **Upsert / edit in place** — Update an existing memory's content without creating a duplicate.
+See [TODO.md](TODO.md) and [PLAN.md](PLAN.md) for the roadmap.
