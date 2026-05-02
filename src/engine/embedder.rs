@@ -11,6 +11,8 @@ pub trait Embedder: Send + Sync {
 }
 
 pub fn create_embedder(config: &AppConfig) -> anyhow::Result<Box<dyn Embedder>> {
+    let dims = config.embedding.dimensions;
+
     match config.embedding.provider.as_str() {
         "ollama" => Ok(Box::new(OllamaEmbedder::new(
             &config.embedding.ollama.url,

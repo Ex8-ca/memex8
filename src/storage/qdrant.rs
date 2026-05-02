@@ -1254,10 +1254,11 @@ impl QdrantStore {
 
         let resp = self
             .client
-            .search_points(
-                SearchPointsBuilder::new(GAPS, vec![0.0f32; 768], 100)
+            .scroll(
+                ScrollPointsBuilder::new(GAPS)
                     .with_payload(true)
                     .with_vectors(false)
+                    .limit(100)
                     .filter(filter)
             )
             .await?;

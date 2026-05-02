@@ -95,17 +95,17 @@ pub async fn suggest(
 /// POST /api/v1/inference/gaps/{id}/resolve — Mark a gap as resolved.
 pub async fn resolve_gap(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    Path(id): Path<(String,)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    state.engine.resolve_gap(&id).await?;
+    state.engine.resolve_gap(&id.0).await?;
     Ok(Json(serde_json::json!({ "status": "resolved", "id": id })))
 }
 
 /// POST /api/v1/inference/gaps/{id}/dismiss — Dismiss a gap (mark as dismissed).
 pub async fn dismiss_gap(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    Path(id): Path<(String,)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    state.engine.dismiss_gap(&id).await?;
+    state.engine.dismiss_gap(&id.0).await?;
     Ok(Json(serde_json::json!({ "status": "dismissed", "id": id })))
 }
