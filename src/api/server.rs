@@ -150,6 +150,22 @@ fn api_routes() -> Router<Arc<AppState>> {
             "/webhooks/skill",
             axum::routing::post(crate::api::routes::webhook::skill_executed),
         )
+        .route(
+            "/inference/suggest",
+            axum::routing::post(crate::api::routes::inference::suggest),
+        )
+        .route(
+            "/inference/gaps",
+            axum::routing::get(crate::api::routes::inference::list_gaps),
+        )
+        .route(
+            "/inference/gaps/{id}/resolve",
+            axum::routing::post(crate::api::routes::inference::resolve_gap),
+        )
+        .route(
+            "/inference/gaps/{id}/dismiss",
+            axum::routing::post(crate::api::routes::inference::dismiss_gap),
+        )
         .route("/health", axum::routing::get(health))
 }
 

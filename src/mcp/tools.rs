@@ -110,6 +110,18 @@ pub fn list_tools() -> Vec<serde_json::Value> {
                 "required": ["entity"]
             }),
         ),
+        tool(
+            "memex8_infer",
+            "Given context about a topic, infer related gaps and suggest follow-up actions",
+            json!({
+                "type": "object",
+                "properties": {
+                    "topic": { "type": "string", "description": "Topic to analyze for gaps" },
+                    "memory_id": { "type": "string", "description": "Or a specific memory ID to analyze" },
+                    "limit": { "type": "number", "description": "Max suggestions (default 5)" }
+                }
+            }),
+        ),
     ]
 }
 

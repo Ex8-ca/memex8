@@ -189,6 +189,29 @@ enum Commands {
 
     /// Diagnose connectivity issues
     Doctor,
+
+    /// Proactive inference — analyze topics or memories for knowledge gaps
+    Infer {
+        /// Topic to analyze for gaps
+        #[arg(long)]
+        topic: Option<String>,
+
+        /// Memory ID to analyze
+        #[arg(long)]
+        memory_id: Option<String>,
+
+        /// Resolve a gap by ID
+        #[arg(long)]
+        resolve: Option<String>,
+
+        /// Dismiss a gap by ID
+        #[arg(long)]
+        dismiss: Option<String>,
+
+        /// Maximum suggestions to return
+        #[arg(long, default_value = "5")]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -576,6 +599,43 @@ async fn main() -> anyhow::Result<()> {
         Commands::Doctor => {
             println!("🩺 memex8 doctor — running diagnostics...\n");
             engine::doctor::run(&config).await?;
+        }
+        Commands::Infer {
+            topic,
+            memory_id,
+            resolve,
+            dismiss,
+            limit,
+        } => {
+            let engine = engine::Engine::new(config).await?;
+
+            if let Some(gap_id) = resolve {
+                engine.resolve_gap(&gap_id).await?;
+                println!("✅ Gap resolved: {}", gap_id);
+            } else if let Some(gap_id) = dismiss {
+                engine.dismiss_gap(&gap_id).await?;
+                println!("✅ Gap dismissed: {}", gap_id);
+            } else {
+                let suggestions = engine
+                    .infer_gaps(topic.as_deref(), memory_id.as_deref(), limit)
+                    .await?;
+
+                if suggestions.is_empty() {
+                    println!("No gap suggestions found.");
+                } else {
+                    println!("💡 Gap suggestions ({}):\n", suggestions.len());
+                    for (i, s) in suggestions.iter().enumerate() {
+                        println!("{}. [{}] {}", i + 1, s.gap_type, s.suggested_topic);
+                        println!("   Confidence: {:.2} | Importance: {:.2}", s.confidence, s.importance);
+                        println!("   {}", s.description);
+                        if !s.suggested_search_queries.is_empty() {
+                            println!("   Try searching: {}", s.suggested_search_queries.join(", "));
+                        }
+                        println!("   Gap ID: {}", s.id);
+                        println!();
+                    }
+                }
+            }
         }
     }
 

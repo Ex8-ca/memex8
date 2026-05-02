@@ -1,3 +1,4 @@
+pub mod inference;
 pub mod memories;
 pub mod realms;
 pub mod slumber;

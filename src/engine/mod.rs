@@ -1029,6 +1029,111 @@ impl Engine {
     pub fn store(&self) -> &QdrantStore {
         &self.store
     }
+
+    /// List all gaps, optionally filtered by status.
+    pub async fn list_gaps(
+        &self,
+        status: Option<&str>,
+    ) -> anyhow::Result<Vec<crate::storage::qdrant::GapPoint>> {
+        self.store.list_gaps(status).await
+    }
+
+    /// Resolve a gap (mark as resolved).
+    pub async fn resolve_gap(&self, gap_id: &str) -> anyhow::Result<()> {
+        self.store.update_gap_status(gap_id, "resolved").await
+    }
+
+    /// Dismiss a gap (mark as dismissed).
+    pub async fn dismiss_gap(&self, gap_id: &str) -> anyhow::Result<()> {
+        self.store.update_gap_status(gap_id, "dismissed").await
+    }
+
+    /// Infer gaps and suggestions based on a topic or memory_id.
+    ///
+    /// If `topic` is provided, searches for memories matching that topic and
+    /// returns gap suggestions based on the related cluster. If `memory_id` is
+    /// provided, analyzes that specific memory for gaps. If neither is provided,
+    /// returns general top gaps.
+    pub async fn infer_gaps(
+        &self,
+        topic: Option<&str>,
+        memory_id: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<crate::api::routes::inference::GapSuggestion>> {
+        use crate::api::routes::inference::GapSuggestion;
+
+        // If a specific memory_id is given, use its realm/cluster context
+        let target_cluster_id = if let Some(mem_id) = memory_id {
+            let mem = self.get_memory(mem_id).await?;
+            mem.topic_clusters.first().cloned()
+        } else if let Some(t) = topic {
+            // Search for memories matching the topic and find the most relevant cluster
+            let _results = self
+                .search(t, None, None, 5, 0, 0.3)
+                .await?;
+            // Collect all memories and their topic clusters
+            let all_memories = self.store.scroll_all_memories().await?;
+            let mut cluster_memories: std::collections::HashMap<String, Vec<&crate::storage::qdrant::MemoryPoint>> =
+                std::collections::HashMap::new();
+            for mem in &all_memories {
+                for cluster_id in &mem.topic_clusters {
+                    cluster_memories
+                        .entry(cluster_id.clone())
+                        .or_default()
+                        .push(mem);
+                }
+            }
+            // Find cluster with most topic-keyword matches
+            let topic_lower = t.to_lowercase();
+            let mut best_cluster: Option<String> = None;
+            let mut best_score = 0usize;
+            for (cid, mems) in &cluster_memories {
+                let score: usize = mems
+                    .iter()
+                    .filter(|m| m.content.to_lowercase().contains(&topic_lower))
+                    .count();
+                if score > best_score {
+                    best_score = score;
+                    best_cluster = Some(cid.clone());
+                }
+            }
+            best_cluster
+        } else {
+            None
+        };
+
+        // Fetch all open gaps
+        let all_gaps = self.store.list_gaps(Some("open")).await?;
+
+        // Filter/sort gaps by relevance
+        let mut suggestions: Vec<GapSuggestion> = all_gaps
+            .into_iter()
+            .filter(|g| {
+                if let Some(ref tc) = target_cluster_id {
+                    g.cluster_id == *tc || g.related_memory_ids.iter().any(|id| id == tc)
+                } else {
+                    true
+                }
+            })
+            .map(|g| GapSuggestion {
+                id: g.id,
+                gap_type: g.gap_type,
+                suggested_topic: g.suggested_topic,
+                description: g.description,
+                confidence: g.importance,
+                related_memory_ids: g.related_memory_ids,
+                suggested_search_queries: g.suggested_search_queries,
+                importance: g.importance,
+                created_at: g.created_at,
+            })
+            .collect();
+
+        // Sort by importance (confidence) descending
+        suggestions.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        suggestions.truncate(limit);
+
+        Ok(suggestions)
+    }
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {

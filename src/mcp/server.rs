@@ -237,6 +237,19 @@ async fn handle_tool_call(
             let results = engine.graph_search(entity, relationship, depth).await?;
             Ok(json!({ "results": results }))
         }
+        "memex8_infer" => {
+            let topic = arguments.get("topic").and_then(|v| v.as_str());
+            let memory_id = arguments.get("memory_id").and_then(|v| v.as_str());
+            let limit = arguments
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(5) as usize;
+
+            let suggestions = engine
+                .infer_gaps(topic, memory_id, limit)
+                .await?;
+            Ok(json!({ "suggestions": suggestions }))
+        }
         _ => anyhow::bail!("Unknown tool: {}", name),
     }
 }
