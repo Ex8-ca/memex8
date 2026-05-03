@@ -57,6 +57,8 @@ pub struct SlumberReport {
     pub gaps_detected: usize,
     /// Session memories reviewed and re-weighted.
     pub sessions_reviewed: usize,
+    /// Empty realm shells deleted.
+    pub realms_pruned: usize,
 }
 
 impl SlumberEngine {
@@ -139,6 +141,10 @@ impl SlumberEngine {
         tracing::info!("💤 Slumber phase 11: Session memory review");
         report.sessions_reviewed = self.review_session_memories().await?;
 
+        // Phase 12: Prune empty realm shells left after consolidation/merging.
+        tracing::info!("💤 Slumber phase 12: Prune empty realms");
+        report.realms_pruned = self.prune_empty_realms().await?;
+
         // Phase 7: Write master memex8.md digest
         if self.config.digest_md.enabled {
             tracing::info!("💤 Slumber phase 7: Write digest md");
@@ -161,7 +167,7 @@ impl SlumberEngine {
         }
 
         tracing::info!(
-            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={} gaps={} sessions_reviewed={}",
+            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={} gaps={} sessions_reviewed={} realms_pruned={}",
             report.memories_scanned,
             report.deduplicated,
             report.quantized,
@@ -176,6 +182,7 @@ impl SlumberEngine {
             report.associated,
             report.gaps_detected,
             report.sessions_reviewed,
+            report.realms_pruned,
         );
 
         Ok(report)
@@ -2204,6 +2211,36 @@ impl SlumberEngine {
 
         tracing::info!("  Reviewed {} session memories", reviewed);
         Ok(reviewed)
+    }
+
+    // ─── Phase 12: Prune Empty Realms ─────────────────────────────────────────
+
+    /// Delete realm shells with 0 memories. These are left behind after
+    /// consolidation merges or moves all memories out of a realm.
+    async fn prune_empty_realms(&self) -> anyhow::Result<usize> {
+        let realms = self.store.list_realms().await?;
+        let mut pruned = 0;
+
+        for realm in &realms {
+            if realm.memory_count == 0 && !realm.is_user_pinned {
+                if let Err(e) = self.store.delete_realm(&realm.id).await {
+                    tracing::warn!(
+                        "  Failed to delete empty realm '{}': {}",
+                        realm.name,
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "  Pruned empty realm '{}'",
+                        realm.name
+                    );
+                    pruned += 1;
+                }
+            }
+        }
+
+        tracing::info!("  Pruned {} empty realm shells", pruned);
+        Ok(pruned)
     }
 }
 
