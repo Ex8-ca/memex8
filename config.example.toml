@@ -51,11 +51,11 @@ association_min_strength = 0.6
 spreading_activation_bump = 0.005
 
 # Slumber consolidation (Phase 6)
-# backend: "openai" (requires OPENAI_API_KEY) or "local" (uses LOCAL_LLM_URL + LOCAL_LLM_API_KEY)
-# Ollama is also available as an embedding provider: set [embedding].provider = "ollama"
+# backend: "openai" (uses OPENAI_API_KEY) or "local" (uses LOCAL_LLM_URL + LOCAL_LLM_API_KEY)
+# Embedding provider is configured separately: [embedding].provider = "openai" | "ollama"
 [slumber.consolidation]
-backend = "local"
-model = "qwen3.6-plus"    # local model name, or openai model like "gpt-4o-mini"
+backend = "openai"
+model = "gpt-4o-mini"    # OpenAI model name
 
 [slumber.summarize]
 enabled = true

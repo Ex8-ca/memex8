@@ -249,14 +249,14 @@ pub struct ConsolidationConfig {
 }
 
 fn default_consolidation_backend() -> String {
-    "local".into()
+    "openai".into()
 }
 
 impl Default for ConsolidationConfig {
     fn default() -> Self {
         Self {
-            backend: "local".into(),
-            model: Some("qwen3.6-plus".into()),
+            backend: "openai".into(),
+            model: Some("gpt-4o-mini".into()),
         }
     }
 }

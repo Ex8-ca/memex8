@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::engine::embedder;
 use crate::engine::memex8_md::write_digest_md;
 use crate::engine::quantizer::AdaptiveScalarQuantizer;
 use crate::engine::reactions::reaction_boost;
@@ -7,6 +8,33 @@ use crate::storage::qdrant::{GapPoint, MemoryPoint, QdrantStore};
 pub struct SlumberEngine {
     config: AppConfig,
     store: QdrantStore,
+}
+
+impl SlumberEngine {
+    /// Create an embedder using env vars (matching Engine::make_embedder logic).
+    /// This ensures slumber uses the same embedding provider as the main engine.
+    fn embedder(&self) -> anyhow::Result<Box<dyn embedder::Embedder>> {
+        let mut cfg = self.config.clone();
+        cfg.embedding.provider = std::env::var("EMBEDDING_PROVIDER")
+            .unwrap_or_else(|_| cfg.embedding.provider.clone());
+        cfg.embedding.model = std::env::var("EMBEDDING_MODEL")
+            .unwrap_or_else(|_| cfg.embedding.model.clone());
+        cfg.embedding.dimensions = std::env::var("EMBEDDING_DIMENSIONS")
+            .ok()
+            .and_then(|d| d.parse().ok())
+            .unwrap_or(cfg.embedding.dimensions);
+
+        if cfg.embedding.provider == "openai" {
+            let key = std::env::var("OPENAI_API_KEY")
+                .ok()
+                .or_else(|| cfg.openai_api_key());
+            if let Some(ref k) = key {
+                std::env::set_var("OPENAI_API_KEY", k);
+            }
+        }
+
+        embedder::create_embedder(&cfg)
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -1660,7 +1688,7 @@ impl SlumberEngine {
             }
 
             // Embed the consolidated summary to get a proper semantic vector
-            let embedder = crate::engine::embedder::create_embedder(&self.config)
+            let embedder = self.embedder()
                 .map_err(|e| anyhow::anyhow!("Failed to create embedder: {}", e))?;
             let summary_vector = embedder.embed(&summary).await
                 .map_err(|e| anyhow::anyhow!("Failed to embed summary: {}", e))?;
@@ -1823,7 +1851,7 @@ impl SlumberEngine {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
 
-        let model_name = model.unwrap_or("qwen3.6-plus");
+        let model_name = model.unwrap_or("qwen3.6-35b-a3b-instruct-2507");
 
         let response = req
             .json(&serde_json::json!({
