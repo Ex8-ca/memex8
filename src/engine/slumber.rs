@@ -1659,18 +1659,11 @@ impl SlumberEngine {
                 continue;
             }
 
-            // Get centroid vector BEFORE deleting (for placement in vector space)
-            let first_realm_id = memories
-                .first()
-                .and_then(|m| m.realm_id.as_deref())
-                .unwrap_or("")
-                .to_string();
-            let first_vector = self
-                .store
-                .compute_realm_centroid(&first_realm_id)
-                .await
-                .ok()
-                .flatten();
+            // Embed the consolidated summary to get a proper semantic vector
+            let embedder = crate::engine::embedder::create_embedder(&self.config)
+                .map_err(|e| anyhow::anyhow!("Failed to create embedder: {}", e))?;
+            let summary_vector = embedder.embed(&summary).await
+                .map_err(|e| anyhow::anyhow!("Failed to embed summary: {}", e))?;
 
             // Collect IDs to delete
             let ids_to_delete: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
@@ -1682,33 +1675,25 @@ impl SlumberEngine {
                 }
             }
 
-            // Store the consolidated summary
+            // Store the consolidated summary with its own embedded vector
             let id = uuid::Uuid::new_v4().to_string();
-            if let Some(ref vector) = first_vector {
-                if let Err(e) = self
-                    .store
-                    .store_memory_with_vector(
-                        &id,
-                        &summary,
-                        vector,
-                        None,
-                        Some(realm_name),
-                        1.0,
-                        None,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        "  Failed to store consolidated memory for '{}': {}",
-                        realm_name,
-                        e
-                    );
-                    continue;
-                }
-            } else {
+            if let Err(e) = self
+                .store
+                .store_memory_with_vector(
+                    &id,
+                    &summary,
+                    &summary_vector,
+                    None,
+                    Some(realm_name),
+                    1.0,
+                    None,
+                )
+                .await
+            {
                 tracing::warn!(
-                    "  No vector available for consolidated memory in '{}', skipping",
-                    realm_name
+                    "  Failed to store consolidated memory for '{}': {}",
+                    realm_name,
+                    e
                 );
                 continue;
             }
@@ -1838,7 +1823,7 @@ impl SlumberEngine {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
 
-        let model_name = model.unwrap_or("unsloth/Qwen3.6-35B-A3B-GGUF");
+        let model_name = model.unwrap_or("qwen3.6-plus");
 
         let response = req
             .json(&serde_json::json!({
