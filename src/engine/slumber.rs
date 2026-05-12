@@ -363,6 +363,31 @@ impl SlumberEngine {
                 continue;
             }
 
+            // Guard against runaway recursive splits: cap the number of -a/-b
+            // suffix levels. Without this, repeated splits produce names like
+            // "Discord Ill-a-a-b-b-b-a-b-b-a-a-a-..." that blow up.
+            let split_depth = realm.name.split('-').filter(|s| *s == "a" || *s == "b").count();
+            if split_depth >= 3 {
+                tracing::info!(
+                    "  Skipping split of '{}': already split depth {} (max 3)",
+                    realm.name,
+                    split_depth
+                );
+                continue;
+            }
+
+            // Also guard against excessively long realm names
+            let max_name_len = 80;
+            if realm.name.len() >= max_name_len {
+                tracing::info!(
+                    "  Skipping split of '{}': name length {} exceeds max {}",
+                    realm.name,
+                    realm.name.len(),
+                    max_name_len
+                );
+                continue;
+            }
+
             tracing::info!(
                 "  Splitting realm '{}' ({} memories, threshold={})",
                 realm.name,

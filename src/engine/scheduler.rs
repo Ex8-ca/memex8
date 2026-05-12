@@ -234,6 +234,8 @@ fn parse_cron_to_duration(cron_expr: &str) -> anyhow::Result<Duration> {
 
 /// Check if the current time matches a cron expression.
 /// Returns true if we should run the scheduled task now.
+const CRON_TOLERANCE_MINUTES: u64 = 5;
+
 pub fn should_run_at_schedule(schedule: &str) -> bool {
     let schedule = schedule.trim();
     if schedule.is_empty() {
@@ -252,7 +254,11 @@ pub fn should_run_at_schedule(schedule: &str) -> bool {
     let current_month = now.month() as u64;
     let current_weekday = now.weekday().num_days_from_sunday() as u64;
 
-    if !matches_field(parts[0], current_minute) {
+    // Apply tolerance window to the minute field. The cron ingest ticks every
+    // 5 minutes, so exact minute matching means consolidation almost never fires.
+    // Expand single-value minutes (e.g. "0") into a ±5 minute range.
+    let minute_field = expand_minute_with_tolerance(parts[0], CRON_TOLERANCE_MINUTES);
+    if !matches_field(&minute_field, current_minute) {
         return false;
     }
     if !matches_field(parts[1], current_hour) {
@@ -269,6 +275,23 @@ pub fn should_run_at_schedule(schedule: &str) -> bool {
     }
 
     true
+}
+
+/// If the minute field is a single value (e.g. "0"), expand it to a range
+/// with tolerance. Preserves *, */N, ranges, and comma-separated fields.
+fn expand_minute_with_tolerance(field: &str, tolerance: u64) -> String {
+    if field == "*" || field.starts_with("*/") || field.contains(',') || field.contains('-') {
+        return field.to_string();
+    }
+    if let Ok(target) = field.parse::<u64>() {
+        let start = target.saturating_sub(tolerance);
+        let end = (target + tolerance).min(59);
+        if start == end {
+            return field.to_string();
+        }
+        return format!("{}-{}", start, end);
+    }
+    field.to_string()
 }
 
 /// Check if a value matches a cron field (minute, hour, etc.)

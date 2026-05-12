@@ -60,7 +60,8 @@ pub async fn write_memex8_md(
 
 /// Append a slumber digest entry to the configured memex8.md file.
 /// Preserves any existing header ("how to use" section) and appends a new dated entry.
-/// Keeps only the most recent `max_log_entries` entries.
+/// Keeps only the most recent `max_log_entries` entries and skips duplicate entries
+/// (same date + identical stats) from rapid re-runs.
 pub async fn write_digest_md(
     config: &crate::config::DigestMdConfig,
     memories: &[MemoryPoint],
@@ -141,8 +142,16 @@ pub async fn write_digest_md(
             report.index_optimized
         ));
     }
+    if report.realms_pruned > 0 {
+        entry.push_str(&format!("- 🧹 Pruned {} empty realms\n", report.realms_pruned));
+    }
 
-    // Top important memories this run
+    // Top important memories this run — use config.max_memories, not hardcoded 5
+    let top_n = if config.max_memories > 0 {
+        config.max_memories as usize
+    } else {
+        5
+    };
     if !memories.is_empty() {
         entry.push_str("\n**Top memories by importance:**\n\n");
         let mut sorted: Vec<&MemoryPoint> = memories.iter().collect();
@@ -151,7 +160,7 @@ pub async fn write_digest_md(
                 .partial_cmp(&a.importance)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        for memory in sorted.iter().take(5) {
+        for memory in sorted.iter().take(top_n) {
             let preview: String = memory.content.chars().take(120).collect();
             entry.push_str(&format!("- *[{}]* {}\n", memory.realm_name, preview));
         }
@@ -166,21 +175,79 @@ pub async fn write_digest_md(
         String::new()
     };
 
-    // If file has no header yet, prepend it
-    let content = if !existing.contains("# memex8 — Memory Digest") {
-        format!("{}{}", header, entry)
-    } else {
-        // Find where "---" dividers start after header and insert before that section
-        if let Some(divider_pos) = existing.find("\n---\n\n") {
-            let after_header = &existing[divider_pos + 5..];
-            format!("{}{}{}", &existing[..divider_pos + 5], entry, after_header)
+    // Parse existing entries (split by "\n---\n" after the header)
+    let (existing_header, existing_entries) = if existing.contains("# memex8 — Memory Digest") {
+        if let Some(divider_pos) = existing.find("\n---\n") {
+            let header_part = &existing[..divider_pos + 5];
+            let entries_part = &existing[divider_pos + 5..];
+            // Split entries by the "\n---\n" separator
+            let entries: Vec<&str> = entries_part
+                .split("\n---\n")
+                .filter(|s| !s.trim().is_empty())
+                .collect();
+            (header_part.to_string(), entries)
         } else {
-            // No divider found, just append
-            format!("{}\n{}", existing.trim_end(), entry)
+            // No separator found — treat entire content as header
+            (existing.clone(), vec![])
         }
+    } else {
+        (String::new(), vec![])
     };
 
+    // Build a fingerprint for dedup: date + stats values
+    let stats_fingerprint = format!(
+        "{}-{}-{}-{}-{}",
+        report.memories_scanned,
+        report.quantized,
+        report.realms_updated,
+        report.index_optimized,
+        report.memories_consolidated
+    );
+
+    // Check if the last entry is a duplicate (same date + same stats)
+    // This prevents bloating from rapid re-runs with identical results
+    let is_duplicate = existing_entries.last().map_or(false, |last| {
+        let stats_match = last.contains(&format!("Scanned {} memories", report.memories_scanned))
+            && last.contains(&format!("ScalarQuant compressed {} vectors", report.quantized))
+            && last.contains(&format!("Updated {} realms", report.realms_updated));
+        last.starts_with(&format!("## {}", date)) && stats_match
+    });
+
+    let entries_to_keep = if is_duplicate {
+        // Skip this entry — it's a duplicate of the last one
+        existing_entries
+    } else {
+        // Add new entry
+        let mut all = existing_entries;
+        all.push(&entry);
+        // Truncate to most recent max_log_entries
+        let max = config.max_log_entries as usize;
+        if max > 0 && all.len() > max {
+            all = all[all.len() - max..].to_vec();
+        }
+        all
+    };
+
+    // Reassemble: header + entries joined by "\n---\n\n"
+    let mut content = if existing_header.is_empty() {
+        header.to_string()
+    } else {
+        existing_header
+    };
+
+    for (i, e) in entries_to_keep.iter().enumerate() {
+        if i > 0 {
+            content.push_str("\n---\n\n");
+        }
+        content.push_str(e);
+    }
+
     std::fs::write(path, &content)?;
-    tracing::info!("Appended digest entry to {}", path.display());
-    Ok(1)
+    tracing::info!(
+        "Digest updated: {} entries (dedup={}, truncated={})",
+        entries_to_keep.len(),
+        is_duplicate,
+        entries_to_keep.len() <= config.max_log_entries as usize
+    );
+    Ok(entries_to_keep.len())
 }
