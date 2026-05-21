@@ -11,24 +11,23 @@ pub trait Embedder: Send + Sync {
 }
 
 pub fn create_embedder(config: &AppConfig) -> anyhow::Result<Box<dyn Embedder>> {
-    let dims = config.embedding.dimensions;
-
     match config.embedding.provider.as_str() {
         "ollama" => Ok(Box::new(OllamaEmbedder::new(
             &config.embedding.ollama.url,
             &config.embedding.model,
             config.embedding.dimensions,
         )?)),
-        "openai" => {
+        "openai" | "openai-compatible" => {
             let api_key = config
                 .openai_api_key()
                 .ok_or_else(|| anyhow::anyhow!("OPENAI_API_KEY not set"))?;
             Ok(Box::new(OpenAiEmbedder::new(
                 &api_key,
+                &config.embedding.openai.base_url,
                 &config.embedding.openai.model,
                 config.embedding.openai.dimensions,
             )?))
         }
-        _ => anyhow::bail!("Unknown embedding provider: {}", config.embedding.provider),
+        _ => anyhow::bail!("Unknown embedding provider: {}. Supported: ollama, openai, openai-compatible", config.embedding.provider),
     }
 }

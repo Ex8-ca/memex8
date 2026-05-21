@@ -64,6 +64,10 @@ impl Default for OllamaConfig {
 pub struct OpenAiConfig {
     #[serde(default = "default_openai_key_env")]
     pub api_key_env: String,
+    /// Base URL for OpenAI-compatible APIs (e.g. MiniMax, Together, Groq).
+    /// Defaults to `https://api.openai.com/v1`.
+    #[serde(default = "default_openai_base_url")]
+    pub base_url: String,
     #[serde(default = "default_openai_model")]
     pub model: String,
     #[serde(default = "default_openai_dims")]
@@ -72,6 +76,9 @@ pub struct OpenAiConfig {
 
 fn default_openai_key_env() -> String {
     "OPENAI_API_KEY".into()
+}
+fn default_openai_base_url() -> String {
+    "https://api.openai.com/v1".into()
 }
 fn default_openai_model() -> String {
     "text-embedding-3-small".into()
@@ -84,6 +91,7 @@ impl Default for OpenAiConfig {
     fn default() -> Self {
         Self {
             api_key_env: default_openai_key_env(),
+            base_url: default_openai_base_url(),
             model: default_openai_model(),
             dimensions: default_openai_dims(),
         }

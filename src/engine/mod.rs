@@ -71,6 +71,7 @@ pub struct Engine {
     embed_model: String,
     embed_dimensions: u32,
     openai_key: Option<String>,
+    openai_base_url: String,
     /// File watcher (initialized on first use).
     file_watcher: Arc<RwLock<Option<FileWatcher>>>,
     /// Path to the config file (for persisting watch configs).
@@ -107,14 +108,17 @@ impl Engine {
         let openai_key = std::env::var("OPENAI_API_KEY")
             .ok()
             .or_else(|| config.openai_api_key());
-        if provider == "openai" {
+        let openai_base_url = std::env::var("OPENAI_BASE_URL")
+            .ok()
+            .unwrap_or_else(|| config.embedding.openai.base_url.clone());
+        if provider == "openai" || provider == "openai-compatible" {
             if openai_key.is_none() {
                 return Err(anyhow::anyhow!(
                     "OpenAI embedding provider selected but OPENAI_API_KEY is not set. \
                      Add OPENAI_API_KEY=sk-... to your .env file or set EMBEDDING_PROVIDER=ollama."
                 ));
             }
-            tracing::info!("Using OpenAI embeddings: {} ({}d)", model, dimensions);
+            tracing::info!("Using OpenAI-compatible embeddings: {} at {} ({}d)", model, openai_base_url, dimensions);
         } else {
             tracing::info!("Using Ollama embeddings: {} ({}d)", model, dimensions);
         }
@@ -136,6 +140,7 @@ impl Engine {
             embed_model: model,
             embed_dimensions: dimensions,
             openai_key,
+            openai_base_url,
             file_watcher: Arc::new(RwLock::new(None)),
             config_path: "config.toml".to_string(),
         })
@@ -157,11 +162,11 @@ impl Engine {
         cfg.embedding.provider = self.embed_provider.clone();
         cfg.embedding.model = self.embed_model.clone();
         cfg.embedding.dimensions = self.embed_dimensions;
-        if self.embed_provider == "openai" {
+        if self.embed_provider == "openai" || self.embed_provider == "openai-compatible" {
             if let Some(ref key) = self.openai_key {
-                // Temporarily set the env var so create_embedder can find it
                 std::env::set_var("OPENAI_API_KEY", key);
             }
+            cfg.embedding.openai.base_url = self.openai_base_url.clone();
         }
         embedder::create_embedder(&cfg)
     }

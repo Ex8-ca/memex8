@@ -21,15 +21,17 @@ struct OpenAiEmbedding {
 
 pub struct OpenAiEmbedder {
     api_key: String,
+    base_url: String,
     model: String,
     dimensions: u32,
     client: reqwest::Client,
 }
 
 impl OpenAiEmbedder {
-    pub fn new(api_key: &str, model: &str, dimensions: u32) -> anyhow::Result<Self> {
+    pub fn new(api_key: &str, base_url: &str, model: &str, dimensions: u32) -> anyhow::Result<Self> {
         Ok(Self {
             api_key: api_key.to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             dimensions,
             client: reqwest::Client::new(),
@@ -40,9 +42,10 @@ impl OpenAiEmbedder {
 #[async_trait]
 impl Embedder for OpenAiEmbedder {
     async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        let url = format!("{}/embeddings", self.base_url);
         let resp = self
             .client
-            .post("https://api.openai.com/v1/embeddings")
+            .post(url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&OpenAiRequest {
                 model: self.model.clone(),
@@ -55,7 +58,7 @@ impl Embedder for OpenAiEmbedder {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await?;
-            anyhow::bail!("OpenAI API error ({}): {}", status, body);
+            anyhow::bail!("Embedding API error at {} ({}): {}", self.base_url, status, body);
         }
 
         let result: OpenAiResponse = resp.json().await?;
@@ -64,14 +67,15 @@ impl Embedder for OpenAiEmbedder {
             .into_iter()
             .next()
             .map(|d| d.embedding)
-            .ok_or_else(|| anyhow::anyhow!("No embedding in OpenAI response"))
+            .ok_or_else(|| anyhow::anyhow!("No embedding in response"))
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        let url = format!("{}/embeddings", self.base_url);
         let input: Vec<&str> = texts.to_vec();
         let resp = self
             .client
-            .post("https://api.openai.com/v1/embeddings")
+            .post(url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&serde_json::json!({
                 "model": self.model,
@@ -84,7 +88,7 @@ impl Embedder for OpenAiEmbedder {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await?;
-            anyhow::bail!("OpenAI API error ({}): {}", status, body);
+            anyhow::bail!("Embedding API error at {} ({}): {}", self.base_url, status, body);
         }
 
         let result: OpenAiResponse = resp.json().await?;

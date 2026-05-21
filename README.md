@@ -74,6 +74,7 @@ The result: an AI agent that remembers what matters, forgets what doesn't, and c
 | Provider | Model | Dimensions | Notes |
 |----------|-------|------------|-------|
 | **OpenAI** | `text-embedding-3-small` | 1536 | Fast, accurate, cloud-based |
+| **OpenAI-compatible** | Any | Any | MiniMax, Together AI, Groq — configure `base_url` for cost savings |
 | **Ollama** | `nomic-embed-text` | 768 | Fully local, zero cost, sovereign |
 
 ### 💤 Slumber Consolidation
@@ -109,6 +110,7 @@ Add to `~/.hermes/.env`:
 MEMEX8_API_KEY=your-secret-key
 MEMEX8_BASE_URL=http://localhost:8080
 OPENAI_API_KEY=sk-...          # for OpenAI embeddings
+OPENAI_BASE_URL=https://...      # optional: OpenAI-compatible API (MiniMax, Together, Groq)
 # EMBEDDING_PROVIDER=ollama    # optional: use local embeddings
 ```
 

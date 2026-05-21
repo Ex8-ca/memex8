@@ -16,6 +16,7 @@ url = "http://ollama:11434"
 
 [embedding.openai]
 api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com/v1"  # OpenAI-compatible: MiniMax, Together, Groq, etc.
 model = "text-embedding-3-small"
 dimensions = 1536
 
