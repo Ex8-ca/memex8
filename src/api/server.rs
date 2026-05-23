@@ -174,6 +174,22 @@ fn api_routes() -> Router<Arc<AppState>> {
             "/sessions/end",
             axum::routing::post(crate::api::routes::session::session_end),
         )
+        .route(
+            "/graph/traverse",
+            axum::routing::get(crate::api::routes::graph::traverse),
+        )
+        .route(
+            "/graph/stats",
+            axum::routing::get(crate::api::routes::graph::stats),
+        )
+        .route(
+            "/graph/neighbors",
+            axum::routing::get(crate::api::routes::graph::neighbors),
+        )
+        .route(
+            "/graph/build",
+            axum::routing::post(crate::api::routes::graph::build),
+        )
         .route("/health", axum::routing::get(health))
 }
 

@@ -1,4 +1,5 @@
 pub mod associations;
+pub mod backup;
 pub mod chunker;
 pub mod doctor;
 pub mod embedder;
@@ -1189,6 +1190,61 @@ impl Engine {
         let session_engine =
             crate::engine::session::SessionEngine::new(self.config.clone(), self.store.clone());
         session_engine.run_session_end(input).await
+    }
+
+    // ─── Knowledge Graph ─────────────────────────────────────────────────────────
+
+    /// Build the knowledge graph from all stored memories.
+    /// Extracts entities and creates edges between related memories.
+    pub async fn build_graph(&self, similarity_threshold: f32) -> anyhow::Result<usize> {
+        // Clear existing edges first
+        self.store.delete_all_graph_edges().await?;
+
+        let graph = graph::KnowledgeGraph::new(self.store.clone());
+        graph.build_graph(similarity_threshold).await
+    }
+
+    /// Traverse the knowledge graph from a starting memory using BFS.
+    /// Returns connected memories with path information.
+    pub async fn graph_traverse(
+        &self,
+        memory_id: &str,
+        depth: usize,
+    ) -> anyhow::Result<Vec<graph::GraphTraversalResult>> {
+        let graph = graph::KnowledgeGraph::new(self.store.clone());
+        graph.search_graph(memory_id, depth).await
+    }
+
+    /// Get directly connected memories for a given memory.
+    pub async fn graph_neighbors(
+        &self,
+        memory_id: &str,
+    ) -> anyhow::Result<Vec<graph::Relationship>> {
+        let graph = graph::KnowledgeGraph::new(self.store.clone());
+        graph.get_neighbors(memory_id).await
+    }
+
+    /// Get statistics about the knowledge graph.
+    pub async fn graph_stats(&self) -> anyhow::Result<graph::GraphStats> {
+        let graph = graph::KnowledgeGraph::new(self.store.clone());
+        graph.get_stats().await
+    }
+
+    // ─── Backup/Restore ────────────────────────────────────────────────────────
+
+    /// Backup all memories, realms, and graph edges to a timestamped tarball.
+    pub async fn backup(&self, output_path: Option<&str>) -> anyhow::Result<String> {
+        backup::backup(self, output_path).await
+    }
+
+    /// Restore memories, realms, and graph edges from a backup tarball.
+    pub async fn restore(&self, backup_path: &str, force: bool) -> anyhow::Result<usize> {
+        backup::restore(self, backup_path, force).await
+    }
+
+    /// List available backups sorted by date (newest first).
+    pub fn list_backups(&self, backup_dir: Option<&str>) -> anyhow::Result<Vec<backup::BackupInfo>> {
+        backup::list_backups(backup_dir)
     }
 }
 

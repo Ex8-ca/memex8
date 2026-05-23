@@ -1,7 +1,7 @@
 use crate::config::AppConfig;
 use crate::engine::embedder;
 use crate::engine::memex8_md::write_digest_md;
-use crate::engine::quantizer::AdaptiveScalarQuantizer;
+use crate::engine::quantizer::{decide_bit_width, AdaptiveScalarQuantizer};
 use crate::engine::reactions::reaction_boost;
 use crate::storage::qdrant::{GapPoint, MemoryPoint, QdrantStore};
 
@@ -59,6 +59,8 @@ pub struct SlumberReport {
     pub sessions_reviewed: usize,
     /// Empty realm shells deleted.
     pub realms_pruned: usize,
+    /// Memories re-quantized to a different bit width during dynamic policy pass.
+    pub re_quantized: usize,
 }
 
 impl SlumberEngine {
@@ -85,6 +87,10 @@ impl SlumberEngine {
         // Phase 2: ScalarQuant compression
         tracing::info!("💤 Slumber phase 2: ScalarQuant compression");
         report.quantized = self.scalarquant_compress().await?;
+
+        // Phase 2b: Re-quantify memories whose bit width changed (dynamic policy)
+        tracing::info!("💤 Slumber phase 2b: Re-quantify dynamic policy");
+        report.re_quantized = self.re_quantify_all().await?;
 
         // Phase 3: Re-cluster realms (update counts, check merges)
         tracing::info!("💤 Slumber phase 3: Re-cluster realms");
@@ -167,10 +173,11 @@ impl SlumberEngine {
         }
 
         tracing::info!(
-            "✅ Slumber complete: scanned={} dedup={} quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={} gaps={} sessions_reviewed={} realms_pruned={}",
+            "✅ Slumber complete: scanned={} dedup={} quantized={} re_quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={} gaps={} sessions_reviewed={} realms_pruned={}",
             report.memories_scanned,
             report.deduplicated,
             report.quantized,
+            report.re_quantized,
             report.realms_updated,
             report.realms_renamed,
             report.memories_consolidated,
@@ -233,9 +240,10 @@ impl SlumberEngine {
     // ─── Phase 2: ScalarQuant Compression ─────────────────────────────────────
 
     /// Compress all memories using ScalarQuant and store in the quantized collection.
+    /// Uses the configured quantizer policy (dynamic by default) to select bit width
+    /// per memory based on access_count and importance.
     async fn scalarquant_compress(&self) -> anyhow::Result<usize> {
         let all = self.store.scroll_all_memories_with_vectors().await?;
-        let bit_width = self.config.slumber.quantize_bit_width;
 
         if all.is_empty() {
             tracing::info!("  No memories to quantize");
@@ -244,12 +252,41 @@ impl SlumberEngine {
 
         // Get dimensions from actual vectors (not config, which may have stale defaults)
         let dims = all[0].vector.len();
+        let is_dynamic = self.config.quantizer.policy == "dynamic";
+        let static_bit_width = self.config.quantizer.static_bit_width;
 
-        let quantizer = AdaptiveScalarQuantizer::new(dims, bit_width);
         let mut quantized = 0;
+        let mut skipped = 0;
         let mut total_cosine = 0.0f32;
+        let mut bit_width_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         for mem_with_vec in &all {
+            let bit_width = if is_dynamic {
+                decide_bit_width(
+                    mem_with_vec.memory.access_count as u64,
+                    mem_with_vec.memory.importance as f64,
+                )
+            } else {
+                Some(static_bit_width)
+            };
+
+            let bw_label = match bit_width {
+                None => "full".to_string(),
+                Some(bw) => format!("{:.1}", bw),
+            };
+            *bit_width_counts.entry(bw_label.clone()).or_insert(0) += 1;
+
+            // Unquantized memories: skip storing in quantized collection
+            let bit_width = match bit_width {
+                Some(bw) => bw,
+                None => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+
+            let quantizer = AdaptiveScalarQuantizer::new(dims, bit_width);
             let qv = quantizer.quantize(&mem_with_vec.vector);
             let reconstructed = quantizer.dequantize(&qv);
 
@@ -264,6 +301,7 @@ impl SlumberEngine {
                         &mem_with_vec.memory.id,
                         &reconstructed,
                         &mem_with_vec.memory,
+                        bit_width,
                     )
                     .await?;
                 quantized += 1;
@@ -281,14 +319,119 @@ impl SlumberEngine {
         } else {
             0.0
         };
+
+        // Build summary string for bit width distribution
+        let mut bw_summary: Vec<_> = bit_width_counts.into_iter().collect();
+        bw_summary.sort_by(|a, b| a.0.cmp(&b.0));
+        let bw_str = bw_summary
+            .iter()
+            .map(|(bw, count)| format!("{}={}", bw, count))
+            .collect::<Vec<_>>()
+            .join(", ");
+
         tracing::info!(
-            "  Quantized {} / {} memories at {:.1} bits (avg cosine={:.3})",
+            "  Quantized {} / {} memories [{}] (skipped={} avg cosine={:.3})",
             quantized,
             all.len(),
-            bit_width,
+            bw_str,
+            skipped,
             avg_cosine
         );
         Ok(quantized)
+    }
+
+    // ─── Phase 2b: Re-quantify All (dynamic policy) ───────────────────────────
+
+    /// Re-quantize all memories whose optimal bit width has changed since last
+    /// quantization. Uses the dynamic policy to compare current access_count
+    /// and importance against the bit width they were last stored with.
+    ///
+    /// Returns the count of memories that were re-quantized to a different bit width.
+    async fn re_quantify_all(&self) -> anyhow::Result<usize> {
+        // Only relevant under dynamic policy
+        if self.config.quantizer.policy != "dynamic" {
+            return Ok(0);
+        }
+
+        let all = self.store.scroll_all_memories_with_vectors().await?;
+        if all.is_empty() {
+            return Ok(0);
+        }
+
+        let dims = all[0].vector.len();
+        let mut re_quantized = 0;
+        let mut upgraded = 0;
+        let mut downgraded = 0;
+        let mut promoted_full = 0;
+
+        for mem_with_vec in &all {
+            let mem = &mem_with_vec.memory;
+            let optimal_bw = decide_bit_width(mem.access_count as u64, mem.importance as f64);
+
+            // Check if current stored bit width differs from optimal
+            let current_bw = mem.quantized_bit_width;
+            let needs_change = match optimal_bw {
+                // Memory should be full precision but isn't
+                None if current_bw > 0.0 => true,
+                // Memory should be quantized at a specific width but differs
+                Some(target) if (target - current_bw).abs() > 0.01 => true,
+                // Memory is already at optimal (or both unquantized)
+                _ => false,
+            };
+
+            if !needs_change {
+                continue;
+            }
+
+            match optimal_bw {
+                None => {
+                    // Promote to full precision: remove from quantized collection
+                    // and keep the original vector in the main collection
+                    self.store.delete_quantized(&mem.id).await?;
+                    promoted_full += 1;
+                }
+                Some(target_bw) => {
+                    let quantizer = AdaptiveScalarQuantizer::new(dims, target_bw);
+                    let qv = quantizer.quantize(&mem_with_vec.vector);
+                    let reconstructed = quantizer.dequantize(&qv);
+
+                    let cosine = cosine_similarity(&mem_with_vec.vector, &reconstructed);
+                    if cosine > 0.7 {
+                        self.store
+                            .store_quantized(&mem.id, &reconstructed, &mem_with_vec.memory, target_bw)
+                            .await?;
+                        if target_bw > current_bw {
+                            upgraded += 1;
+                        } else {
+                            downgraded += 1;
+                        }
+                    } else {
+                        tracing::warn!(
+                            "  Low quality re-quantization for {}: cosine={:.3}",
+                            mem.id,
+                            cosine
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            re_quantized += 1;
+        }
+
+        if re_quantized > 0 {
+            tracing::info!(
+                "  Re-quantized {} memories (upgraded={}, downgraded={}, promoted_to_full={})",
+                re_quantized,
+                upgraded,
+                downgraded,
+                promoted_full
+            );
+        } else {
+            tracing::info!("  No memories needed re-quantization");
+        }
+
+        Ok(re_quantized)
     }
 
     // ─── Phase 3: Re-cluster Realms ──────────────────────────────────────────
@@ -2171,7 +2314,7 @@ impl SlumberEngine {
     /// If a session's topic was followed up on (found in recent memories with matching realm/content),
     /// boost its importance. If no follow-up found after a week, slightly reduce importance.
     async fn review_session_memories(&self) -> anyhow::Result<usize> {
-        use crate::storage::qdrant::MemoryPoint;
+        // MemoryPoint imported via store methods
 
         let all = self.store.scroll_all_memories().await?;
 

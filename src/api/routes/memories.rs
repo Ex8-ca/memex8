@@ -193,8 +193,8 @@ pub async fn list(
 ) -> Result<Json<ListResponse>, crate::api::error::ApiError> {
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
-    let sort_field = params.sort.as_str();
-    let descending = params.direction.as_str() != "asc";
+    let _sort_field = params.sort.as_str();
+    let _descending = params.direction.as_str() != "asc";
 
     let memories = state
         .engine

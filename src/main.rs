@@ -190,6 +190,12 @@ enum Commands {
     /// Diagnose connectivity issues
     Doctor,
 
+    /// Build or manage the knowledge graph
+    Graph {
+        #[command(subcommand)]
+        action: GraphActions,
+    },
+
     /// Proactive inference — analyze topics or memories for knowledge gaps
     Infer {
         /// Topic to analyze for gaps
@@ -211,6 +217,28 @@ enum Commands {
         /// Maximum suggestions to return
         #[arg(long, default_value = "5")]
         limit: usize,
+    },
+
+    /// Backup all memories to a timestamped tarball
+    Backup {
+        /// Output directory or file path (default: ~/memex8-backups/)
+        path: Option<String>,
+    },
+
+    /// Restore memories from a backup tarball
+    Restore {
+        /// Path to backup tarball
+        path: String,
+
+        /// Skip confirmation
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// List available backups
+    BackupList {
+        /// Backup directory (default: ~/memex8-backups/)
+        dir: Option<String>,
     },
 }
 
@@ -261,6 +289,22 @@ enum SlumberActions {
     Pause,
     /// Resume slumber
     Resume,
+}
+
+#[derive(Subcommand)]
+enum GraphActions {
+    /// Build the knowledge graph from all memories
+    Build,
+    /// Show graph statistics
+    Stats,
+    /// Traverse from a memory ID
+    Traverse {
+        memory_id: String,
+        #[arg(long, default_value = "2")]
+        depth: usize,
+    },
+    /// Show direct neighbors of a memory
+    Neighbors { memory_id: String },
 }
 
 #[tokio::main]
@@ -600,6 +644,53 @@ async fn main() -> anyhow::Result<()> {
             println!("🩺 memex8 doctor — running diagnostics...\n");
             engine::doctor::run(&config).await?;
         }
+        Commands::Graph { action } => {
+            let engine = engine::Engine::new(config).await?;
+            match action {
+                GraphActions::Build => {
+                    println!("Building knowledge graph...");
+                    let threshold = engine.config().slumber.association_min_strength;
+                    let count = engine.build_graph(threshold).await?;
+                    println!("Graph built: {} edges created", count);
+                }
+                GraphActions::Stats => {
+                    let stats = engine.graph_stats().await?;
+                    println!("Graph Statistics:");
+                    println!("  Total edges: {}", stats.total_edges);
+                    println!("  Unique entities: {}", stats.unique_entities);
+                    println!("  Edge types:");
+                    for (etype, count) in &stats.edge_types {
+                        println!("    - {}: {}", etype, count);
+                    }
+                }
+                GraphActions::Traverse { memory_id, depth } => {
+                    let results = engine.graph_traverse(&memory_id, depth).await?;
+                    if results.is_empty() {
+                        println!("No connections found from memory {}", memory_id);
+                    } else {
+                        println!("Graph traversal from {} (depth {}):\n", memory_id, depth);
+                        for (i, r) in results.iter().enumerate() {
+                            println!("{}. [depth {} relevance {:.2}] {}", i + 1, r.depth, r.relevance, r.memory_id);
+                            for step in &r.path {
+                                println!("   {} --({}: {:.2})--> {}", step.from_id, step.relation_type, step.weight, step.to_id);
+                            }
+                        }
+                    }
+                }
+                GraphActions::Neighbors { memory_id } => {
+                    let neighbors = engine.graph_neighbors(&memory_id).await?;
+                    if neighbors.is_empty() {
+                        println!("No neighbors found for memory {}", memory_id);
+                    } else {
+                        println!("Neighbors of {} ({}):\n", memory_id, neighbors.len());
+                        for rel in &neighbors {
+                            let other = if rel.from_id == memory_id { &rel.to_id } else { &rel.from_id };
+                            println!("   {} --({}: {:.2})--> {}", memory_id, rel.relation_type, rel.weight, other);
+                        }
+                    }
+                }
+            }
+        }
         Commands::Infer {
             topic,
             memory_id,
@@ -634,6 +725,36 @@ async fn main() -> anyhow::Result<()> {
                         println!("   Gap ID: {}", s.id);
                         println!();
                     }
+                }
+            }
+        }
+        Commands::Backup { path } => {
+            let engine = engine::Engine::new(config).await?;
+            let backup_path = engine.backup(path.as_deref()).await?;
+            println!("📦 Backup created: {}", backup_path);
+        }
+        Commands::Restore { path, force } => {
+            let engine = engine::Engine::new(config).await?;
+            let count = engine.restore(&path, force).await?;
+            println!("📥 Restored {} items from: {}", count, path);
+        }
+        Commands::BackupList { dir } => {
+            let engine = engine::Engine::new(config).await?;
+            let backups = engine.list_backups(dir.as_deref())?;
+            if backups.is_empty() {
+                println!("No backups found.");
+            } else {
+                println!("Available backups ({}):\n", backups.len());
+                for (i, b) in backups.iter().enumerate() {
+                    let size = if b.size < 1024 {
+                        format!("{} B", b.size)
+                    } else if b.size < 1024 * 1024 {
+                        format!("{:.1} KB", b.size as f64 / 1024.0)
+                    } else {
+                        format!("{:.1} MB", b.size as f64 / (1024.0 * 1024.0))
+                    };
+                    let created: chrono::DateTime<chrono::Utc> = b.created.into();
+                    println!("  {}. {} ({}) — {}", i + 1, created.format("%Y-%m-%d %H:%M:%S UTC"), size, b.path);
                 }
             }
         }

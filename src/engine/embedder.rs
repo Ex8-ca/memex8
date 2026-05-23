@@ -16,6 +16,7 @@ pub fn create_embedder(config: &AppConfig) -> anyhow::Result<Box<dyn Embedder>> 
             &config.embedding.ollama.url,
             &config.embedding.model,
             config.embedding.dimensions,
+            config.embedding.ollama.max_concurrent,
         )?)),
         "openai" | "openai-compatible" => {
             let api_key = config

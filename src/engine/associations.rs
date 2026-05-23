@@ -143,7 +143,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// Returns cluster assignments and centroids.
 pub fn kmeans_topic_clusters(
     vectors: &[Vec<f32>],
-    memory_ids: &[String],
+    _memory_ids: &[String],
     k: usize,
     max_iter: usize,
 ) -> (Vec<Vec<f32>>, Vec<i32>) {
@@ -664,7 +664,7 @@ pub fn detect_gaps(
             }
 
             // If both clusters have memories but they're far apart, there's a gap
-            let (Some((bridge_a, sim_a_to_b)), Some((bridge_b, sim_b_to_a))) =
+            let (Some((_bridge_a, sim_a_to_b)), Some((_bridge_b, sim_b_to_a))) =
                 (best_bridge_a, best_bridge_b)
             else {
                 continue;
@@ -801,6 +801,7 @@ mod tests {
             association_strengths: vec![],
             reaction_score: 0.0,
             topic_clusters: vec![],
+            quantized_bit_width: 0.0,
         };
 
         let mem_b = MemoryPoint {
@@ -823,6 +824,7 @@ mod tests {
             association_strengths: vec![],
             reaction_score: 0.0,
             topic_clusters: vec![],
+            quantized_bit_width: 0.0,
         };
 
         let (link_type, confidence, _) = classify_relationship(&mem_a, &mem_b, 0.8);

@@ -13,6 +13,7 @@ dimensions = 768
 
 [embedding.ollama]
 url = "http://ollama:11434"
+max_concurrent = 8
 
 [embedding.openai]
 api_key_env = "OPENAI_API_KEY"
@@ -25,6 +26,7 @@ url = "http://qdrant:6333"
 collection_memories = "memories"
 collection_quantized = "quantized"
 collection_realms = "realms"
+collection_graph_edges = "graph_edges"
 
 [ingest]
 default_chunk_by = "section"   # "section" | "paragraph" | "file"
@@ -63,6 +65,10 @@ enabled = true
 max_cluster_size = 20
 preserve_originals = true
 confidence_threshold = 0.8
+
+[quantizer]
+policy = "dynamic"          # "dynamic" (default) or "static"
+static_bit_width = 3.5      # Used only when policy = "static"
 
 [slumber.index_optimization]
 enabled = true

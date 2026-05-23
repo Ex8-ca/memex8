@@ -17,6 +17,9 @@ pub struct AppConfig {
     pub inference: InferenceConfig,
     #[serde(default)]
     pub watch: Vec<WatchConfig>,
+    /// Quantizer configuration for slumber compression.
+    #[serde(default)]
+    pub quantizer: QuantizerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,16 +49,24 @@ pub struct EmbeddingConfig {
 pub struct OllamaConfig {
     #[serde(default = "default_ollama_url")]
     pub url: String,
+    /// Maximum number of concurrent embedding requests (default: 8).
+    #[serde(default = "default_ollama_max_concurrent")]
+    pub max_concurrent: usize,
 }
 
 fn default_ollama_url() -> String {
     "http://localhost:11434".into()
 }
 
+fn default_ollama_max_concurrent() -> usize {
+    8
+}
+
 impl Default for OllamaConfig {
     fn default() -> Self {
         Self {
             url: default_ollama_url(),
+            max_concurrent: default_ollama_max_concurrent(),
         }
     }
 }
@@ -108,6 +119,8 @@ pub struct QdrantConfig {
     pub collection_quantized: String,
     #[serde(default = "default_realms")]
     pub collection_realms: String,
+    #[serde(default = "default_graph_edges")]
+    pub collection_graph_edges: String,
 }
 
 fn default_qdrant_url() -> String {
@@ -122,6 +135,10 @@ fn default_quantized() -> String {
 fn default_realms() -> String {
     "realms".into()
 }
+fn default_graph_edges() -> String {
+    "graph_edges".into()
+}
+
 
 impl Default for QdrantConfig {
     fn default() -> Self {
@@ -130,6 +147,7 @@ impl Default for QdrantConfig {
             collection_memories: default_memories(),
             collection_quantized: default_quantized(),
             collection_realms: default_realms(),
+            collection_graph_edges: default_graph_edges(),
         }
     }
 }
@@ -368,6 +386,34 @@ fn default_spreading_activation_bump() -> f32 {
     0.005
 }
 
+/// Quantizer policy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuantizerConfig {
+    /// Policy for selecting bit width: "dynamic" (default) or "static".
+    #[serde(default = "default_quantizer_policy")]
+    pub policy: String,
+    /// Bit width used when policy is "static".
+    #[serde(default = "default_quantizer_bit_width")]
+    pub static_bit_width: f32,
+}
+
+fn default_quantizer_policy() -> String {
+    "dynamic".into()
+}
+
+fn default_quantizer_bit_width() -> f32 {
+    3.5
+}
+
+impl Default for QuantizerConfig {
+    fn default() -> Self {
+        Self {
+            policy: default_quantizer_policy(),
+            static_bit_width: default_quantizer_bit_width(),
+        }
+    }
+}
+
 impl AppConfig {
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let config_path = Path::new(path);
@@ -456,6 +502,7 @@ impl Default for AppConfig {
             },
             inference: InferenceConfig::default(),
             watch: vec![],
+            quantizer: QuantizerConfig::default(),
         }
     }
 }

@@ -1,3 +1,4 @@
+pub mod graph;
 pub mod inference;
 pub mod memories;
 pub mod realms;

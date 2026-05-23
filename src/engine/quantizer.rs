@@ -35,6 +35,53 @@ pub struct QuantizedVector {
     pub max_val: f32,
 }
 
+// ─── Quantization Policy ─────────────────────────────────────────────────────
+
+/// Policy for selecting bit width per memory.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuantizerPolicy {
+    /// Use a single static bit width for all memories (legacy behavior).
+    Static,
+    /// Dynamically select bit width based on access_count and importance.
+    #[default]
+    Dynamic,
+}
+
+/// Decide the optimal bit width for a memory based on its access patterns and importance.
+///
+/// Returns `None` for unquantized (full precision), `Some(bit_width)` otherwise.
+///
+/// | Condition                              | Bit Width | Compression  |
+/// |----------------------------------------|-----------|--------------|
+/// | access_count >= 50 || importance >= 0.95| unquant  | full precision|
+/// | access_count >= 20 || importance >= 0.8| 4.0-bit   | ~6x          |
+/// | access_count >= 5  || importance >= 0.5| 3.5-bit   | ~7.6x (def)  |
+/// | access_count == 0 && importance < 0.3  | 2.0-bit   | ~14.5x       |
+/// | access_count < 5 && importance < 0.5   | 2.5-bit   | ~10x         |
+///
+/// Checks are ordered from highest to lowest bit width priority.
+pub fn decide_bit_width(access_count: u64, importance: f64) -> Option<f32> {
+    // Highest tier: unquantized (full precision)
+    if access_count >= 50 || importance >= 0.95 {
+        return None;
+    }
+    // 4.0-bit: frequently accessed or highly important
+    if access_count >= 20 || importance >= 0.8 {
+        return Some(4.0);
+    }
+    // 2.0-bit: never accessed, very low importance (most compressed)
+    if access_count == 0 && importance < 0.3 {
+        return Some(2.0);
+    }
+    // 2.5-bit: rarely accessed, low importance
+    if access_count < 5 && importance < 0.5 {
+        return Some(2.5);
+    }
+    // Default: 3.5-bit for everything else
+    Some(3.5)
+}
+
 /// Bit-width in bits per index, rounded up to whole bytes.
 impl QuantizedVector {
     /// Number of bytes used for packed indices.
@@ -472,6 +519,40 @@ mod tests {
         // Ratio: 3072 / 356 = 8.6x
         assert!(ratio > 5.0, "Compression ratio {:.1} too low", ratio);
         assert!(packed_bytes < 500, "Packed size {} too large", packed_bytes);
+    }
+
+    #[test]
+    fn test_decide_bit_width_policy() {
+        // Unquantized (full precision): access >= 50 OR importance >= 0.95
+        assert_eq!(decide_bit_width(50, 0.5), None);
+        assert_eq!(decide_bit_width(10, 0.95), None);
+        assert_eq!(decide_bit_width(100, 0.99), None);
+
+        // 4.0-bit: access >= 20 OR importance >= 0.8
+        assert_eq!(decide_bit_width(20, 0.5), Some(4.0));
+        assert_eq!(decide_bit_width(5, 0.8), Some(4.0));
+        assert_eq!(decide_bit_width(25, 0.75), Some(4.0));
+
+        // 2.0-bit: access == 0 AND importance < 0.3
+        assert_eq!(decide_bit_width(0, 0.1), Some(2.0));
+        assert_eq!(decide_bit_width(0, 0.25), Some(2.0));
+        assert_eq!(decide_bit_width(0, 0.29), Some(2.0));
+
+        // 2.5-bit: access < 5 AND importance < 0.5 (but NOT 2.0-bit case)
+        assert_eq!(decide_bit_width(3, 0.4), Some(2.5));
+        assert_eq!(decide_bit_width(1, 0.35), Some(2.5));
+        assert_eq!(decide_bit_width(4, 0.49), Some(2.5));
+        // access=0, importance between 0.3 and 0.5 → 2.5-bit
+        assert_eq!(decide_bit_width(0, 0.4), Some(2.5));
+
+        // 3.5-bit: default for everything else
+        assert_eq!(decide_bit_width(10, 0.6), Some(3.5));
+        assert_eq!(decide_bit_width(15, 0.65), Some(3.5));
+        assert_eq!(decide_bit_width(0, 0.5), Some(3.5)); // access=0 but imp>=0.5
+        assert_eq!(decide_bit_width(1, 0.3), Some(2.5)); // access<5 && imp<0.5 → 2.5
+        assert_eq!(decide_bit_width(7, 0.5), Some(3.5)); // access>=5 so not 2.5
+        assert_eq!(decide_bit_width(10, 0.7), Some(3.5)); // middle range
+        assert_eq!(decide_bit_width(19, 0.79), Some(3.5)); // just below 4.0 thresholds
     }
 
     #[test]

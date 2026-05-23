@@ -41,6 +41,9 @@ pub struct MemoryPoint {
     /// Topic cluster IDs this memory belongs to (from Phase 10 clustering).
     #[serde(default)]
     pub topic_clusters: Vec<String>,
+    /// Bit width the memory was quantized at (0.0 = unquantized / full precision).
+    #[serde(default)]
+    pub quantized_bit_width: f32,
 }
 
 /// Memory with its embedding vector (internal use only, not serialized).
@@ -97,6 +100,15 @@ pub struct GapPoint {
     pub created_at: String,
 }
 
+/// A graph edge stored in Qdrant — represents a relationship between two memories.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphEdge {
+    pub from_memory_id: String,
+    pub to_memory_id: String,
+    pub relation_type: String,   // "co_occurs", "similar", "references"
+    pub weight: f32,
+}
+
 // ─── Store ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -108,6 +120,7 @@ const MEMORIES: &str = "memories";
 const REALMS: &str = "realms";
 const QUANTIZED: &str = "memories_quantized";
 const GAPS: &str = "gaps";
+const GRAPHS: &str = "graph_edges";
 
 /// Helper: convert PointId to String.
 fn point_id_to_string(id: Option<&qdrant_client::qdrant::PointId>) -> String {
@@ -225,6 +238,19 @@ fn map_f32_vec(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> V
         .unwrap_or_default()
 }
 
+fn graph_edge_from_payload(map: &serde_json::Map<String, serde_json::Value>) -> Option<GraphEdge> {
+    let from = map_str(map, "from_memory_id")?;
+    let to = map_str(map, "to_memory_id")?;
+    let relation = map_str(map, "relation_type").unwrap_or_default();
+    let weight = map_f32(map, "weight");
+    Some(GraphEdge {
+        from_memory_id: from,
+        to_memory_id: to,
+        relation_type: relation,
+        weight,
+    })
+}
+
 // ─── MemoryPoint helpers ──────────────────────────────────────────────────────
 
 fn memory_to_payload(mem: &MemoryPoint) -> Payload {
@@ -272,6 +298,7 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
         association_strengths: map_f32_vec(map, "association_strengths"),
         reaction_score: map_f32(map, "reaction_score"),
         topic_clusters: map_str_vec(map, "topic_clusters"),
+        quantized_bit_width: map_f32(map, "quantized_bit_width"),
     }
 }
 
@@ -419,6 +446,31 @@ impl QdrantStore {
             tracing::info!("  + indexes created for {}", GAPS);
         }
 
+        // ── graph_edges ──
+        if !self.client.collection_exists(GRAPHS).await? {
+            tracing::info!("Creating {} collection", GRAPHS);
+            self.client
+                .create_collection(
+                    CreateCollectionBuilder::new(GRAPHS)
+                        .vectors_config(VectorParamsBuilder::new(dims, Distance::Cosine))
+                        .on_disk_payload(true),
+                )
+                .await?;
+            // Index edge fields for filtering
+            for (field, schema) in &[
+                ("from_memory_id", FieldType::Keyword),
+                ("to_memory_id", FieldType::Keyword),
+                ("relation_type", FieldType::Keyword),
+            ] {
+                self.client
+                    .create_field_index(CreateFieldIndexCollectionBuilder::new(
+                        GRAPHS, *field, *schema,
+                    ))
+                    .await?;
+            }
+            tracing::info!("  + indexes created for {}", GRAPHS);
+        }
+
         Ok(())
     }
 
@@ -458,6 +510,7 @@ impl QdrantStore {
             association_strengths: vec![],
             reaction_score,
             topic_clusters: vec![],
+            quantized_bit_width: 0.0,
         };
         let payload = memory_to_payload(&mem);
         let point = PointStruct::new(id.to_string(), vector.to_vec(), payload);
@@ -1020,10 +1073,27 @@ impl QdrantStore {
         id: &str,
         vector: &[f32],
         payload: &MemoryPoint,
+        bit_width: f32,
     ) -> anyhow::Result<()> {
-        let point = PointStruct::new(id.to_string(), vector.to_vec(), memory_to_payload(payload));
+        let mut payload = payload.clone();
+        payload.quantized_bit_width = bit_width;
+        let point = PointStruct::new(id.to_string(), vector.to_vec(), memory_to_payload(&payload));
         self.client
             .upsert_points(UpsertPointsBuilder::new(QUANTIZED, vec![point]).wait(true))
+            .await?;
+        Ok(())
+    }
+
+    /// Delete a memory from the quantized collection (e.g., when promoting to full precision).
+    pub async fn delete_quantized(&self, id: &str) -> anyhow::Result<()> {
+        self.client
+            .delete_points(
+                DeletePointsBuilder::new(QUANTIZED)
+                    .points(PointsIdsList {
+                        ids: vec![id.into()],
+                    })
+                    .wait(true),
+            )
             .await?;
         Ok(())
     }
@@ -1315,6 +1385,129 @@ impl QdrantStore {
                     .points(PointsSelectorOneOf::Filter(filter)),
             )
             .await?;
+        Ok(())
+    }
+
+    // ── Graph Edge Storage ────────────────────────────────────────────────────
+
+    /// Store a graph edge in the graph_edges collection.
+    pub async fn store_graph_edge(&self, edge: &GraphEdge) -> anyhow::Result<()> {
+        let point_id = format!("edge:{}:{}", edge.from_memory_id, edge.to_memory_id);
+        let vector = vec![0.0f32; 1];
+        let payload: qdrant_client::Payload = serde_json::json!({
+            "from_memory_id": &edge.from_memory_id,
+            "to_memory_id": &edge.to_memory_id,
+            "relation_type": &edge.relation_type,
+            "weight": edge.weight,
+        })
+        .try_into()
+        .unwrap_or_default();
+
+        self.client
+            .upsert_points(
+                UpsertPointsBuilder::new(GRAPHS, vec![PointStruct::new(
+                    point_id, vector, payload,
+                )]),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Get all graph edges for a specific memory.
+    pub async fn get_graph_edges_for_memory(&self, memory_id: &str) -> anyhow::Result<Vec<GraphEdge>> {
+        let filter = Filter::should([
+            Condition::matches("from_memory_id", memory_id.to_string()),
+            Condition::matches("to_memory_id", memory_id.to_string()),
+        ]);
+
+        let mut edges = Vec::new();
+        let mut offset: Option<String> = None;
+
+        loop {
+            let mut builder = ScrollPointsBuilder::new(GRAPHS).limit(500).with_payload(true).filter(filter.clone());
+            if let Some(ref off) = offset {
+                builder = builder.offset(off.clone());
+            }
+
+            let resp = self.client.scroll(builder).await?;
+            for point in resp.result {
+                let map = map_to_json(&point.payload);
+                if let Some(edge) = graph_edge_from_payload(&map) {
+                    edges.push(edge);
+                }
+            }
+
+            if resp.next_page_offset.is_none() {
+                break;
+            }
+            offset = resp.next_page_offset.as_ref().map(|p| point_id_to_string(Some(p)));
+        }
+
+        Ok(edges)
+    }
+
+    /// Get all graph edges.
+    pub async fn get_all_graph_edges(&self) -> anyhow::Result<Vec<GraphEdge>> {
+        let mut edges = Vec::new();
+        let mut offset: Option<String> = None;
+
+        loop {
+            let mut builder = ScrollPointsBuilder::new(GRAPHS).limit(500).with_payload(true);
+            if let Some(ref off) = offset {
+                builder = builder.offset(off.clone());
+            }
+
+            let resp = self.client.scroll(builder).await?;
+            for point in resp.result {
+                let map = map_to_json(&point.payload);
+                if let Some(edge) = graph_edge_from_payload(&map) {
+                    edges.push(edge);
+                }
+            }
+
+            if resp.next_page_offset.is_none() {
+                break;
+            }
+            offset = resp.next_page_offset.as_ref().map(|p| point_id_to_string(Some(p)));
+        }
+
+        Ok(edges)
+    }
+
+    /// Delete all graph edges (for rebuilding).
+    pub async fn delete_all_graph_edges(&self) -> anyhow::Result<()> {
+        let mut point_ids = Vec::new();
+        let mut offset: Option<String> = None;
+
+        loop {
+            let mut builder = ScrollPointsBuilder::new(GRAPHS).limit(500);
+            if let Some(ref off) = offset {
+                builder = builder.offset(off.clone());
+            }
+
+            let resp = self.client.scroll(builder).await?;
+            for point in resp.result {
+                if let Some(pid) = &point.id {
+                    point_ids.push(pid.clone());
+                }
+            }
+
+            if resp.next_page_offset.is_none() {
+                break;
+            }
+            offset = resp.next_page_offset.as_ref().map(|p| point_id_to_string(Some(p)));
+        }
+
+        if !point_ids.is_empty() {
+            self.client
+                .delete_points(
+                    DeletePointsBuilder::new(GRAPHS)
+                        .points(PointsIdsList { ids: point_ids })
+                        .wait(true),
+                )
+                .await?;
+        }
+
         Ok(())
     }
 }

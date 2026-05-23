@@ -195,7 +195,7 @@ pub async fn write_digest_md(
     };
 
     // Build a fingerprint for dedup: date + stats values
-    let stats_fingerprint = format!(
+    let _stats_fingerprint = format!(
         "{}-{}-{}-{}-{}",
         report.memories_scanned,
         report.quantized,

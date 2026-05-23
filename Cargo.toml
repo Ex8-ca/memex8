@@ -95,6 +95,11 @@ sha2 = "0.10"
 
 # TOML config with merge
 config = "0.14"
+regex = "1.12.3"
+
+# Backup/restore (tarballs)
+flate2 = "1"
+tar = "0.4"
 
 [dev-dependencies]
 assert_cmd = "2"

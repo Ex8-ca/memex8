@@ -122,6 +122,28 @@ pub fn list_tools() -> Vec<serde_json::Value> {
                 }
             }),
         ),
+        tool(
+            "memex8_graph_traverse",
+            "Traverse the knowledge graph from a memory, returning connected memories with relationship paths",
+            json!({
+                "type": "object",
+                "properties": {
+                    "memory_id": { "type": "string", "description": "Starting memory ID" },
+                    "depth": { "type": "number", "description": "Max traversal depth (default 2)" }
+                },
+                "required": ["memory_id"]
+            }),
+        ),
+        tool(
+            "memex8_graph_build",
+            "Build or rebuild the knowledge graph from all stored memories (creates entity-based edges)",
+            json!({ "type": "object" }),
+        ),
+        tool(
+            "memex8_graph_stats",
+            "Get statistics about the knowledge graph (edge counts, types)",
+            json!({ "type": "object" }),
+        ),
     ]
 }
 
