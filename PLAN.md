@@ -392,4 +392,175 @@ memex8/ (45 Rust files, ~4500 LOC)
 
 ---
 
-*Last updated: 2026-04-19*
+---
+
+## Completed Work Summary (2026-05-22)
+
+### Since PLAN.md v2.0, these items are now DONE:
+
+- ✅ **Backup/Restore** (`src/engine/backup.rs` — 283 lines) — tarball export with vectors, restore, backup listing
+- ✅ **Knowledge Graph** (`src/engine/graph.rs` — 531 lines expanded) — entity extraction, adjacency lists, traversal API
+- ✅ **Quantizer improvements** (`src/engine/quantizer.rs` — 81 new lines) — enhanced ScalarQuant, dynamic policies
+- ✅ **Ollama provider** (`src/engine/providers/ollama.rs` — 169 new lines) — configurable base_url, OpenAI-compatible
+- ✅ **Slumber enhancements** (`src/engine/slumber.rs` — 157 new lines) — consolidation, gap detection, realm naming
+- ✅ **API routes** — graph, inference, slumber, webhook, websocket routes added
+- ✅ **MCP tools** — new tools for graph, backup, inference operations
+- ✅ **Docker hardening** — multi-stage build, healthcheck fix, env var flow from `.env`
+- ✅ **CI/CD** — GitHub Actions (ci.yml, docker-release.yml), pushed to GitLab + GitHub
+- ✅ **Engine orchestrator** (`src/engine/mod.rs` — 56 new lines) — associations, reactions, session modules
+- ✅ **Reactions** (`src/engine/reactions.rs`) — emotional/engagement scoring for importance boost
+- ✅ **Session extraction** (`src/engine/session.rs`) — session-end memory extraction
+- ✅ **Inference routes** (`src/api/routes/inference.rs`) — proactive suggestion and gap resolution API
+- ✅ **Qdrant storage** (`src/storage/qdrant.rs` — 195 new lines) — expanded client methods
+- ✅ **Config system** (`src/config.rs` — 47 new lines) — new config options, OpenAI-compatible provider support
+- ✅ **Docker healthcheck** — fixed from `/api/v1/stats` (401) to `/api/v1/health` (200)
+- ✅ **memex8-update skill** — reusable workflow for future updates
+
+### Still Remaining (tracked in code as TODOs):
+
+See Phase 5 below for actionable next steps.
+
+---
+
+## Phase 5: Remaining TODOs + Future Enhancements (2026-05-22+)
+
+**Priority: Fix existing bugs first, then expand capabilities.**
+
+### 5.1 File Watcher Activation (HIGH — 2-3 hours)
+
+**Current state:** `watcher.rs` exists (391 lines) but `ingester.rs:78` still has `// TODO: use notify crate for real-time file watching`
+
+**What to do:**
+- Wire up `watcher.rs` into the ingestion pipeline so `memex8 daemon` actually monitors configured paths
+- Test: modify a watched file → verify auto-ingest triggers
+- Add SHA-256 dedup to skip unchanged files on re-ingest
+
+### 5.2 Realm Centroid Recomputation (HIGH — 1-2 hours)
+
+**Current state:** `realms.rs:71-93` — centroid computation, k-means split, and realm merging are all TODO stubs. Slumber falls back to basic heuristics.
+
+**What to do:**
+- Implement `recompute_centroids()` — fetch all member vectors per realm, compute mean, update
+- Implement `split_large_realms()` — k-means k=2 on realm members, check cluster distance threshold
+- Implement `merge_similar_realms()` — compare centroid pairs, merge below threshold
+- This will dramatically improve realm organization quality
+
+### 5.3 Knowledge Graph Traversal (MEDIUM — 3-4 hours)
+
+**Current state:** `engine/mod.rs:970` — `TODO: implement knowledge graph traversal`. Graph module exists (531 lines) but traversal falls back to semantic search.
+
+**What to do:**
+- Wire `graph_search` to use actual adjacency list traversal instead of semantic fallback
+- Add `GET /api/v1/graph/traverse?from=<memory_id>&depth=2` REST endpoint
+- Add MCP tool `memex8_graph_traverse` for agent access
+- Test: store related memories → verify graph links are traversable
+
+### 5.4 MCP SSE Transport (MEDIUM — 2 hours)
+
+**Current state:** `mcp/server.rs:328` — `TODO: implement SSE transport using Axum`
+
+**What to do:**
+- Implement SSE (Server-Sent Events) transport using `axum::response::sse`
+- Allows remote agents to connect over HTTP instead of stdio-only
+- Required for running memex8 as a service accessed by multiple agents
+
+### 5.5 WebSocket Event Broadcasting (LOW — 2 hours)
+
+**Current state:** `api/routes/websocket.rs:17` — `TODO: broadcast events from slumber/ingester`
+
+**What to do:**
+- Broadcast slumber completion, ingest progress, and realm changes to WebSocket subscribers
+- Enable the Web UI to show real-time updates without polling
+
+### 5.6 Init Interactive Wizard (LOW — 2 hours)
+
+**Current state:** `main.rs:329` — `TODO: interactive wizard` for `memex8 init`
+
+**What to do:**
+- Interactive CLI prompts for: embedding provider, Qdrant URL, auth key, watch paths, slumber schedule
+- Generate `config.toml` from wizard answers
+- Use `dialoguer` crate for prompts
+
+### 5.7 Missing "quantized" Qdrant Collection (BUG — 30 min)
+
+**Current state:** Slumber warns: `Collection 'quantized' doesn't exist!` every run. Harmless but noisy.
+
+**What to do:**
+- Either create the `quantized` collection during init/doctor, or
+- Make the slumber pipeline skip quantized optimization if collection doesn't exist (graceful handling)
+
+### 5.8 Mem0 Migration Tool (MEDIUM — 3 hours)
+
+**Current state:** Not started. Mem0 is still Hermes's primary memory.
+
+**What to do:**
+- `memex8 migrate mem0` — export all Mem0 memories via MCP, import into memex8
+- Auto-assign realms based on content similarity to existing realms
+- Pin important realms (personal, environment) to prevent auto-merge
+- Test: search for known facts → verify recall accuracy matches Mem0
+
+### 5.9 Realm Pinning (LOW — 1 hour)
+
+**Current state:** No pinning mechanism. Slumber can merge/rename any realm.
+
+**What to do:**
+- Add `is_pinned: bool` to realm payload
+- `memex8 realms pin <realm_id>` / `unpin`
+- Slumber skips pinned realms during merge/split/rename
+- Critical for `personal`, `environment`, and `cli-ops` realms
+
+### 5.10 API Documentation / OpenAPI Spec (LOW — 2 hours)
+
+**Current state:** No API docs.
+
+**What to do:**
+- Add `utoipa` annotations to Axum routes
+- Generate OpenAPI spec at `GET /api/v1/openapi.json`
+- Serve Swagger UI at `GET /api/v1/docs`
+- Helps agents and humans understand available endpoints
+
+### 5.11 Web UI Polish (LOW — 4 hours)
+
+**Current state:** Basic SPA in `web-dist/` with cards, search, realms, 3D graph.
+
+**What to do:**
+- Dark/light mode toggle
+- Memory edit inline (call `PUT /api/v1/memories/:id`)
+- Realm management UI (pin, merge, rename)
+- Backup/restore UI
+- Real-time updates via WebSocket (Phase 5.5)
+
+### 5.12 Performance Profiling + Benchmarks (MEDIUM — 3 hours)
+
+**Current state:** No benchmarks.
+
+**What to do:**
+- Add `criterion` benchmarks for: search latency, ingest throughput, slumber duration
+- Profile memory usage at 10K, 50K, 100K memories
+- Document expected performance targets
+- Add `memex8 bench` CLI command
+
+---
+
+## Total Remaining Effort Estimate
+
+| Item | Priority | Hours |
+|------|----------|-------|
+| 5.1 File watcher activation | HIGH | 2-3 |
+| 5.2 Realm centroid recomputation | HIGH | 1-2 |
+| 5.3 Knowledge graph traversal | MEDIUM | 3-4 |
+| 5.4 MCP SSE transport | MEDIUM | 2 |
+| 5.5 WebSocket broadcast | LOW | 2 |
+| 5.6 Init wizard | LOW | 2 |
+| 5.7 Missing quantized collection | BUG | 0.5 |
+| 5.8 Mem0 migration | MEDIUM | 3 |
+| 5.9 Realm pinning | LOW | 1 |
+| 5.10 OpenAPI docs | LOW | 2 |
+| 5.11 Web UI polish | LOW | 4 |
+| 5.12 Benchmarks | MEDIUM | 3 |
+
+**Total: ~25-30 hours**
+
+---
+
+*Last updated: 2026-05-22*
