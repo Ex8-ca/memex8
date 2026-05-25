@@ -290,7 +290,7 @@ impl SlumberEngine {
         if let Some(parent) = std::path::Path::new(&index_path).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Err(e) = index.save(index_path, id_map_path) {
+        if let Err(e) = index.save(&index_path, &id_map_path) {
             tracing::warn!("  Failed to save TurboVec index: {}", e);
         } else {
             tracing::info!(
