@@ -118,7 +118,7 @@ pub struct QdrantStore {
 
 const MEMORIES: &str = "memories";
 const REALMS: &str = "realms";
-const QUANTIZED: &str = "memories_quantized";
+// QUANTIZED collection removed — TurboVec handles vector compression
 const GAPS: &str = "gaps";
 const GRAPHS: &str = "graph_edges";
 
@@ -406,18 +406,6 @@ impl QdrantStore {
                     "name",
                     FieldType::Keyword,
                 ))
-                .await?;
-        }
-
-        // ── quantized ──
-        if !self.client.collection_exists(QUANTIZED).await? {
-            tracing::info!("Creating {} collection", QUANTIZED);
-            self.client
-                .create_collection(
-                    CreateCollectionBuilder::new(QUANTIZED)
-                        .vectors_config(VectorParamsBuilder::new(dims, Distance::Cosine))
-                        .on_disk_payload(true),
-                )
                 .await?;
         }
 
@@ -1060,38 +1048,6 @@ impl QdrantStore {
                     .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
                         ids: vec![id.into()],
                     }))
-                    .wait(true),
-            )
-            .await?;
-        Ok(())
-    }
-
-    // ── quantized (slumber) ───────────────────────────────────────────────────
-
-    pub async fn store_quantized(
-        &self,
-        id: &str,
-        vector: &[f32],
-        payload: &MemoryPoint,
-        bit_width: f32,
-    ) -> anyhow::Result<()> {
-        let mut payload = payload.clone();
-        payload.quantized_bit_width = bit_width;
-        let point = PointStruct::new(id.to_string(), vector.to_vec(), memory_to_payload(&payload));
-        self.client
-            .upsert_points(UpsertPointsBuilder::new(QUANTIZED, vec![point]).wait(true))
-            .await?;
-        Ok(())
-    }
-
-    /// Delete a memory from the quantized collection (e.g., when promoting to full precision).
-    pub async fn delete_quantized(&self, id: &str) -> anyhow::Result<()> {
-        self.client
-            .delete_points(
-                DeletePointsBuilder::new(QUANTIZED)
-                    .points(PointsIdsList {
-                        ids: vec![id.into()],
-                    })
                     .wait(true),
             )
             .await?;

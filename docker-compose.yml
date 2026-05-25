@@ -31,7 +31,6 @@ services:
     env_file:
       - ${HOME}/.hermes/.env
     environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - LOCAL_LLM_URL=${LOCAL_LLM_URL:-}
       - LOCAL_LLM_API_KEY=${LOCAL_LLM_API_KEY:-}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-openai}
@@ -40,6 +39,12 @@ services:
       - QDRANT_URL=http://qdrant:6334
       - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
       - RUST_LOG=info
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     depends_on:
       qdrant:
         condition: service_healthy

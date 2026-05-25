@@ -1,7 +1,7 @@
 use crate::config::AppConfig;
 use crate::engine::embedder;
 use crate::engine::memex8_md::write_digest_md;
-use crate::engine::quantizer::{decide_bit_width, AdaptiveScalarQuantizer};
+use crate::engine::quantizer::{decide_bit_width, TurboQuantVectorIndex};
 use crate::engine::reactions::reaction_boost;
 use crate::storage::qdrant::{GapPoint, MemoryPoint, QdrantStore};
 
@@ -237,11 +237,10 @@ impl SlumberEngine {
         Ok(removed)
     }
 
-    // ─── Phase 2: ScalarQuant Compression ─────────────────────────────────────
+    // ─── Phase 2: TurboVec Compression ────────────────────────────────────────
 
-    /// Compress all memories using ScalarQuant and store in the quantized collection.
-    /// Uses the configured quantizer policy (dynamic by default) to select bit width
-    /// per memory based on access_count and importance.
+    /// Build a TurboQuantVectorIndex from all memories and persist to disk.
+    /// Qdrant keeps full-precision vectors; TurboVec handles compressed search.
     async fn scalarquant_compress(&self) -> anyhow::Result<usize> {
         let all = self.store.scroll_all_memories_with_vectors().await?;
 
@@ -250,188 +249,55 @@ impl SlumberEngine {
             return Ok(0);
         }
 
-        // Get dimensions from actual vectors (not config, which may have stale defaults)
         let dims = all[0].vector.len();
-        let is_dynamic = self.config.quantizer.policy == "dynamic";
-        let static_bit_width = self.config.quantizer.static_bit_width;
+        // TurboVec supports bit_width ∈ {2, 4}; use 4 for best quality
+        let turbo_bit_width: usize = 4;
+        let mut index = TurboQuantVectorIndex::new(dims, turbo_bit_width);
 
         let mut quantized = 0;
         let mut skipped = 0;
-        let mut total_cosine = 0.0f32;
-        let mut bit_width_counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
 
         for mem_with_vec in &all {
-            let bit_width = if is_dynamic {
-                decide_bit_width(
-                    mem_with_vec.memory.access_count as u64,
-                    mem_with_vec.memory.importance as f64,
-                )
-            } else {
-                Some(static_bit_width)
-            };
+            let should_quantize = decide_bit_width(
+                mem_with_vec.memory.access_count as u64,
+                mem_with_vec.memory.importance as f64,
+            )
+            .is_some();
 
-            let bw_label = match bit_width {
-                None => "full".to_string(),
-                Some(bw) => format!("{:.1}", bw),
-            };
-            *bit_width_counts.entry(bw_label.clone()).or_insert(0) += 1;
-
-            // Unquantized memories: skip storing in quantized collection
-            let bit_width = match bit_width {
-                Some(bw) => bw,
-                None => {
-                    skipped += 1;
-                    continue;
-                }
-            };
-
-            let quantizer = AdaptiveScalarQuantizer::new(dims, bit_width);
-            let qv = quantizer.quantize(&mem_with_vec.vector);
-            let reconstructed = quantizer.dequantize(&qv);
-
-            // Verify reconstruction quality
-            let cosine = cosine_similarity(&mem_with_vec.vector, &reconstructed);
-            total_cosine += cosine;
-
-            // Only store if quality is acceptable
-            if cosine > 0.7 {
-                self.store
-                    .store_quantized(
-                        &mem_with_vec.memory.id,
-                        &reconstructed,
-                        &mem_with_vec.memory,
-                        bit_width,
-                    )
-                    .await?;
+            if should_quantize {
+                let ids = vec![mem_with_vec.memory.id.clone()];
+                let vectors = vec![mem_with_vec.vector.clone()];
+                index.add_batch(&ids, &vectors);
                 quantized += 1;
             } else {
-                tracing::warn!(
-                    "  Low quality quantization for {}: cosine={:.3}",
-                    mem_with_vec.memory.id,
-                    cosine
-                );
+                skipped += 1;
             }
         }
 
-        let avg_cosine = if quantized > 0 {
-            total_cosine / quantized as f32
+        // Persist index + id_map
+        let index_path = "data/memories.tv";
+        let id_map_path = "data/memories_ids.json";
+        if let Err(e) = index.save(index_path, id_map_path) {
+            tracing::warn!("  Failed to save TurboVec index: {}", e);
         } else {
-            0.0
-        };
+            tracing::info!(
+                "  Saved TurboVec index: {} vectors ({} skipped) → {} ({:.1}x compression)",
+                index.vector_count(),
+                skipped,
+                index_path,
+                index.compression_ratio()
+            );
+        }
 
-        // Build summary string for bit width distribution
-        let mut bw_summary: Vec<_> = bit_width_counts.into_iter().collect();
-        bw_summary.sort_by(|a, b| a.0.cmp(&b.0));
-        let bw_str = bw_summary
-            .iter()
-            .map(|(bw, count)| format!("{}={}", bw, count))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        tracing::info!(
-            "  Quantized {} / {} memories [{}] (skipped={} avg cosine={:.3})",
-            quantized,
-            all.len(),
-            bw_str,
-            skipped,
-            avg_cosine
-        );
         Ok(quantized)
     }
 
-    // ─── Phase 2b: Re-quantify All (dynamic policy) ───────────────────────────
+    // ─── Phase 2b: Re-quantify All (no-op — full rebuild in Phase 2) ─────────
 
-    /// Re-quantize all memories whose optimal bit width has changed since last
-    /// quantization. Uses the dynamic policy to compare current access_count
-    /// and importance against the bit width they were last stored with.
-    ///
-    /// Returns the count of memories that were re-quantized to a different bit width.
+    /// With TurboVec, re-quantify is a full rebuild (Phase 2).
+    /// This is a no-op since scalarquant_compress always rebuilds from scratch.
     async fn re_quantify_all(&self) -> anyhow::Result<usize> {
-        // Only relevant under dynamic policy
-        if self.config.quantizer.policy != "dynamic" {
-            return Ok(0);
-        }
-
-        let all = self.store.scroll_all_memories_with_vectors().await?;
-        if all.is_empty() {
-            return Ok(0);
-        }
-
-        let dims = all[0].vector.len();
-        let mut re_quantized = 0;
-        let mut upgraded = 0;
-        let mut downgraded = 0;
-        let mut promoted_full = 0;
-
-        for mem_with_vec in &all {
-            let mem = &mem_with_vec.memory;
-            let optimal_bw = decide_bit_width(mem.access_count as u64, mem.importance as f64);
-
-            // Check if current stored bit width differs from optimal
-            let current_bw = mem.quantized_bit_width;
-            let needs_change = match optimal_bw {
-                // Memory should be full precision but isn't
-                None if current_bw > 0.0 => true,
-                // Memory should be quantized at a specific width but differs
-                Some(target) if (target - current_bw).abs() > 0.01 => true,
-                // Memory is already at optimal (or both unquantized)
-                _ => false,
-            };
-
-            if !needs_change {
-                continue;
-            }
-
-            match optimal_bw {
-                None => {
-                    // Promote to full precision: remove from quantized collection
-                    // and keep the original vector in the main collection
-                    self.store.delete_quantized(&mem.id).await?;
-                    promoted_full += 1;
-                }
-                Some(target_bw) => {
-                    let quantizer = AdaptiveScalarQuantizer::new(dims, target_bw);
-                    let qv = quantizer.quantize(&mem_with_vec.vector);
-                    let reconstructed = quantizer.dequantize(&qv);
-
-                    let cosine = cosine_similarity(&mem_with_vec.vector, &reconstructed);
-                    if cosine > 0.7 {
-                        self.store
-                            .store_quantized(&mem.id, &reconstructed, &mem_with_vec.memory, target_bw)
-                            .await?;
-                        if target_bw > current_bw {
-                            upgraded += 1;
-                        } else {
-                            downgraded += 1;
-                        }
-                    } else {
-                        tracing::warn!(
-                            "  Low quality re-quantization for {}: cosine={:.3}",
-                            mem.id,
-                            cosine
-                        );
-                        continue;
-                    }
-                }
-            }
-
-            re_quantized += 1;
-        }
-
-        if re_quantized > 0 {
-            tracing::info!(
-                "  Re-quantized {} memories (upgraded={}, downgraded={}, promoted_to_full={})",
-                re_quantized,
-                upgraded,
-                downgraded,
-                promoted_full
-            );
-        } else {
-            tracing::info!("  No memories needed re-quantization");
-        }
-
-        Ok(re_quantized)
+        Ok(0)
     }
 
     // ─── Phase 3: Re-cluster Realms ──────────────────────────────────────────
@@ -1922,7 +1788,6 @@ impl SlumberEngine {
 
         let collections = vec![
             &self.config.qdrant.collection_memories[..],
-            &self.config.qdrant.collection_quantized[..],
             &self.config.qdrant.collection_realms[..],
         ];
 

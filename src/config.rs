@@ -17,9 +17,9 @@ pub struct AppConfig {
     pub inference: InferenceConfig,
     #[serde(default)]
     pub watch: Vec<WatchConfig>,
-    /// Quantizer configuration for slumber compression.
+    /// TurboVec configuration for vector compression.
     #[serde(default)]
-    pub quantizer: QuantizerConfig,
+    pub turbovec: TurbovecConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,8 +115,7 @@ pub struct QdrantConfig {
     pub url: String,
     #[serde(default = "default_memories")]
     pub collection_memories: String,
-    #[serde(default = "default_quantized")]
-    pub collection_quantized: String,
+    // collection_quantized removed — TurboVec handles vector compression
     #[serde(default = "default_realms")]
     pub collection_realms: String,
     #[serde(default = "default_graph_edges")]
@@ -129,9 +128,7 @@ fn default_qdrant_url() -> String {
 fn default_memories() -> String {
     "memories".into()
 }
-fn default_quantized() -> String {
-    "quantized".into()
-}
+// collection_quantized removed — TurboVec handles vector compression
 fn default_realms() -> String {
     "realms".into()
 }
@@ -145,7 +142,7 @@ impl Default for QdrantConfig {
         Self {
             url: default_qdrant_url(),
             collection_memories: default_memories(),
-            collection_quantized: default_quantized(),
+            // collection_quantized removed — TurboVec handles vector compression
             collection_realms: default_realms(),
             collection_graph_edges: default_graph_edges(),
         }
@@ -386,30 +383,36 @@ fn default_spreading_activation_bump() -> f32 {
     0.005
 }
 
-/// Quantizer policy configuration.
+/// TurboVec configuration for vector compression.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuantizerConfig {
-    /// Policy for selecting bit width: "dynamic" (default) or "static".
-    #[serde(default = "default_quantizer_policy")]
-    pub policy: String,
-    /// Bit width used when policy is "static".
-    #[serde(default = "default_quantizer_bit_width")]
-    pub static_bit_width: f32,
+pub struct TurbovecConfig {
+    /// Bit width for TurboQuant compression (2 or 4).
+    #[serde(default = "default_turbovec_bit_width")]
+    pub bit_width: usize,
+    /// Path to persist the TurboVec index.
+    #[serde(default = "default_turbovec_index_path")]
+    pub index_path: String,
+    /// Companion file for id_map (turbovec doesn't persist custom IDs).
+    #[serde(default = "default_turbovec_id_map_path")]
+    pub id_map_path: String,
 }
 
-fn default_quantizer_policy() -> String {
-    "dynamic".into()
+fn default_turbovec_bit_width() -> usize {
+    4
+}
+fn default_turbovec_index_path() -> String {
+    "data/memories.tv".into()
+}
+fn default_turbovec_id_map_path() -> String {
+    "data/memories_ids.json".into()
 }
 
-fn default_quantizer_bit_width() -> f32 {
-    3.5
-}
-
-impl Default for QuantizerConfig {
+impl Default for TurbovecConfig {
     fn default() -> Self {
         Self {
-            policy: default_quantizer_policy(),
-            static_bit_width: default_quantizer_bit_width(),
+            bit_width: default_turbovec_bit_width(),
+            index_path: default_turbovec_index_path(),
+            id_map_path: default_turbovec_id_map_path(),
         }
     }
 }
@@ -502,7 +505,7 @@ impl Default for AppConfig {
             },
             inference: InferenceConfig::default(),
             watch: vec![],
-            quantizer: QuantizerConfig::default(),
+            turbovec: TurbovecConfig::default(),
         }
     }
 }

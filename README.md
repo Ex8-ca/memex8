@@ -2,13 +2,14 @@
 
 > **Personal project.** Shared because the ideas are worth discussing — not a product, no support commitments. Fork it, adapt it, use it at your own risk.
 
-A self-hosted memory system that models how **human memory actually works**: memories fade over time, related ideas connect automatically, and scattered fragments consolidate into dense summaries.
+A self-hosted memory system that models how **human memory actually works**: memories fade over time, related ideas connect automatically, and scattered fragments consolidate into dense summaries. Powered by Google's **TurboQuant** algorithm via TurboVec for 8x compressed vector storage.
 
 ```
 ┌──────────────────────┐     ┌──────────────────────┐     ┌──────────────────────┐
 │   AI Agent (Hermes)   │────▶│     memex8 Engine     │────▶│     Qdrant DB        │
-│   or any MCP client   │◀────│  decay + associations │◀────│  vector storage      │
+│   or any MCP client   │◀────│  decay + associations │◀────│  payload/metadata    │
 └──────────────────────┘     │  consolidation + SL   │     └──────────────────────┘
+                             │  TurboVec (vectors)   │
                              └──────────────────────┘
                                       │
                                       ▼
@@ -57,7 +58,8 @@ The result: an AI agent that remembers what matters, forgets what doesn't, and c
 ### 🔧 Core
 
 - **Rust binary** with embedded web UI — single deployable artifact
-- **Qdrant** for vector storage and semantic search
+- **Qdrant** for payload storage and metadata filtering
+- **TurboVec** (Google's TurboQuant algorithm) for compressed vector search — 8x compression, zero training, faster than FAISS on ARM
 - **Auto-discovered realms** — memories self-organize into knowledge clusters
 - **File watching** — real-time directory monitoring, auto-reingest on change
 - **3D force-directed graph** — interactive visualization of memory associations
@@ -79,12 +81,13 @@ The result: an AI agent that remembers what matters, forgets what doesn't, and c
 
 ### 💤 Slumber Consolidation
 
-Nightly "sleep" pipeline (11 phases): deduplicate → scalar quantization → re-cluster realms → rename/merge realms → prune stale → **LLM consolidation** → index optimization → spreading activation → **associate memories** → **detect gaps** → **session review**.
+Nightly "sleep" pipeline (11 phases): deduplicate → **TurboQuant compression** → re-cluster realms → rename/merge realms → prune stale → **LLM consolidation** → index optimization → spreading activation → **associate memories** → **detect gaps** → **session review**.
 
 | Backend | Model | Notes |
 |---------|-------|-------|
 | **OpenAI** | `gpt-4o-mini` | Default, cheap, no GPU needed |
 | **Local** | Any OpenAI-compatible endpoint | Fully private consolidation |
+| **TurboQuant** | 4-bit compression | 8x vector size reduction, data-oblivious, 0 training
 
 ---
 
@@ -235,8 +238,8 @@ All endpoints (except `/health`) require `Authorization: Bearer <key>`
 memex8/
 ├── src/
 │   ├── api/          # REST API (Axum)
-│   ├── engine/       # Core logic (embedder, chunker, slumber, realms)
-│   ├── storage/      # Qdrant integration
+│   ├── engine/       # Core logic (embedder, chunker, slumber, realms, quantizer)
+│   ├── storage/      # Qdrant integration (payload/metadata only)
 │   ├── mcp/          # MCP server (JSON-RPC 2.0)
 │   └── web/          # Embedded web UI
 ├── plugins/memex8/   # Hermes plugin
@@ -249,13 +252,13 @@ memex8/
 
 ```
 .md file → Chunker (pulldown-cmark AST) → Embedder (OpenAI/Ollama) →
-Realm Assignment (cosine similarity) → Qdrant Store
+Realm Assignment (cosine similarity) → Qdrant Store (+ TurboVec on slumber)
 ```
 
 ### Slumber Pipeline (11 Phases)
 
 ```
-Trigger → Deduplicate → Quantize → Re-cluster → Rename/Merge →
+Trigger → Deduplicate → TurboQuant Compress → Re-cluster → Rename/Merge →
 Prune Stale → LLM Consolidation → Index Opt → Spreading → Associate → Gap Detect → Session Review
 ```
 

@@ -24,7 +24,6 @@ dimensions = 1536
 [qdrant]
 url = "http://qdrant:6333"
 collection_memories = "memories"
-collection_quantized = "quantized"
 collection_realms = "realms"
 collection_graph_edges = "graph_edges"
 
@@ -66,9 +65,13 @@ max_cluster_size = 20
 preserve_originals = true
 confidence_threshold = 0.8
 
-[quantizer]
-policy = "dynamic"          # "dynamic" (default) or "static"
-static_bit_width = 3.5      # Used only when policy = "static"
+[turbovec]
+# Bit width for TurboQuant compression (2 or 4)
+bit_width = 4
+# Path to persist the TurboVec index
+index_path = "data/memories.tv"
+# Companion file for id_map (turbovec doesn't persist custom IDs)
+id_map_path = "data/memories_ids.json"
 
 [slumber.index_optimization]
 enabled = true
