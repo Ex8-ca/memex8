@@ -1,6 +1,14 @@
 # syntax=docker/dockerfile:1
 FROM rust:slim-bookworm AS builder
 
+# turbovec needs OpenBLAS + build toolchain
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential pkg-config libopenblas-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Override host-specific linker flags (home dir paths don't exist here)
+ENV RUSTFLAGS=""
+
 WORKDIR /app
 
 # Cache dependencies layer
