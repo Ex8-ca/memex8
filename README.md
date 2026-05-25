@@ -2,7 +2,7 @@
 
 > **Personal project.** Shared because the ideas are worth discussing — not a product, no support commitments. Fork it, adapt it, use it at your own risk.
 
-A self-hosted memory system that models how **human memory actually works**: memories fade over time, related ideas connect automatically, and scattered fragments consolidate into dense summaries. Powered by Google's **TurboQuant** algorithm via TurboVec for 8x compressed vector storage.
+A self-hosted memory system that models how **human memory actually works**: memories fade over time, related ideas connect automatically, and scattered fragments consolidate into dense summaries. Powered by Google's **TurboQuant** algorithm via [**TurboVec**](https://github.com/RyanCodrai/turbovec) for 8x compressed vector storage.
 
 ```
 ┌──────────────────────┐     ┌──────────────────────┐     ┌──────────────────────┐
@@ -59,7 +59,7 @@ The result: an AI agent that remembers what matters, forgets what doesn't, and c
 
 - **Rust binary** with embedded web UI — single deployable artifact
 - **Qdrant** for payload storage and metadata filtering
-- **TurboVec** (Google's TurboQuant algorithm) for compressed vector search — 8x compression, zero training, faster than FAISS on ARM
+- **TurboVec** ([RyanCodrai/turbovec](https://github.com/RyanCodrai/turbovec)) — Google's TurboQuant algorithm for compressed vector search. 8x compression, zero training, data-oblivious, faster than FAISS on ARM
 - **Auto-discovered realms** — memories self-organize into knowledge clusters
 - **File watching** — real-time directory monitoring, auto-reingest on change
 - **3D force-directed graph** — interactive visualization of memory associations
