@@ -6,8 +6,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential pkg-config libopenblas-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Override host-specific linker flags (home dir paths don't exist here)
-ENV RUSTFLAGS=""
+# Override host-specific linker flags — use system OpenBLAS path
+ENV RUSTFLAGS="-C link-arg=-lopenblas"
 
 WORKDIR /app
 
@@ -27,7 +27,7 @@ RUN cargo build --release
 FROM debian:trixie-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates curl && \
+    apt-get install -y --no-install-recommends ca-certificates curl libopenblas0 && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/memex8 /usr/local/bin/memex8
