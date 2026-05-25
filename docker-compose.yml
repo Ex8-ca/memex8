@@ -39,6 +39,8 @@ services:
       - QDRANT_URL=http://qdrant:6334
       - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
       - RUST_LOG=info
+      - TURBOVEC_INDEX_PATH=/var/lib/memex8/data/memories.tv
+      - TURBOVEC_ID_MAP_PATH=/var/lib/memex8/data/memories_ids.json
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/v1/health || exit 1"]
       interval: 30s
