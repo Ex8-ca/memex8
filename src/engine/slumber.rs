@@ -275,8 +275,21 @@ impl SlumberEngine {
         }
 
         // Persist index + id_map
-        let index_path = "data/memories.tv";
-        let id_map_path = "data/memories_ids.json";
+        // Use config paths if set, otherwise default to data/ in cwd
+        let index_path = if self.config.turbovec.index_path.is_empty() {
+            "data/memories.tv".to_string()
+        } else {
+            self.config.turbovec.index_path.clone()
+        };
+        let id_map_path = if self.config.turbovec.id_map_path.is_empty() {
+            "data/memories_ids.json".to_string()
+        } else {
+            self.config.turbovec.id_map_path.clone()
+        };
+        // Ensure parent directory exists
+        if let Some(parent) = std::path::Path::new(&index_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         if let Err(e) = index.save(index_path, id_map_path) {
             tracing::warn!("  Failed to save TurboVec index: {}", e);
         } else {
