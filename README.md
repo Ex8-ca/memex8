@@ -163,6 +163,38 @@ memory:
   memory_enabled: true
 ```
 
+### Add to SOUL.md
+
+The plugin handles the technical integration — but your SOUL.md is what tells Hermes to actually *use* memex8. Without this, Hermes has the plugin installed but no behavioral instruction to check it.
+
+Add this to `~/.hermes/SOUL.md`:
+
+```markdown
+## Memory
+
+You have persistent memory across sessions via **memex8**.
+
+**First, read `~/.memex8/memex8.md`** before each session — it contains:
+- Daily slumber digests (dates, summaries of what was worked on)
+- Top memories by importance
+- How to use the memex8 tools
+
+**To save new memories**, use memex8_remember. Include:
+- Topic — what was worked on
+- Decisions made — choices agreed upon
+- New facts discovered — environment info, API quirks, user preferences
+- Code patterns established — conventions, architecture choices, workflows
+- Problem solutions found — bugs fixed with how they were resolved
+- Follow-ups needed — anything left incomplete or to revisit
+
+Format as a single structured entry. Skip trivial sessions.
+
+> **session_search** = raw conversation history  
+> **memex8** = curated takeaways
+```
+
+> 💡 **Why this matters:** config.yaml enables the capability — SOUL.md directs the behavior. Both are needed for memex8 to work reliably across sessions.
+
 ### What Happens Automatically
 
 | Trigger | Action |
