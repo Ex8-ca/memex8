@@ -77,6 +77,9 @@ pub struct Engine {
     file_watcher: Arc<RwLock<Option<FileWatcher>>>,
     /// Path to the config file (for persisting watch configs).
     config_path: String,
+    /// TurboVec compressed vector index for fast search.
+    /// Loaded from disk on startup, rebuilt during slumber.
+    turbovec_index: Arc<RwLock<Option<quantizer::TurboQuantVectorIndex>>>,
 }
 
 struct SlumberState {
@@ -125,6 +128,10 @@ impl Engine {
         }
 
         store.ensure_collections(dimensions).await?;
+
+        // Try to load TurboVec index from disk for fast search
+        let turbovec_index = Self::init_turbovec_index(&config);
+
         Ok(Self {
             config,
             store,
@@ -144,7 +151,35 @@ impl Engine {
             openai_base_url,
             file_watcher: Arc::new(RwLock::new(None)),
             config_path: "config.toml".to_string(),
+            turbovec_index,
         })
+    }
+
+    /// Load TurboVec index from disk if it exists, otherwise return empty.
+    fn init_turbovec_index(config: &AppConfig) -> Arc<RwLock<Option<quantizer::TurboQuantVectorIndex>>> {
+        let index_path = config.turbovec.index_path.clone();
+        let id_map_path = config.turbovec.id_map_path.clone();
+        let bit_width = config.turbovec.bit_width;
+        let dims = config.embedding.dimensions as usize;
+
+        let loaded = quantizer::TurboQuantVectorIndex::load(&index_path, &id_map_path, dims, bit_width);
+        match loaded {
+            Ok(index) => {
+                tracing::info!(
+                    "📦 Loaded TurboVec index: {} vectors from {} ({}d @ {}-bit, {:.1}x compression)",
+                    index.vector_count(),
+                    index_path,
+                    dims,
+                    bit_width,
+                    index.compression_ratio()
+                );
+                Arc::new(RwLock::new(Some(index)))
+            }
+            Err(e) => {
+                tracing::debug!("TurboVec index not found at {} (will create on first slumber): {}", index_path, e);
+                Arc::new(RwLock::new(None))
+            }
+        }
     }
 
     /// Handle to reset the idle activity timer (used by scheduler).
@@ -514,41 +549,72 @@ impl Engine {
         let embedder = self.make_embedder()?;
         let query_vector = embedder.embed(query).await?;
 
-        // If tags filter requested, use tag-aware search
-        let results = if let Some(tags) = tags {
-            if tags.is_empty() {
-                self.store
-                    .search(&query_vector, limit + offset, min_score, realm)
-                    .await?
+        // Try TurboVec search first (fast, compressed) when available and no tag filters
+        let results = if tags.is_none() || tags.as_ref().map_or(true, |t| t.is_empty()) {
+            let tv_guard = self.turbovec_index.read().await;
+            if let Some(ref tv) = *tv_guard {
+                // TurboVec path: search compressed index, fetch payloads from Qdrant
+                let fetch_limit = (limit + offset) * 4; // Over-fetch to account for filtering
+                let (scores, indices) = tv.search(&query_vector, fetch_limit);
+                let ids = tv.resolve_ids(&indices);
+
+                // Fetch full payloads from Qdrant by ID
+                let mut fetched: Vec<_> = Vec::new();
+                for (i, &id) in ids.iter().enumerate() {
+                    if i >= scores.len() { break; }
+                    if let Ok(Some(point)) = self.store.get_memory(id).await {
+                        let score = scores[i];
+                        if score >= min_score {
+                            if realm.map_or(true, |re| point.realm_name == re) {
+                                fetched.push((score, point));
+                            }
+                        }
+                    }
+                }
+                fetched.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                fetched
             } else {
-                self.store
-                    .search_by_tags(&query_vector, tags, limit + offset)
-                    .await?
-                    .into_iter()
-                    .filter(|r| r.score >= min_score)
-                    .filter(|r| realm.map_or(true, |re| r.payload.realm_name == re))
-                    .collect()
+                // TurboVec not loaded — fall back to Qdrant
+                let qr = if let Some(tags) = tags {
+                    if tags.is_empty() {
+                        self.store.search(&query_vector, limit + offset, min_score, realm).await?
+                    } else {
+                        self.store.search_by_tags(&query_vector, tags, limit + offset).await?
+                            .into_iter()
+                            .filter(|r| r.score >= min_score)
+                            .filter(|r| realm.map_or(true, |re| r.payload.realm_name == re))
+                            .collect()
+                    }
+                } else {
+                    self.store.search(&query_vector, limit + offset, min_score, realm).await?
+                };
+                qr.into_iter().map(|r| (r.score, r.payload)).collect()
             }
         } else {
-            self.store
-                .search(&query_vector, limit + offset, min_score, realm)
-                .await?
+            // Tag filters active — must use Qdrant (TurboVec has no tag support)
+            let qr = self.store.search_by_tags(&query_vector, tags.as_ref().unwrap(), limit + offset).await?
+                .into_iter()
+                .filter(|r| r.score >= min_score)
+                .filter(|r| realm.map_or(true, |re| r.payload.realm_name == re))
+                .collect::<Vec<_>>();
+            qr.into_iter().map(|r| (r.score, r.payload)).collect()
         };
 
         // Apply pagination
         let results: Vec<_> = results.into_iter().skip(offset).take(limit).collect();
 
         // Touch all returned memories (increment access_count, bump importance)
-        let touch_ids: Vec<&str> = results.iter().map(|r| r.payload.id.as_str()).collect();
+        let touch_ids: Vec<String> = results.iter().map(|(_, p)| p.id.clone()).collect();
         let bump = self.config.slumber.touch_importance_bump;
-        let _ = self.store.track_access_batch(&touch_ids, bump).await;
+        let touch_refs: Vec<&str> = touch_ids.iter().map(|s| s.as_str()).collect();
+        let _ = self.store.track_access_batch(&touch_refs, bump).await;
 
         // Spreading activation: bump associated memories too
         let spread_bump = self.config.slumber.spreading_activation_bump;
         if spread_bump > 0.0 {
             let associated_ids: Vec<&str> = results
                 .iter()
-                .flat_map(|r| r.payload.related_memory_ids.iter().map(|s| s.as_str()))
+                .flat_map(|(_, p)| p.related_memory_ids.iter().map(|s| s.as_str()))
                 .collect();
             if !associated_ids.is_empty() {
                 let _ = self
@@ -566,18 +632,18 @@ impl Engine {
 
         Ok(results
             .into_iter()
-            .map(|r| MemoryResult {
-                id: r.payload.id,
-                content: r.payload.content,
-                heading: r.payload.heading,
-                realm_name: r.payload.realm_name,
-                importance: r.payload.importance,
-                score: r.score,
-                last_accessed: r.payload.last_accessed,
-                access_count: r.payload.access_count,
-                upvotes: r.payload.upvotes,
-                related_memory_ids: r.payload.related_memory_ids,
-                association_strengths: r.payload.association_strengths,
+            .map(|(score, p)| MemoryResult {
+                id: p.id,
+                content: p.content,
+                heading: p.heading,
+                realm_name: p.realm_name,
+                importance: p.importance,
+                score,
+                last_accessed: p.last_accessed,
+                access_count: p.access_count,
+                upvotes: p.upvotes,
+                related_memory_ids: p.related_memory_ids,
+                association_strengths: p.association_strengths,
             })
             .collect())
     }
