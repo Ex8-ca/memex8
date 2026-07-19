@@ -51,6 +51,7 @@ The result: an AI agent that remembers what matters, forgets what doesn't, and c
 | Feature | What It Does | Configurable |
 |---------|-------------|--------------|
 | **Memory Decay** | Untouched memories lose importance over time (forgetting curve). Floor at 0.05 — nothing is ever fully deleted | Decay rate: 0.001/day |
+| **Memory Verification** | Nightly sweep samples memories and rates confidence they're still true. Stale/contradicted memories rank lower in recall but never disappear | Sample size, thresholds |
 | **Semantic Associations** | During nightly "slumber", each memory links to its 5 nearest neighbors by vector similarity | Top-K: 5, Min strength: 0.6 |
 | **Spreading Activation** | Recalling a memory bumps its associated memories too (0.005). Like how "Tesla" primes "Skar speakers" | Activation bump: 0.005 |
 | **Consolidation** | Raw conversation fragments merge into dense summaries. 98 scattered snippets → 5 clean summaries | Trigger: cron or API |
@@ -81,13 +82,13 @@ The result: an AI agent that remembers what matters, forgets what doesn't, and c
 
 ### 💤 Slumber Consolidation
 
-Nightly "sleep" pipeline (11 phases): deduplicate → **TurboQuant compression** → re-cluster realms → rename/merge realms → prune stale → **LLM consolidation** → index optimization → spreading activation → **associate memories** → **detect gaps** → **session review**.
+Nightly "sleep" pipeline (13 phases): deduplicate → **TurboQuant compression** → re-cluster realms → rename/merge realms → prune stale → **LLM consolidation** → index optimization → spreading activation → **associate memories** → **detect gaps** → **session review** → prune empty realms → **memory verification**.
 
 | Backend | Model | Notes |
 |---------|-------|-------|
 | **OpenAI** | `gpt-4o-mini` | Default, cheap, no GPU needed |
 | **Local** | Any OpenAI-compatible endpoint | Fully private consolidation |
-| **TurboQuant** | 4-bit compression | 8x vector size reduction, data-oblivious, 0 training
+| **TurboQuant** | 4-bit compression | 8x vector size reduction, data-oblivious, 0 training |
 
 ---
 
@@ -232,17 +233,18 @@ memex8 stats         # System statistics
 
 ### Memories & Realms
 
-|| Method | Endpoint | Description |
+| Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET`  | `/api/v1/memories` | List all memories (sort: `ingested_at`, `importance`, `last_accessed`, `access_count`) |
 | `POST` | `/api/v1/memories` | Store a new memory |
-|| `POST` | `/api/v1/memories/search` | Semantic search |
-|| `GET`  | `/api/v1/memories/recall` | Top memories |
-|| `GET`  | `/api/v1/memories/{id}` | Get memory by ID |
-|| `DELETE` | `/api/v1/memories/{id}` | Delete memory |
-|| `GET`  | `/api/v1/realms` | List realms |
-|| `POST` | `/api/v1/slumber/trigger` | Trigger slumber |
-|| `GET`  | `/api/v1/health` | Health check (no auth) |
+| `POST` | `/api/v1/memories/search` | Semantic search |
+| `GET`  | `/api/v1/memories/recall` | Top memories |
+| `GET`  | `/api/v1/memories/verification-summary` | Count memories by verification status (verified/stale/contradicted/unverified) |
+| `GET`  | `/api/v1/memories/{id}` | Get memory by ID |
+| `DELETE` | `/api/v1/memories/{id}` | Delete memory |
+| `GET`  | `/api/v1/realms` | List realms |
+| `POST` | `/api/v1/slumber/trigger` | Trigger slumber |
+| `GET`  | `/api/v1/health` | Health check (no auth) |
 
 ### Reactions & Associations
 
@@ -287,11 +289,12 @@ memex8/
 Realm Assignment (cosine similarity) → Qdrant Store (+ TurboVec on slumber)
 ```
 
-### Slumber Pipeline (11 Phases)
+### Slumber Pipeline (13 Phases)
 
 ```
 Trigger → Deduplicate → TurboQuant Compress → Re-cluster → Rename/Merge →
-Prune Stale → LLM Consolidation → Index Opt → Spreading → Associate → Gap Detect → Session Review
+Prune Stale → LLM Consolidation → Index Opt → Spreading → Associate → Gap Detect →
+Session Review → Prune Empty Realms → Memory Verification
 ```
 
 ---
