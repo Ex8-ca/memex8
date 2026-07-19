@@ -44,6 +44,15 @@ pub struct MemoryPoint {
     /// Bit width the memory was quantized at (0.0 = unquantized / full precision).
     #[serde(default)]
     pub quantized_bit_width: f32,
+    /// ISO-8601 timestamp of last verification sweep. None = never verified.
+    #[serde(default)]
+    pub last_verified: Option<String>,
+    /// Verifier's confidence the claim is still true, 0.0–1.0. None = unverified.
+    #[serde(default)]
+    pub verification_confidence: Option<f32>,
+    /// "unverified" | "verified" | "stale" | "contradicted"
+    #[serde(default)]
+    pub verification_status: String,
 }
 
 /// Memory with its embedding vector (internal use only, not serialized).
@@ -273,6 +282,9 @@ fn memory_to_payload(mem: &MemoryPoint) -> Payload {
         "association_strengths": mem.association_strengths,
         "reaction_score": mem.reaction_score,
         "topic_clusters": mem.topic_clusters,
+        "last_verified": mem.last_verified,
+        "verification_confidence": mem.verification_confidence,
+        "verification_status": mem.verification_status,
     });
     Payload::try_from(json).unwrap_or_default()
 }
@@ -299,6 +311,13 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
         reaction_score: map_f32(map, "reaction_score"),
         topic_clusters: map_str_vec(map, "topic_clusters"),
         quantized_bit_width: map_f32(map, "quantized_bit_width"),
+        last_verified: map_str(map, "last_verified"),
+        verification_confidence: map
+            .get("verification_confidence")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
+        verification_status: map_str(map, "verification_status")
+            .unwrap_or_else(|| "unverified".to_string()),
     }
 }
 
@@ -499,6 +518,9 @@ impl QdrantStore {
             reaction_score,
             topic_clusters: vec![],
             quantized_bit_width: 0.0,
+            last_verified: None,
+            verification_confidence: None,
+            verification_status: "unverified".to_string(),
         };
         let payload = memory_to_payload(&mem);
         let point = PointStruct::new(id.to_string(), vector.to_vec(), payload);

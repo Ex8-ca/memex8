@@ -61,6 +61,9 @@ pub struct SlumberReport {
     pub realms_pruned: usize,
     /// Memories re-quantized to a different bit width during dynamic policy pass.
     pub re_quantized: usize,
+    /// Memories whose verification status was refreshed (Phase 13).
+    #[serde(default)]
+    pub memories_verified: usize,
 }
 
 impl SlumberEngine {
@@ -151,6 +154,14 @@ impl SlumberEngine {
         tracing::info!("💤 Slumber phase 12: Prune empty realms");
         report.realms_pruned = self.prune_empty_realms().await?;
 
+        // Phase 13: Verification sweep — LLM-rates a sample of memories and
+        // stamps last_verified / verification_confidence / verification_status.
+        // Never aborts the pipeline on LLM/parse failure (logs and continues).
+        if self.config.verification.enabled {
+            tracing::info!("💤 Slumber phase 13: Verification sweep");
+            report.memories_verified = self.verification_sweep().await?;
+        }
+
         // Phase 7: Write master memex8.md digest
         if self.config.digest_md.enabled {
             tracing::info!("💤 Slumber phase 7: Write digest md");
@@ -173,7 +184,7 @@ impl SlumberEngine {
         }
 
         tracing::info!(
-            "✅ Slumber complete: scanned={} dedup={} quantized={} re_quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={} gaps={} sessions_reviewed={} realms_pruned={}",
+            "✅ Slumber complete: scanned={} dedup={} quantized={} re_quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={} gaps={} sessions_reviewed={} realms_pruned={} verified={}",
             report.memories_scanned,
             report.deduplicated,
             report.quantized,
@@ -190,6 +201,7 @@ impl SlumberEngine {
             report.gaps_detected,
             report.sessions_reviewed,
             report.realms_pruned,
+            report.memories_verified,
         );
 
         Ok(report)
@@ -2288,6 +2300,253 @@ impl SlumberEngine {
         tracing::info!("  Pruned {} empty realm shells", pruned);
         Ok(pruned)
     }
+
+    // ─── Phase 13: Verification Sweep ─────────────────────────────────────────
+
+    /// LLM-rates a sample of memories for continued truthfulness and stamps
+    /// last_verified / verification_confidence / verification_status.
+    /// Never aborts the pipeline on LLM or parse failure — logs and continues.
+    async fn verification_sweep(&self) -> anyhow::Result<usize> {
+        use rand::seq::SliceRandom;
+
+        let cfg = &self.config.verification;
+        let all = self.store.scroll_all_memories().await?;
+        let now = chrono::Utc::now();
+
+        // 1. Eligible = has content, and not verified within min_interval_days
+        let eligible: Vec<&MemoryPoint> = all
+            .iter()
+            .filter(|m| {
+                if m.content.trim().is_empty() {
+                    return false;
+                }
+                match &m.last_verified {
+                    Some(ts) => {
+                        let last = chrono::DateTime::parse_from_rfc3339(ts)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .unwrap_or(now);
+                        (now - last).num_days() >= cfg.min_interval_days as i64
+                    }
+                    None => true,
+                }
+            })
+            .collect();
+
+        if eligible.is_empty() {
+            tracing::info!("  Verification sweep: no eligible memories");
+            return Ok(0);
+        }
+
+        // 2. Sample: 40% high-access never-verified, 40% oldest in fast-changing
+        //    realms, 20% random remainder.
+        let target = cfg.sample_size.min(eligible.len());
+        let n_high = target * 2 / 5;
+        let n_realm = target * 2 / 5;
+        let n_rand = target - n_high - n_realm;
+
+        let mut picked: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut sample: Vec<&MemoryPoint> = Vec::new();
+
+        let mut never_verified: Vec<&MemoryPoint> = eligible
+            .iter()
+            .filter(|m| m.last_verified.is_none())
+            .copied()
+            .collect();
+        never_verified.sort_by(|a, b| b.access_count.cmp(&a.access_count));
+        for m in never_verified.into_iter().take(n_high) {
+            if picked.insert(m.id.clone()) {
+                sample.push(m);
+            }
+        }
+
+        const FAST_REALMS: [&str; 4] =
+            ["environment", "technical", "infrastructure", "services"];
+        let mut fast: Vec<&MemoryPoint> = eligible
+            .iter()
+            .filter(|m| {
+                let realm = m.realm_name.to_lowercase();
+                FAST_REALMS.iter().any(|r| realm.contains(r))
+            })
+            .copied()
+            .collect();
+        // Oldest verification first; never-verified (None) sorts oldest.
+        fast.sort_by(|a, b| {
+            let ta = a.last_verified.as_deref().unwrap_or("");
+            let tb = b.last_verified.as_deref().unwrap_or("");
+            ta.cmp(tb)
+        });
+        for m in fast.into_iter().take(n_realm) {
+            if picked.insert(m.id.clone()) {
+                sample.push(m);
+            }
+        }
+
+        let mut rest: Vec<&MemoryPoint> = eligible
+            .iter()
+            .filter(|m| !picked.contains(&m.id))
+            .copied()
+            .collect();
+        // ThreadRng is !Send — scope it tightly so it can never be captured
+        // by the async state machine across an await point.
+        {
+            let mut rng = rand::thread_rng();
+            rest.shuffle(&mut rng);
+        }
+        for m in rest.into_iter().take(n_rand) {
+            if picked.insert(m.id.clone()) {
+                sample.push(m);
+            }
+        }
+
+        if sample.is_empty() {
+            return Ok(0);
+        }
+
+        // 3. Build the verification prompt
+        let claims: Vec<String> = sample
+            .iter()
+            .map(|m| {
+                let content = if m.content.len() > 400 {
+                    let safe_end = m
+                        .content
+                        .char_indices()
+                        .take_while(|(i, _)| *i < 400)
+                        .last()
+                        .map_or(m.content.len(), |(i, c)| i + c.len_utf8());
+                    format!("{}...", &m.content[..safe_end])
+                } else {
+                    m.content.clone()
+                };
+                format!(
+                    "- id: {}\n  realm: {}\n  ingested: {}\n  claim: {}",
+                    m.id, m.realm_name, m.ingested_at, content
+                )
+            })
+            .collect();
+
+        let prompt = format!(
+            "You are verifying an AI memory store. For each claim below, rate your confidence \
+            that it is still true TODAY (0.0-1.0).\n\
+            Rules:\n\
+            - Facts about running services, ports, paths, and versions decay: if a claim was \
+            ingested more than 90 days ago, cap at 0.6 unless it is clearly timeless.\n\
+            - Personal facts (family, preferences, birthdays, locations) are stable: cap at 0.95.\n\
+            - If a claim contains explicit change markers (\"no longer\", \"moved\", \"replaced\", \
+            \"used to\"), rate 0.1.\n\
+            - Return ONLY a JSON array, no prose, no code fences: \
+            [{{\"id\": \"...\", \"confidence\": 0.0, \"reason\": \"short\"}}]\n\n\
+            Claims:\n{}",
+            claims.join("\n")
+        );
+
+        // 4. Call the LLM (same backend dispatch as consolidation)
+        let backend = self.config.slumber.consolidation.backend.clone();
+        let model = self.config.slumber.consolidation.model.clone();
+        let response = match backend.as_str() {
+            "openai" => {
+                let api_key = std::env::var("OPENAI_API_KEY").ok();
+                if api_key.is_none() {
+                    tracing::warn!("  Verification sweep: OPENAI_API_KEY not set, skipping");
+                    return Ok(0);
+                }
+                let openai_model = model.as_deref().unwrap_or("gpt-4o-mini");
+                self.call_openai(&api_key.unwrap(), openai_model, &prompt)
+                    .await
+            }
+            "local" => {
+                let llm_url = std::env::var("LOCAL_LLM_URL")
+                    .unwrap_or_else(|_| "http://192.168.1.8:8888".into());
+                let llm_key = std::env::var("LOCAL_LLM_API_KEY").ok();
+                self.call_local_llm(&llm_url, llm_key.as_deref(), model.as_deref(), &prompt)
+                    .await
+            }
+            other => {
+                tracing::warn!("  Verification sweep: unknown backend '{}', skipping", other);
+                return Ok(0);
+            }
+        };
+
+        let response = match response {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("  Verification LLM call failed (continuing): {}", e);
+                return Ok(0);
+            }
+        };
+
+        // 5. Parse the JSON array out of the response (LLMs wrap in prose/fences)
+        let json_str = match (response.find('['), response.rfind(']')) {
+            (Some(s), Some(e)) if e > s => &response[s..=e],
+            _ => {
+                tracing::warn!("  Verification response had no JSON array, skipping");
+                return Ok(0);
+            }
+        };
+
+        let ratings: Vec<VerificationRating> = match serde_json::from_str(json_str) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("  Verification JSON parse failed (continuing): {}", e);
+                return Ok(0);
+            }
+        };
+
+        // 6. Write back — batched set_payload, only for ids we actually sampled
+        let now_str = now.to_rfc3339();
+        let mut updates: Vec<(&str, qdrant_client::Payload)> = Vec::new();
+        let (mut n_verified, mut n_stale, mut n_contra) = (0usize, 0usize, 0usize);
+
+        for r in &ratings {
+            if !picked.contains(&r.id) {
+                continue; // hallucinated id — ignore
+            }
+            let confidence = r.confidence.clamp(0.0, 1.0);
+            let status = if confidence >= cfg.stale_threshold {
+                n_verified += 1;
+                "verified"
+            } else if confidence >= cfg.contradicted_threshold {
+                n_stale += 1;
+                "stale"
+            } else {
+                n_contra += 1;
+                "contradicted"
+            };
+            let payload: qdrant_client::Payload = serde_json::json!({
+                "last_verified": now_str,
+                "verification_confidence": confidence,
+                "verification_status": status,
+            })
+            .try_into()
+            .unwrap_or_default();
+            updates.push((r.id.as_str(), payload));
+        }
+
+        const BATCH_SIZE: usize = 100;
+        for chunk in updates.chunks(BATCH_SIZE) {
+            if let Err(e) = self.store.batch_update_payload(chunk).await {
+                tracing::warn!("  Batch verification update failed: {}", e);
+            }
+        }
+
+        let total = updates.len();
+        tracing::info!(
+            "  Verification sweep: {} rated — {} verified, {} stale, {} contradicted",
+            total,
+            n_verified,
+            n_stale,
+            n_contra
+        );
+        Ok(total)
+    }
+}
+
+/// One row of the LLM's verification response (Phase 13).
+#[derive(Debug, serde::Deserialize)]
+struct VerificationRating {
+    id: String,
+    confidence: f32,
+    #[allow(dead_code)]
+    reason: Option<String>,
 }
 
 /// Cosine similarity between two vectors.

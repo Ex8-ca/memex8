@@ -20,6 +20,9 @@ pub struct AppConfig {
     /// TurboVec configuration for vector compression.
     #[serde(default)]
     pub turbovec: TurbovecConfig,
+    /// Memory verification sweep configuration (slumber Phase 13).
+    #[serde(default)]
+    pub verification: VerificationConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -419,6 +422,54 @@ impl Default for TurbovecConfig {
     }
 }
 
+/// Memory verification sweep configuration (slumber Phase 13).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationConfig {
+    /// Whether the verification sweep runs during slumber.
+    #[serde(default = "default_verification_enabled")]
+    pub enabled: bool,
+    /// Approximate number of memories sampled per sweep.
+    #[serde(default = "default_verification_sample_size")]
+    pub sample_size: usize,
+    /// Don't re-verify anything verified fewer than this many days ago.
+    #[serde(default = "default_verification_min_interval_days")]
+    pub min_interval_days: u64,
+    /// Confidence >= this maps to "verified".
+    #[serde(default = "default_verification_stale_threshold")]
+    pub stale_threshold: f32,
+    /// Confidence >= this (but below stale_threshold) maps to "stale"; below maps to "contradicted".
+    #[serde(default = "default_verification_contradicted_threshold")]
+    pub contradicted_threshold: f32,
+}
+
+fn default_verification_enabled() -> bool {
+    true
+}
+fn default_verification_sample_size() -> usize {
+    30
+}
+fn default_verification_min_interval_days() -> u64 {
+    7
+}
+fn default_verification_stale_threshold() -> f32 {
+    0.8
+}
+fn default_verification_contradicted_threshold() -> f32 {
+    0.4
+}
+
+impl Default for VerificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_verification_enabled(),
+            sample_size: default_verification_sample_size(),
+            min_interval_days: default_verification_min_interval_days(),
+            stale_threshold: default_verification_stale_threshold(),
+            contradicted_threshold: default_verification_contradicted_threshold(),
+        }
+    }
+}
+
 impl AppConfig {
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let config_path = Path::new(path);
@@ -508,6 +559,7 @@ impl Default for AppConfig {
             inference: InferenceConfig::default(),
             watch: vec![],
             turbovec: TurbovecConfig::default(),
+            verification: VerificationConfig::default(),
         }
     }
 }

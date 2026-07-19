@@ -802,6 +802,9 @@ mod tests {
             reaction_score: 0.0,
             topic_clusters: vec![],
             quantized_bit_width: 0.0,
+            last_verified: None,
+            verification_confidence: None,
+            verification_status: "unverified".into(),
         };
 
         let mem_b = MemoryPoint {
@@ -825,6 +828,9 @@ mod tests {
             reaction_score: 0.0,
             topic_clusters: vec![],
             quantized_bit_width: 0.0,
+            last_verified: None,
+            verification_confidence: None,
+            verification_status: "unverified".into(),
         };
 
         let (link_type, confidence, _) = classify_relationship(&mem_a, &mem_b, 0.8);
