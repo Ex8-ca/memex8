@@ -87,6 +87,17 @@ pub struct SearchResult {
     pub payload: MemoryPoint,
 }
 
+/// Counts of memories by verification status (Phase A — memory verification).
+/// Returned by `GET /api/v1/memories/verification-summary` and embedded in the
+/// slumber report.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VerificationStatusCounts {
+    pub verified: u64,
+    pub stale: u64,
+    pub contradicted: u64,
+    pub unverified: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectionStats {
     pub vector_count: u64,
@@ -835,6 +846,27 @@ impl QdrantStore {
     pub async fn count_memories(&self) -> anyhow::Result<u64> {
         let resp = self.client.count(CountPointsBuilder::new(MEMORIES)).await?;
         Ok(resp.result.map(|r| r.count as u64).unwrap_or(0))
+    }
+
+    /// Count memories by verification status. Cheap scroll over payloads
+    /// (Qdrant has no group-by aggregate; the memories collection is small
+    /// enough that a payload-only scroll is fine — same pattern as
+    /// `get_tag_suggestions`).
+    pub async fn count_by_verification_status(
+        &self,
+    ) -> anyhow::Result<VerificationStatusCounts> {
+        let all = self.scroll_all_memories().await?;
+        let mut counts = VerificationStatusCounts::default();
+        for mem in &all {
+            match mem.verification_status.as_str() {
+                "verified" => counts.verified += 1,
+                "stale" => counts.stale += 1,
+                "contradicted" => counts.contradicted += 1,
+                // "" (never stamped) and anything unexpected counts as unverified
+                _ => counts.unverified += 1,
+            }
+        }
+        Ok(counts)
     }
 
     pub async fn delete_by_realm(&self, realm_id: &str) -> anyhow::Result<()> {

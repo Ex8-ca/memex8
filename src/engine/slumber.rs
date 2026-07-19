@@ -3,7 +3,7 @@ use crate::engine::embedder;
 use crate::engine::memex8_md::write_digest_md;
 use crate::engine::quantizer::{decide_bit_width, TurboQuantVectorIndex};
 use crate::engine::reactions::reaction_boost;
-use crate::storage::qdrant::{GapPoint, MemoryPoint, QdrantStore};
+use crate::storage::qdrant::{GapPoint, MemoryPoint, QdrantStore, VerificationStatusCounts};
 
 pub struct SlumberEngine {
     config: AppConfig,
@@ -64,6 +64,9 @@ pub struct SlumberReport {
     /// Memories whose verification status was refreshed (Phase 13).
     #[serde(default)]
     pub memories_verified: usize,
+    /// Per-status breakdown of the Phase 13 verification sweep ratings.
+    #[serde(default)]
+    pub verification_counts: VerificationStatusCounts,
 }
 
 impl SlumberEngine {
@@ -159,7 +162,9 @@ impl SlumberEngine {
         // Never aborts the pipeline on LLM/parse failure (logs and continues).
         if self.config.verification.enabled {
             tracing::info!("💤 Slumber phase 13: Verification sweep");
-            report.memories_verified = self.verification_sweep().await?;
+            let (verified_count, status_counts) = self.verification_sweep().await?;
+            report.memories_verified = verified_count;
+            report.verification_counts = status_counts;
         }
 
         // Phase 7: Write master memex8.md digest
@@ -2306,7 +2311,8 @@ impl SlumberEngine {
     /// LLM-rates a sample of memories for continued truthfulness and stamps
     /// last_verified / verification_confidence / verification_status.
     /// Never aborts the pipeline on LLM or parse failure — logs and continues.
-    async fn verification_sweep(&self) -> anyhow::Result<usize> {
+    /// Returns (total rated, per-status counts) for the slumber report.
+    async fn verification_sweep(&self) -> anyhow::Result<(usize, VerificationStatusCounts)> {
         use rand::seq::SliceRandom;
 
         let cfg = &self.config.verification;
@@ -2334,7 +2340,7 @@ impl SlumberEngine {
 
         if eligible.is_empty() {
             tracing::info!("  Verification sweep: no eligible memories");
-            return Ok(0);
+            return Ok((0, VerificationStatusCounts::default()));
         }
 
         // 2. Sample: 40% high-access never-verified, 40% oldest in fast-changing
@@ -2399,7 +2405,7 @@ impl SlumberEngine {
         }
 
         if sample.is_empty() {
-            return Ok(0);
+            return Ok((0, VerificationStatusCounts::default()));
         }
 
         // 3. Build the verification prompt
@@ -2447,7 +2453,7 @@ impl SlumberEngine {
                 let api_key = std::env::var("OPENAI_API_KEY").ok();
                 if api_key.is_none() {
                     tracing::warn!("  Verification sweep: OPENAI_API_KEY not set, skipping");
-                    return Ok(0);
+                    return Ok((0, VerificationStatusCounts::default()));
                 }
                 let openai_model = model.as_deref().unwrap_or("gpt-4o-mini");
                 self.call_openai(&api_key.unwrap(), openai_model, &prompt)
@@ -2462,7 +2468,7 @@ impl SlumberEngine {
             }
             other => {
                 tracing::warn!("  Verification sweep: unknown backend '{}', skipping", other);
-                return Ok(0);
+                return Ok((0, VerificationStatusCounts::default()));
             }
         };
 
@@ -2470,7 +2476,7 @@ impl SlumberEngine {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("  Verification LLM call failed (continuing): {}", e);
-                return Ok(0);
+                return Ok((0, VerificationStatusCounts::default()));
             }
         };
 
@@ -2479,7 +2485,7 @@ impl SlumberEngine {
             (Some(s), Some(e)) if e > s => &response[s..=e],
             _ => {
                 tracing::warn!("  Verification response had no JSON array, skipping");
-                return Ok(0);
+                return Ok((0, VerificationStatusCounts::default()));
             }
         };
 
@@ -2487,7 +2493,7 @@ impl SlumberEngine {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("  Verification JSON parse failed (continuing): {}", e);
-                return Ok(0);
+                return Ok((0, VerificationStatusCounts::default()));
             }
         };
 
@@ -2529,6 +2535,12 @@ impl SlumberEngine {
         }
 
         let total = updates.len();
+        let counts = VerificationStatusCounts {
+            verified: n_verified as u64,
+            stale: n_stale as u64,
+            contradicted: n_contra as u64,
+            unverified: 0,
+        };
         tracing::info!(
             "  Verification sweep: {} rated — {} verified, {} stale, {} contradicted",
             total,
@@ -2536,7 +2548,7 @@ impl SlumberEngine {
             n_stale,
             n_contra
         );
-        Ok(total)
+        Ok((total, counts))
     }
 }
 

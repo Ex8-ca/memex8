@@ -103,6 +103,10 @@ fn api_routes() -> Router<Arc<AppState>> {
             axum::routing::get(crate::api::routes::memories::tags),
         )
         .route(
+            "/memories/verification-summary",
+            axum::routing::get(crate::api::routes::memories::verification_summary),
+        )
+        .route(
             "/memories/{id}",
             axum::routing::get(crate::api::routes::memories::get),
         )

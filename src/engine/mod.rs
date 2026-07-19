@@ -41,6 +41,19 @@ pub struct MemoryResult {
     pub association_strengths: Vec<f32>,
 }
 
+/// Soft score multiplier for recall-time verification down-weighting
+/// (Phase A.2). Never filters — only re-weights so stale/contradicted
+/// memories rank lower but still surface. See PLAN-memory-memex8.md.
+pub(crate) fn verification_score_multiplier(status: &str) -> f32 {
+    match status {
+        "verified" => 1.0,
+        "unverified" => 0.95, // slight penalty, not exclusion
+        "stale" => 0.85,
+        "contradicted" => 0.5,
+        _ => 0.95,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlumberStatus {
     pub state: String, // "idle", "running", "paused"
@@ -600,6 +613,21 @@ impl Engine {
             qr.into_iter().map(|r| (r.score, r.payload)).collect()
         };
 
+        // Phase A.2: soft down-weight by verification status. Applies to ALL
+        // retrieval paths above (TurboVec, Qdrant fallback, tag-filter).
+        // Never filters — only re-weights, then re-sorts so the weighted
+        // ranking is reflected before pagination.
+        let mut results: Vec<(f32, crate::storage::qdrant::MemoryPoint)> = results
+            .into_iter()
+            .map(|(score, p)| {
+                (
+                    score * verification_score_multiplier(&p.verification_status),
+                    p,
+                )
+            })
+            .collect();
+        results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
         // Apply pagination
         let results: Vec<_> = results.into_iter().skip(offset).take(limit).collect();
 
@@ -677,7 +705,11 @@ impl Engine {
                     .unwrap_or(0.0);
                 let days_since = ((now - access_ts) / 86400.0).max(0.0);
                 let recency = 1.0 / (1.0 + days_since * 0.1);
-                let score = m.importance * recency as f32 * (1.0 + m.access_count as f32 * 0.05);
+                // Phase A.2: soft verification down-weight (never filters)
+                let score = m.importance
+                    * recency as f32
+                    * (1.0 + m.access_count as f32 * 0.05)
+                    * verification_score_multiplier(&m.verification_status);
                 (m, score)
             })
             .collect();
@@ -975,6 +1007,14 @@ impl Engine {
             embedding_dimensions: self.embed_dimensions,
             slumber_state: slumber.state,
         })
+    }
+
+    /// Count memories by verification status (Phase A.2).
+    /// Backs `GET /api/v1/memories/verification-summary`.
+    pub async fn verification_summary(
+        &self,
+    ) -> anyhow::Result<crate::storage::qdrant::VerificationStatusCounts> {
+        self.store.count_by_verification_status().await
     }
 
     pub async fn store_memory(
@@ -1322,5 +1362,39 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         0.0
     } else {
         dot / (norm_a * norm_b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verification_score_multiplier;
+
+    #[test]
+    fn test_verification_score_multiplier_values() {
+        assert_eq!(verification_score_multiplier("verified"), 1.0);
+        assert_eq!(verification_score_multiplier("unverified"), 0.95);
+        assert_eq!(verification_score_multiplier("stale"), 0.85);
+        assert_eq!(verification_score_multiplier("contradicted"), 0.5);
+    }
+
+    #[test]
+    fn test_verification_score_multiplier_unknown_defaults_to_unverified() {
+        // Never-stamped ("") or unexpected statuses get the slight unverified
+        // penalty — never exclusion, never a boost.
+        assert_eq!(verification_score_multiplier(""), 0.95);
+        assert_eq!(verification_score_multiplier("something-else"), 0.95);
+    }
+
+    #[test]
+    fn test_verification_downweight_orders_results() {
+        // Regression: two identical memories, one contradicted — the verified
+        // one must rank first after weighting.
+        let raw_score = 0.9f32;
+        let verified = raw_score * verification_score_multiplier("verified");
+        let contradicted = raw_score * verification_score_multiplier("contradicted");
+        assert!(verified > contradicted);
+        let stale = raw_score * verification_score_multiplier("stale");
+        assert!(verified > stale);
+        assert!(stale > contradicted);
     }
 }

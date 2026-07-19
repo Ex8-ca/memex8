@@ -214,6 +214,15 @@ pub struct ListResponse {
     pub offset: usize,
 }
 
+/// GET /api/v1/memories/verification-summary — counts by verification status.
+/// Registered before `/memories/{id}` so the static segment wins.
+pub async fn verification_summary(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<crate::storage::qdrant::VerificationStatusCounts>, crate::api::error::ApiError> {
+    let counts = state.engine.verification_summary().await?;
+    Ok(Json(counts))
+}
+
 pub async fn ingest(
     State(state): State<Arc<AppState>>,
     Json(req): Json<IngestRequest>,
