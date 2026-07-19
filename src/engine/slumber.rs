@@ -275,20 +275,15 @@ impl SlumberEngine {
         let mut skipped = 0;
 
         for mem_with_vec in &all {
-            let should_quantize = decide_bit_width(
-                mem_with_vec.memory.access_count as u64,
-                mem_with_vec.memory.importance as f64,
-            )
-            .is_some();
-
-            if should_quantize {
-                let ids = vec![mem_with_vec.memory.id.clone()];
-                let vectors = vec![mem_with_vec.vector.clone()];
-                index.add_batch(&ids, &vectors);
-                quantized += 1;
-            } else {
-                skipped += 1;
-            }
+            // The TurboVec index is the SEARCH structure — it must cover ALL
+            // memories. decide_bit_width is a storage-precision policy (keep
+            // hot memories full-precision in Qdrant), NOT a search-coverage
+            // policy. Excluding hot memories from the index made semantic
+            // search blind to exactly the most-accessed memories.
+            let ids = vec![mem_with_vec.memory.id.clone()];
+            let vectors = vec![mem_with_vec.vector.clone()];
+            index.add_batch(&ids, &vectors);
+            quantized += 1;
         }
 
         // Persist index + id_map
