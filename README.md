@@ -50,7 +50,8 @@ The result: an AI agent that remembers what matters, forgets what doesn't, and c
 
 | Feature | What It Does | Configurable |
 |---------|-------------|--------------|
-| **Memory Decay** | Untouched memories lose importance over time (forgetting curve). Floor at 0.05 — nothing is ever fully deleted | Decay rate: 0.001/day |
+| **Memory Decay** | Untouched memories lose importance over time (forgetting curve). Per-type **Weibull decay** — preferences age slowly (k=0.4, ~6mo), facts moderately, requests/events fast (k=1.5, ~3 days). Floor at 0.05 — nothing is ever fully deleted | Decay curve: per `memory_type`, see `src/engine/decay.rs` |
+| **Query Intent Classification** | Search queries are classified (temporal / factual / preference / procedural / etc.) and weights re-balance: "what happened last week" boosts recency, "what does marc prefer" boosts importance. Falls back gracefully for unclassified queries | Bias table: `src/engine/query_intent.rs` |
 | **Memory Verification** | Nightly sweep samples memories and rates confidence they're still true. Stale/contradicted memories rank lower in recall but never disappear | Sample size, thresholds |
 | **Semantic Associations** | During nightly "slumber", each memory links to its 5 nearest neighbors by vector similarity | Top-K: 5, Min strength: 0.6 |
 | **Spreading Activation** | Recalling a memory bumps its associated memories too (0.005). Like how "Tesla" primes "Skar speakers" | Activation bump: 0.005 |
@@ -209,6 +210,38 @@ Format as a single structured entry. Skip trivial sessions.
 
 `memex8_search` · `memex8_remember` · `memex8_recall` · `memex8_realms` · `memex8_forget` · `memex8_get`
 
+Search and recall both use the new **per-type Weibull decay** + **query intent** weighting under the hood. Recall returns memories ranked by importance × decay(age, memory_type). Search re-weights (vector_score, importance, recency) based on the inferred intent of the query.
+
+---
+
+## Retroactive Memory Type Classification
+
+Every memory carries a `memory_type` field (preference, fact, event, decision, relationship, profile, etc.) that drives the Weibull decay rate. New memories are typed automatically at ingestion. To classify existing memories:
+
+```bash
+cd ~/memex8
+
+# 1. Keyword + LLM hybrid classifier
+LLM_API_URL=https://api.openai.com \
+LLM_MODEL=gpt-4.1-mini \
+OPENAI_API_KEY=sk-... \
+python3 scripts/classify_memory_types.py --dry-run   # preview
+
+# 2. Apply for real (no --dry-run)
+LLM_API_URL=https://api.openai.com \
+LLM_MODEL=gpt-4.1-mini \
+OPENAI_API_KEY=sk-... \
+python3 scripts/classify_memory_types.py
+```
+
+The script runs in two passes:
+1. **Keyword classifier** — fast regex match on content for obvious signals ("likes/prefers" → preference, ISO dates → event, "wife/husband" → relationship)
+2. **LLM fallback** — sends ambiguous memories to your configured chat model with a small classification prompt
+
+Both passes need confidence to assign a type. Memories that match nothing stay `general` (the safe default with k=1.0, 1wk decay). Slumber-summary memories (`chunk_type=consolidated`) are auto-skipped — they're already abstract.
+
+Cost is roughly $0.01 per 1,000 memories with `gpt-4.1-mini`.
+
 ---
 
 ## CLI Reference
@@ -241,6 +274,7 @@ memex8 stats         # System statistics
 | `GET`  | `/api/v1/memories/recall` | Top memories |
 | `GET`  | `/api/v1/memories/verification-summary` | Count memories by verification status (verified/stale/contradicted/unverified) |
 | `GET`  | `/api/v1/memories/{id}` | Get memory by ID |
+| `PATCH` | `/api/v1/memories/{id}` | Partial payload update — accepts `{memory_type, importance}`. Used by the retroactive classifier script |
 | `DELETE` | `/api/v1/memories/{id}` | Delete memory |
 | `GET`  | `/api/v1/realms` | List realms |
 | `POST` | `/api/v1/slumber/trigger` | Trigger slumber |
@@ -272,10 +306,11 @@ All endpoints (except `/health`) require `Authorization: Bearer <key>`
 memex8/
 ├── src/
 │   ├── api/          # REST API (Axum)
-│   ├── engine/       # Core logic (embedder, chunker, slumber, realms, quantizer)
+│   ├── engine/       # Core logic (embedder, chunker, slumber, realms, quantizer, decay, query_intent)
 │   ├── storage/      # Qdrant integration (payload/metadata only)
 │   ├── mcp/          # MCP server (JSON-RPC 2.0)
 │   └── web/          # Embedded web UI
+├── scripts/          # One-shot maintenance scripts (classify_memory_types.py, etc.)
 ├── plugins/memex8/   # Hermes plugin
 ├── docker-compose.yml
 ├── Dockerfile        # Multi-stage Rust build
