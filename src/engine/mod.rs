@@ -702,15 +702,15 @@ impl Engine {
             .into_iter()
             .filter(|m| realm.as_deref().map_or(true, |r| m.realm_name == r))
             .map(|m| {
-                // Recency decay: 1/(1 + days_since_access * 0.1)
-                let access_ts = chrono::DateTime::parse_from_rfc3339(&m.last_accessed)
-                    .map(|dt| dt.timestamp() as f64)
-                    .unwrap_or(0.0);
-                let days_since = ((now - access_ts) / 86400.0).max(0.0);
-                let recency = 1.0 / (1.0 + days_since * 0.1);
+                // Per-type Weibull decay (replaces uniform 1/(1 + days * 0.1))
+                // Empty/legacy memory_type falls back to "general" defaults.
+                let mem_type = if m.memory_type.is_empty() { "general" } else { &m.memory_type };
+                let query_time = chrono::DateTime::from_timestamp(now as i64, 0)
+                    .unwrap_or_else(|| chrono::Utc::now());
+                let recency = decay::weibull_boost(&m.last_accessed, query_time, mem_type) as f32;
                 // Phase A.2: soft verification down-weight (never filters)
                 let score = m.importance
-                    * recency as f32
+                    * recency
                     * (1.0 + m.access_count as f32 * 0.05)
                     * verification_score_multiplier(&m.verification_status);
                 (m, score)
