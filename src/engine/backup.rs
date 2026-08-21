@@ -110,6 +110,7 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
                     &m.memory.realm_name,
                     &m.memory.source_hash,
                     &m.memory.chunk_type,
+                    &m.memory.memory_type,
                     reaction_score,
                 )
                 .await?;

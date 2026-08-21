@@ -53,6 +53,10 @@ pub struct MemoryPoint {
     /// "unverified" | "verified" | "stale" | "contradicted"
     #[serde(default)]
     pub verification_status: String,
+    /// Semantic memory type for per-type Weibull decay (preference, fact, event, etc.).
+    /// Empty string = legacy memory, treated as "general" in decay.
+    #[serde(default)]
+    pub memory_type: String,
 }
 
 /// Memory with its embedding vector (internal use only, not serialized).
@@ -296,6 +300,7 @@ fn memory_to_payload(mem: &MemoryPoint) -> Payload {
         "last_verified": mem.last_verified,
         "verification_confidence": mem.verification_confidence,
         "verification_status": mem.verification_status,
+        "memory_type": mem.memory_type,
     });
     Payload::try_from(json).unwrap_or_default()
 }
@@ -329,6 +334,7 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
             .map(|v| v as f32),
         verification_status: map_str(map, "verification_status")
             .unwrap_or_else(|| "unverified".to_string()),
+        memory_type: map_str(map, "memory_type").unwrap_or_default(),
     }
 }
 
@@ -505,6 +511,7 @@ impl QdrantStore {
         realm_name: &str,
         source_hash: &str,
         chunk_type: &str,
+        memory_type: &str,
         reaction_score: f32,
     ) -> anyhow::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
@@ -532,6 +539,7 @@ impl QdrantStore {
             last_verified: None,
             verification_confidence: None,
             verification_status: "unverified".to_string(),
+            memory_type: memory_type.to_string(),
         };
         let payload = memory_to_payload(&mem);
         let point = PointStruct::new(id.to_string(), vector.to_vec(), payload);
@@ -658,6 +666,7 @@ impl QdrantStore {
             "association_strengths": Vec::<f32>::new(),
             "reaction_score": 0.0f32,
             "topic_clusters": Vec::<String>::new(),
+            "memory_type": "general",
         })
         .try_into()
         .unwrap_or_default();

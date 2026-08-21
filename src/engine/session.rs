@@ -392,6 +392,7 @@ Only output valid JSON. Be precise and extract only things explicitly present in
                 realm_name,
                 "",
                 "session_summary",
+                "session_summary",
                 reaction_score,
             )
             .await?;
@@ -457,11 +458,12 @@ Only output valid JSON. Be precise and extract only things explicitly present in
                     realm_name,
                     "",
                     memory_type,
+                    memory_type,
                     reaction_score,
                 )
                 .await?;
 
-            let _ = self.store.set_memory_importance(&memory_id, importance).await;
+                let _ = self.store.set_memory_importance(&memory_id, importance).await;
             stored += 1;
         }
 

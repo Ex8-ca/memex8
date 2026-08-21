@@ -267,6 +267,7 @@ impl Engine {
                     &realm_name,
                     &chunk.source_hash,
                     &chunk.chunk_type,
+                    "general",
                     reaction_score,
                 )
                 .await?;
@@ -504,6 +505,7 @@ impl Engine {
                     &realm_name,
                     &chunk.source_hash,
                     &chunk.chunk_type,
+                    "general",
                     reaction_score,
                 )
                 .await?;
@@ -936,6 +938,7 @@ impl Engine {
                 &existing.realm_name,
                 &existing.source_hash,
                 &existing.chunk_type,
+                &existing.memory_type,
                 reaction_score,
             )
             .await?;
@@ -1060,6 +1063,7 @@ impl Engine {
                 &realm_name,
                 "",
                 "manual",
+                "general",
                 reaction_score,
             )
             .await?;
@@ -1123,6 +1127,7 @@ impl Engine {
                             &m.memory.realm_name,
                             &m.memory.source_hash,
                             &m.memory.chunk_type,
+                            &m.memory.memory_type,
                             reaction_score,
                         )
                         .await?;
@@ -1152,6 +1157,7 @@ impl Engine {
                     &mem.realm_name,
                     &mem.source_hash,
                     &mem.chunk_type,
+                    &mem.memory_type,
                     reaction_score,
                 )
                 .await?;
