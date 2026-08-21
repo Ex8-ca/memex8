@@ -47,6 +47,16 @@ pub fn classify(query: &str) -> (Intent, f32) {
     // (intent, patterns, confidence, biases).
     let rules: &[(&str, &[&str], f32, Weights)] = &[
         (
+            "preference",
+            &[
+                r"\b(like|likes|liked|prefer|prefers|preferred|favorite|favourite|love|loves|hate|hates|enjoy|enjoys)\b",
+                r"\bwhat\s+does\s+\w+\s+(like|prefer|love|hate|enjoy)\b",
+                r"\b\w+'s\s+(favorite|favourite)\b",
+            ],
+            0.85,
+            Weights { vector_bias: 1.0, importance_bias: 1.4, recency_bias: 0.5 },
+        ),
+        (
             "temporal",
             &[
                 r"\b(when|last|yesterday|today|tomorrow|ago|before|after|since|until|during|recently|lately)\b",
@@ -80,15 +90,6 @@ pub fn classify(query: &str) -> (Intent, f32) {
             ],
             0.7,
             Weights { vector_bias: 1.2, importance_bias: 1.1, recency_bias: 0.8 },
-        ),
-        (
-            "preference",
-            &[
-                r"\b(like|likes|liked|prefer|prefers|preferred|favorite|favourite|love|loves|hate|hates|enjoy|enjoys)\b",
-                r"\bwhat\s+does\s+\w+\s+(like|prefer|love|hate|enjoy)\b",
-            ],
-            0.85,
-            Weights { vector_bias: 1.0, importance_bias: 1.4, recency_bias: 0.5 },
         ),
         (
             "procedural",
@@ -133,5 +134,88 @@ pub fn weights_for(query: &str) -> Weights {
         Intent::Preference => Weights { vector_bias: 1.0, importance_bias: 1.4, recency_bias: 0.5 },
         Intent::Procedural => Weights { vector_bias: 1.3, importance_bias: 1.0, recency_bias: 0.6 },
         Intent::General => Weights::DEFAULT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_temporal_queries() {
+        let cases = [
+            "when did we deploy the last release",
+            "what happened last week",
+            "what did marc do yesterday",
+            "meetings in 2026-05-12",
+            "5 days ago",
+        ];
+        for q in cases {
+            let (intent, conf) = classify(q);
+            assert_eq!(intent, Intent::Temporal, "expected Temporal for: {}", q);
+            assert!(conf > 0.5);
+        }
+    }
+
+    #[test]
+    fn test_factual_queries() {
+        let cases = [
+            "what is the database password",
+            "who is the maintainer",
+            "where is the config file",
+        ];
+        for q in cases {
+            let (intent, _) = classify(q);
+            assert_eq!(intent, Intent::Factual, "expected Factual for: {}", q);
+        }
+    }
+
+    #[test]
+    fn test_preference_queries() {
+        let cases = [
+            "what does deanna like to cook",
+            "marc prefers vim",
+            "what is marc's favorite color",
+        ];
+        for q in cases {
+            let (intent, _) = classify(q);
+            assert_eq!(intent, Intent::Preference, "expected Preference for: {}", q);
+        }
+    }
+
+    #[test]
+    fn test_procedural_queries() {
+        let cases = [
+            "how do I deploy the container",
+            "how to install memex8",
+            "debug the build failure",
+        ];
+        for q in cases {
+            let (intent, _) = classify(q);
+            assert_eq!(intent, Intent::Procedural, "expected Procedural for: {}", q);
+        }
+    }
+
+    #[test]
+    fn test_general_fallback() {
+        let cases = ["memex8", "docker compose", "agent memory"];
+        for q in cases {
+            let (intent, conf) = classify(q);
+            assert_eq!(intent, Intent::General, "expected General for: {}", q);
+            assert!((conf - 0.5).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_weights_for_preference_boosts_importance() {
+        let w = weights_for("what does marc prefer");
+        assert!(w.importance_bias > 1.0);
+        assert!(w.recency_bias < 1.0);
+    }
+
+    #[test]
+    fn test_weights_for_temporal_boosts_recency() {
+        let w = weights_for("what happened last week");
+        assert!(w.recency_bias > 1.0);
     }
 }
