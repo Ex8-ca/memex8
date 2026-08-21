@@ -632,6 +632,30 @@ impl Engine {
             .collect();
         results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
+        // Query intent re-weighting: adjust scores based on inferred query intent.
+        // Maps Mnemosyne's (vector, FTS, importance) biases to memex8's
+        // (vector, importance, recency) since memex8 has no FTS layer.
+        let intent_weights = query_intent::weights_for(query);
+        results = results
+            .into_iter()
+            .map(|(score, p)| {
+                // Compute per-memory recency boost (same Weibull formula as recall)
+                let mem_type = if p.memory_type.is_empty() { "general" } else { &p.memory_type };
+                let query_time = chrono::Utc::now();
+                let recency = decay::weibull_boost(&p.last_accessed, query_time, mem_type) as f32;
+
+                // Vector score already includes similarity; we apply bias to it.
+                // importance: pull from payload.
+                // recency: recompute and bias.
+                let adjusted = score
+                    * intent_weights.vector_bias
+                    * (1.0 + (p.importance - 0.5) * (intent_weights.importance_bias - 1.0))
+                    * (1.0 + (recency - 0.5) * (intent_weights.recency_bias - 1.0));
+                (adjusted, p)
+            })
+            .collect();
+        results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
         // Apply pagination
         let results: Vec<_> = results.into_iter().skip(offset).take(limit).collect();
 
