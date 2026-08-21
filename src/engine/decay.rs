@@ -75,3 +75,64 @@ pub fn weibull_boost(timestamp: &str, query_time: DateTime<Utc>, memory_type: &s
     let exponent = -(t_hours / eta_hours).powf(k);
     exponent.exp()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn t(hours_ago: i64) -> String {
+        Utc::now()
+            .checked_sub_signed(chrono::Duration::hours(hours_ago))
+            .unwrap()
+            .to_rfc3339()
+    }
+
+    #[test]
+    fn test_just_accessed_is_near_one() {
+        let now = Utc::now();
+        let boost = weibull_boost(&t(0), now, "preference");
+        // At t=0 we floor to 1 minute → small but non-trivial decay
+        assert!(boost > 0.95, "expected >0.95, got {}", boost);
+    }
+
+    #[test]
+    fn test_preference_decays_slower_than_request() {
+        let now = Utc::now();
+        // 30 days old
+        let pref = weibull_boost(&t(30 * 24), now, "preference");
+        let req = weibull_boost(&t(30 * 24), now, "request");
+        // Request (k=1.5, eta=72h) decays MUCH faster than preference (k=0.4, eta=4380h)
+        assert!(pref > req, "preference {} should exceed request {}", pref, req);
+        assert!(pref > 0.5, "30-day-old preference should still be >0.5, got {}", pref);
+        assert!(req < 0.05, "30-day-old request should be near-zero, got {}", req);
+    }
+
+    #[test]
+    fn test_unknown_type_falls_back_to_general() {
+        let now = Utc::now();
+        let known = weibull_boost(&t(24), now, "general");
+        let unknown = weibull_boost(&t(24), now, "not_a_real_type");
+        assert!((known - unknown).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_unparseable_timestamp_returns_one() {
+        let now = Utc::now();
+        let boost = weibull_boost("not a real timestamp", now, "preference");
+        assert_eq!(boost, 1.0);
+    }
+
+    #[test]
+    fn test_monotonic_decay() {
+        // As t increases, boost should monotonically decrease for any type
+        let now = Utc::now();
+        let mut prev = 1.0;
+        for hours in [1, 24, 168, 720, 4380] {
+            let b = weibull_boost(&t(hours), now, "fact");
+            assert!(b < prev, "decay not monotonic at {}h: {} >= {}", hours, b, prev);
+            prev = b;
+        }
+    }
+}
+
