@@ -9,6 +9,7 @@ pub mod ingester;
 pub mod memex8_md;
 pub mod providers;
 pub mod quantizer;
+pub mod query_intent;
 pub mod realms;
 pub mod reactions;
 pub mod scheduler;
