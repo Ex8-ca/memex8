@@ -911,6 +911,16 @@ impl Engine {
             .await
     }
 
+    /// Partial payload update — used by PATCH /api/v1/memories/{id}.
+    /// Accepts a JSON object whose keys are merged into the memory's Qdrant payload.
+    pub async fn update_memory_payload(
+        &self,
+        id: &str,
+        payload: qdrant_client::Payload,
+    ) -> anyhow::Result<()> {
+        self.store.update_memory_payload(id, payload).await
+    }
+
     pub async fn prune_queue(&self) -> anyhow::Result<Vec<crate::storage::qdrant::MemoryPoint>> {
         let memories = self.store.scroll_all_memories().await?;
         let now = chrono::Utc::now();

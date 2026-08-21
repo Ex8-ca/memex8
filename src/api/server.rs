@@ -115,6 +115,10 @@ fn api_routes() -> Router<Arc<AppState>> {
             axum::routing::delete(crate::api::routes::memories::delete),
         )
         .route(
+            "/memories/{id}",
+            axum::routing::patch(crate::api::routes::memories::update_memory),
+        )
+        .route(
             "/memories/{id}/upvote",
             axum::routing::post(crate::api::routes::memories::upvote),
         )

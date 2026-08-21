@@ -256,10 +256,44 @@ pub async fn downvote(
     Ok(Json(serde_json::json!({ "status": "downvoted" })))
 }
 
+/// PATCH /api/v1/memories/{id} — partial update of payload fields.
+/// Accepts any subset of {memory_type, importance}; applies via Qdrant set_payload.
+pub async fn update_memory(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Accept any subset of payload fields; apply via set_payload.
+    let mut payload_obj = serde_json::Map::new();
+    if let Some(t) = req.get("memory_type").and_then(|v| v.as_str()) {
+        payload_obj.insert(
+            "memory_type".to_string(),
+            serde_json::Value::String(t.to_string()),
+        );
+    }
+    if let Some(i) = req.get("importance").and_then(|v| v.as_f64()) {
+        payload_obj.insert(
+            "importance".to_string(),
+            serde_json::json!(i as f32),
+        );
+    }
+    if payload_obj.is_empty() {
+        return Ok(Json(serde_json::json!({"id": id, "status": "no-op"})));
+    }
+    let payload: qdrant_client::Payload = serde_json::Value::Object(payload_obj)
+        .try_into()
+        .unwrap_or_default();
+    state
+        .engine
+        .update_memory_payload(&id, payload)
+        .await?;
+    Ok(Json(serde_json::json!({"id": id, "status": "updated"})))
+}
+
 pub async fn archive(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, crate::api::error::ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     state.engine.archive_memory(&id).await?;
     Ok(Json(serde_json::json!({"archived": id})))
 }
