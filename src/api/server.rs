@@ -107,6 +107,10 @@ fn api_routes() -> Router<Arc<AppState>> {
             axum::routing::get(crate::api::routes::memories::verification_summary),
         )
         .route(
+            "/memories/upvote-by-content",
+            axum::routing::post(crate::api::routes::memories::upvote_by_content),
+        )
+        .route(
             "/memories/{id}",
             axum::routing::get(crate::api::routes::memories::get),
         )

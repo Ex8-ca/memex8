@@ -297,3 +297,53 @@ pub async fn archive(
     state.engine.archive_memory(&id).await?;
     Ok(Json(serde_json::json!({"archived": id})))
 }
+
+/// POST /api/v1/memories/upvote-by-content — fuzzy upvote by semantic query.
+///
+/// Runs a search for the top match and upvotes it. Refuses (404) if the top
+/// similarity score falls below `min_score` so accidental upvotes of unrelated
+/// memories are impossible. Returns the matched ID, score, content head,
+/// and the new upvote count so callers can confirm what got hit.
+pub async fn upvote_by_content(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpvoteByContentRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if req.query.trim().is_empty() {
+        return Err(ApiError::BadRequest("query must not be empty".into()));
+    }
+    let min_score = req.min_score.unwrap_or(0.7);
+
+    let results = state
+        .engine
+        .search(&req.query, None, None, 1, 0, min_score - 0.01)
+        .await?;
+    let top = results
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::NotFound(format!("no memory matched query (min_score={})", min_score)))?;
+    if top.score < min_score {
+        return Err(ApiError::NotFound(format!(
+            "top match score {:.3} below threshold {}",
+            top.score, min_score
+        )));
+    }
+
+    let id = top.id.clone();
+    let before = top.upvotes;
+    state.engine.upvote(&id).await?;
+    Ok(Json(serde_json::json!({
+        "upvoted": id,
+        "score": top.score,
+        "content_head": top.content.chars().take(120).collect::<String>(),
+        "upvotes_before": before,
+        "upvotes_after": before + 1,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct UpvoteByContentRequest {
+    pub query: String,
+    /// Minimum cosine similarity (0-1, default 0.7) required for the top match.
+    /// 404 returned if nothing clears this bar.
+    pub min_score: Option<f32>,
+}
