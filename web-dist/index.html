@@ -666,11 +666,15 @@
         }
 
         // ─── API Helpers ─────────────────────────────────────────
-        async function api(path) {
-            const headers = {};
+        async function api(path, options = {}) {
+            const headers = { ...(options.headers || {}) };
             if (API_KEY) headers['Authorization'] = `Bearer ${API_KEY}`;
-            const resp = await fetch(`${BASE_URL}/api/v1${path}`, { headers });
-            if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+            if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+            const fetchOpts = { ...options, headers };
+            // Strip undefined body/method so fetch uses sensible defaults (GET, no body)
+            if (!fetchOpts.body) delete fetchOpts.body;
+            const resp = await fetch(`${BASE_URL}/api/v1${path}`, fetchOpts);
+            if (!resp.ok) throw new Error(`API error: ${resp.status} ${resp.statusText}`);
             return resp.json();
         }
 
