@@ -647,10 +647,13 @@ impl Engine {
                 // Vector score already includes similarity; we apply bias to it.
                 // importance: pull from payload.
                 // recency: recompute and bias.
+                // upvote_factor: independent of intent — explicit user signal always wins.
+                let upvote_factor = 1.0 + (p.upvotes as f32) * 0.18;
                 let adjusted = score
                     * intent_weights.vector_bias
                     * (1.0 + (p.importance - 0.5) * (intent_weights.importance_bias - 1.0))
-                    * (1.0 + (recency - 0.5) * (intent_weights.recency_bias - 1.0));
+                    * (1.0 + (recency - 0.5) * (intent_weights.recency_bias - 1.0))
+                    * upvote_factor;
                 (adjusted, p)
             })
             .collect();
@@ -733,10 +736,15 @@ impl Engine {
                 let query_time = chrono::DateTime::from_timestamp(now as i64, 0)
                     .unwrap_or_else(|| chrono::Utc::now());
                 let recency = decay::weibull_boost(&m.last_accessed, query_time, mem_type) as f32;
+                // Upvote factor: each upvote adds a multiplicative boost that saturates
+                // gently via log1p. 1 upvote ≈ 1.18×, 5 upvotes ≈ 1.79×, 20 ≈ 3.05×.
+                // Independent of importance so users can flag signal even on under-scored entries.
+                let upvote_factor = 1.0 + (m.upvotes as f32) * 0.18;
                 // Phase A.2: soft verification down-weight (never filters)
                 let score = m.importance
                     * recency
                     * (1.0 + m.access_count as f32 * 0.05)
+                    * upvote_factor
                     * verification_score_multiplier(&m.verification_status);
                 (m, score)
             })

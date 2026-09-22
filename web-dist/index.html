@@ -520,6 +520,28 @@
             <button class="nav-tab active" data-view="cards">Cards</button>
             <button class="nav-tab" data-view="graph">Graph</button>
             <button class="nav-tab" data-view="realms">Realms</button>
+            <button class="nav-tab settings-btn" id="settings-btn" title="Settings" onclick="openSettings()">⚙</button>
+        </div>
+    </div>
+
+    <!-- Settings Modal (per-client API key) -->
+    <div class="modal-overlay" id="settings-overlay" style="display:none;" onclick="if(event.target===this) closeSettings()">
+        <div class="modal" style="max-width: 480px;">
+            <button class="modal-close" onclick="closeSettings()">×</button>
+            <h2 style="margin-top:0;">Settings</h2>
+            <p style="color: var(--muted-foreground); font-size: 13px;">
+                Per-device API key for memex8. Stored in <code>localStorage</code> — never sent anywhere except the local server.
+            </p>
+            <label style="display:block; margin: 16px 0 6px; font-weight: 600;">API Key</label>
+            <input type="password" id="settings-api-key" placeholder="paste key here" autocomplete="off"
+                   style="width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--foreground); font-family: monospace;" />
+            <div style="margin-top: 8px; font-size: 12px; color: var(--muted-foreground);">
+                Source: <span id="settings-key-source">checking…</span>
+            </div>
+            <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end;">
+                <button onclick="clearApiKey()" style="padding: 8px 14px; border: 1px solid var(--border); background: transparent; color: var(--foreground); border-radius: 6px; cursor: pointer;">Clear</button>
+                <button onclick="saveApiKey()" style="padding: 8px 14px; border: none; background: var(--accent); color: white; border-radius: 6px; cursor: pointer; font-weight: 600;">Save & Reload</button>
+            </div>
         </div>
     </div>
 
@@ -584,7 +606,18 @@
     <script>
         // ─── Config ──────────────────────────────────────────────
         const BASE_URL = window.location.origin;
-        const API_KEY=__MEMEX8_API_KEY__; // Injected by server from MEMEX8_API_KEY env var
+        // Server-injected default (from MEMEX8_API_KEY env). May be empty/null
+        // when running with no key set, in which case the UI lets the user
+        // paste one into Settings — stored in localStorage per browser/device.
+        const INJECTED_KEY = '__MEMEX8_API_KEY__';
+        function resolveApiKey() {
+            // Priority: localStorage (user override) > server-injected > none
+            const stored = (() => { try { return localStorage.getItem('memex8_api_key') || ''; } catch { return ''; } })();
+            if (stored) return { key: stored, source: 'localStorage (this device)' };
+            if (INJECTED_KEY && INJECTED_KEY !== 'memex8-dev-key') return { key: INJECTED_KEY, source: 'server (MEMEX8_API_KEY env)' };
+            return { key: '', source: 'none — voting and mutations disabled' };
+        }
+        let { key: API_KEY, source: KEY_SOURCE } = resolveApiKey();
 
         // ─── State ────────────────────────────────────────────────
         let allMemories = [];
@@ -605,6 +638,32 @@
                 }
             });
         });
+
+        // ─── Settings (per-device API key) ───────────────────────
+        function openSettings() {
+            document.getElementById('settings-api-key').value = API_KEY || '';
+            document.getElementById('settings-key-source').textContent = KEY_SOURCE;
+            document.getElementById('settings-overlay').style.display = 'flex';
+        }
+        function closeSettings() {
+            document.getElementById('settings-overlay').style.display = 'none';
+        }
+        function saveApiKey() {
+            const v = document.getElementById('settings-api-key').value.trim();
+            try {
+                if (v) localStorage.setItem('memex8_api_key', v);
+                else localStorage.removeItem('memex8_api_key');
+            } catch (e) {
+                alert('Could not save to localStorage: ' + e.message);
+                return;
+            }
+            // Reload so all derived state (voteEnabled, etc.) rebuilds cleanly.
+            window.location.reload();
+        }
+        function clearApiKey() {
+            try { localStorage.removeItem('memex8_api_key'); } catch {}
+            window.location.reload();
+        }
 
         // ─── API Helpers ─────────────────────────────────────────
         async function api(path) {
