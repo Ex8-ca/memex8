@@ -26,22 +26,33 @@ pub async fn serve_root() -> impl IntoResponse {
 }
 
 /// Serve static files by path.
+/// Returns 404 (not 500) when the file doesn't exist so the SPA fallback can
+/// serve index.html for unknown routes. The router chain matches specific
+/// paths first (`/`, `/health`, `/mcp`, `/api/v1/...`); only paths that fall
+/// through to here go through `serve_static`.
 pub async fn serve_static(Path(path): Path<String>) -> impl IntoResponse {
     // Security: prevent path traversal
     if path.contains("..") || path.starts_with('/') {
         return StatusCode::FORBIDDEN.into_response();
     }
 
+    // Empty path (fallback hit) and paths to files we don't bundle (like
+    // favicon.ico) should serve the SPA shell rather than 500. Detect the
+    // latter by trying the embedded lookup first; only fall through to
+    // index.html when we know we'd 404 anyway.
     let key = WEB_CONFIG.read().unwrap().clone();
     match serve_file(&path, &key).await {
         Ok((headers, data)) => (headers, data).into_response(),
-        Err(_) => {
-            // SPA fallback: serve index.html for non-file routes
+        Err(StatusCode::NOT_FOUND) => {
+            // SPA fallback for missing assets (e.g. /favicon.ico when we
+            // don't ship one). The browser will then request index.html's
+            // resources normally. Returning 404 here would break the SPA.
             match serve_file("index.html", &key).await {
                 Ok((headers, data)) => (headers, data).into_response(),
                 Err(status) => status.into_response(),
             }
         }
+        Err(status) => status.into_response(),
     }
 }
 

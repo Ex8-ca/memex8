@@ -62,7 +62,11 @@ pub async fn run_with_engine(
         .route("/health", axum::routing::get(health))
         .route("/mcp", axum::routing::get(crate::mcp::http::sse_handler))
         .route("/", axum::routing::get(crate::web::serve_root))
-        .fallback(axum::routing::get(crate::web::serve_static))
+        // Wildcard route for static assets + SPA fallback. Note: this must be
+        // a literal `/*path` (or `/{path}`) route, NOT .fallback(), because
+        // .fallback() doesn't bind the path parameter and serve_static's
+        // Path<String> extractor then errors with "Wrong number of path args".
+        .route("/{path}", axum::routing::get(crate::web::serve_static))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
