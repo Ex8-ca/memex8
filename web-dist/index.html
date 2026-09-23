@@ -609,7 +609,9 @@
         // Server-injected default (from MEMEX8_API_KEY env). May be empty/null
         // when running with no key set, in which case the UI lets the user
         // paste one into Settings — stored in localStorage per browser/device.
-        const INJECTED_KEY = '__MEMEX8_API_KEY__';
+        // Use backticks so Rust's string-replace of __MEMEX8_API_KEY__ can't
+        // produce a syntax error regardless of what the key contains.
+        const INJECTED_KEY = `__MEMEX8_API_KEY__`;
         function resolveApiKey() {
             // Priority: localStorage (user override) > server-injected > none
             const stored = (() => { try { return localStorage.getItem('memex8_api_key') || ''; } catch { return ''; } })();

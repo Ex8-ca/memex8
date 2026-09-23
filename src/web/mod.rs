@@ -66,14 +66,19 @@ async fn serve_file(path: &str, api_key: &Option<String>) -> WebResult {
 }
 
 /// Replace __MEMEX8_API_KEY__ placeholder in the HTML with the actual key.
+/// We inject as a bare token (no quotes) — the HTML must wrap the placeholder
+/// itself in valid JS quoting (e.g. backticks or double quotes). Doing it
+/// this way avoids double-injection bugs when the HTML template already has
+/// quote characters around the placeholder.
 fn inject_api_key(html: &[u8], api_key: Option<&str>) -> Vec<u8> {
     let placeholder = "__MEMEX8_API_KEY__";
     match api_key {
         Some(key) => {
             let html_str = String::from_utf8_lossy(html);
-            html_str
-                .replace(placeholder, &format!("'{}'", key.replace('\'', "\\'")))
-                .into_bytes()
+            // Backslash-escape any backticks in the key so it stays valid
+            // inside a JS template literal. The HTML's wrapping quotes are
+            // the HTML's responsibility; we just emit the raw token.
+            html_str.replace(placeholder, &key.replace('`', "\\`")).into_bytes()
         }
         None => {
             // No key configured — leave the placeholder so JS prompts the user
