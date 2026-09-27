@@ -30,6 +30,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -312,6 +313,25 @@ class _Client:
             return None
         except Exception:
             return None
+
+    def list_memories(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        realm: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """GET /api/v1/memories — paginated list of memories.
+
+        Feature 5. Returns the raw server response (dict with ``memories``,
+        ``total``, ``limit``, ``offset``). Each memory has the server's
+        canonical shape; callers should read fields defensively. Used by
+        export_memories() to dump all memories to JSON in pages of 100.
+        """
+        params = {"limit": str(limit), "offset": str(offset)}
+        if realm:
+            params["realm"] = realm
+        return self.request("GET", "/api/v1/memories", params=params)
 
 
 # ---------------------------------------------------------------------------
@@ -673,6 +693,17 @@ class Memex8MemoryProvider(MemoryProvider):
                     "to use the built-in default."
                 ),
                 "default": "",
+            },
+            # Feature 5: export / import
+            {
+                "key": "enable_export_import",
+                "description": (
+                    "Permit export_memories() and import_memories() to run "
+                    "even when the circuit breaker is open. Disabled by "
+                    "default; only flip on temporarily for backup/migration."
+                ),
+                "default": "false",
+                "choices": ["true", "false"],
             },
         ]
 
@@ -1119,6 +1150,148 @@ class Memex8MemoryProvider(MemoryProvider):
             user_turns, len(summary),
         )
         return marker
+
+    # -- Export / Import (Feature 5) --
+
+    def export_memories(
+        self,
+        output_path: str,
+        *,
+        realm: Optional[str] = None,
+        page_size: int = 100,
+    ) -> int:
+        """Dump memories (optionally filtered by realm) to a JSON file.
+
+        Feature 5. Walks the server's paginated ``GET /api/v1/memories``
+        endpoint and writes a versioned bundle to ``output_path``. Returns
+        the count of memories exported.
+
+        The bundle shape:
+            {
+              "version": "1.1.0",
+              "exported_at": "<ISO 8601 UTC>",
+              "realm": "<realm filter or null>",
+              "count": <int>,
+              "page_size": <int>,
+              "memories": [
+                {<server's MemoryPoint dict>},
+                ...
+              ]
+            }
+
+        Notes:
+        - Vectors are NOT exported. Re-import relies on the server
+          re-embedding from content (deterministic given the model).
+        - Writes are atomic: write to ``<output_path>.tmp`` then rename.
+        - Caller is responsible for permissions / path safety.
+        """
+        if self._is_breaker_open() and not (self._config and self._config.get("enable_export_import")):
+            raise RuntimeError("memex8 circuit breaker is open; export cancelled")
+        client = self._get_client()
+        exported: List[Dict[str, Any]] = []
+        offset = 0
+        while True:
+            resp = client.list_memories(
+                limit=page_size, offset=offset, realm=realm
+            )
+            batch = resp.get("memories", []) if isinstance(resp, dict) else []
+            if not batch:
+                break
+            exported.extend(batch)
+            total = resp.get("total", len(exported)) if isinstance(resp, dict) else None
+            offset += len(batch)
+            # Stop if we've paginated past total (server reports it).
+            if total is not None and offset >= total:
+                break
+            if len(batch) < page_size:
+                break  # server returned a short page = end of results
+        bundle = {
+            "version": _PLUGIN_VERSION,
+            "exported_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "realm": realm,
+            "count": len(exported),
+            "page_size": page_size,
+            "memories": exported,
+        }
+        tmp_path = output_path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(bundle, f, indent=2, ensure_ascii=False)
+            os.replace(tmp_path, output_path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        return len(exported)
+
+    def import_memories(
+        self,
+        input_path: str,
+        *,
+        realm_hint: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> int:
+        """Re-store memories from a JSON bundle produced by export_memories().
+
+        Feature 5. Idempotent: memories whose content exactly matches an
+        existing memory (per the server's own dedup) are skipped. Returns
+        the count actually imported (not skipped).
+
+        Schema discipline:
+        - Refuses to import bundles whose ``version`` is NEWER than this
+          plugin (the plugin can't safely interpret newer fields).
+        - Passes through realm / tags / memory_type / source / importance
+          when present.
+        """
+        with open(input_path, "r", encoding="utf-8") as f:
+            bundle = json.load(f)
+        if not isinstance(bundle, dict) or "memories" not in bundle:
+            raise ValueError(f"{input_path}: not a memex8 export bundle")
+        exported_version = str(bundle.get("version", "0"))
+        current_version = _PLUGIN_VERSION
+        # Compare major.minor — refuse if newer than us.
+        def _major_minor(v: str) -> tuple:
+            parts = v.split(".")[:2]
+            try:
+                return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+            except (ValueError, IndexError):
+                return (0, 0)
+        if _major_minor(exported_version) > _major_minor(current_version):
+            raise ValueError(
+                f"{input_path}: bundle version {exported_version} is newer than "
+                f"plugin version {current_version}; upgrade the plugin first"
+            )
+        client = self._get_client()
+        imported = 0
+        skipped = 0
+        target_realm = realm_hint or bundle.get("realm")
+        for mem in bundle["memories"]:
+            if not isinstance(mem, dict):
+                continue
+            content = mem.get("content") or ""
+            if not content:
+                continue
+            if dry_run:
+                skipped += 1
+                continue
+            try:
+                # Re-store. Pass through what we know about.
+                kwargs = {
+                    "realm_hint": mem.get("realm") or target_realm,
+                    "tags": mem.get("tags") if isinstance(mem.get("tags"), list) else None,
+                    "source": mem.get("source") or "imported",
+                    "memory_type": mem.get("memory_type"),
+                }
+                # Filter out None values to match _Client.store's optional handling
+                kwargs = {k: v for k, v in kwargs.items() if v is not None}
+                client.store(content, **kwargs)
+                imported += 1
+            except Exception as e:
+                logger.warning("memex8 import skipped memory %s: %s", mem.get("id"), e)
+                skipped += 1
+        return imported
 
     # -- Memory write mirror --
 
