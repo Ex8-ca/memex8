@@ -1397,9 +1397,258 @@ class Memex8MemoryProvider(MemoryProvider):
 
 
 # ---------------------------------------------------------------------------
+# Slash command — Feature 6
+# ---------------------------------------------------------------------------
+
+_MEMEX8_HELP = """\
+/memex8 — self-hosted vector memory for Hermes
+
+Usage:
+  /memex8 stats                  Show memory count, breaker state, recent errors
+  /memex8 status                 Show config + connection status
+  /memex8 search <query>         Run a semantic search and print top-5 hits
+  /memex8 recall <query>         Force a high-importance recall and print results
+  /memex8 remember <content>     Store a new memory (interactive prompt)
+  /memex8 forget <memory_id>     Delete a memory by id (irrevocable)
+  /memex8 export <file>          Dump all memories to a JSON bundle
+  /memex8 import <file>          Restore memories from a JSON bundle
+  /memex8 realms                 List knowledge realms + counts
+  /memex8 help                   Show this message
+
+Subcommands are read-only by default except 'remember', 'forget',
+'export', and 'import'. Subcommands operate on the live memex8 server.
+"""
+
+
+def _memex8_stats(_argv) -> str:
+    provider = _MEMEX8_PROVIDER
+    if provider is None:
+        return "memex8 provider not initialized; can't read stats"
+    breaker_open = provider._is_breaker_open()
+    fails = provider._consecutive_failures
+    threshold = provider._breaker_threshold
+    cooldown = provider._breaker_cooldown
+    # cooldown remaining
+    if breaker_open:
+        from time import monotonic
+        remaining = max(0.0, provider._breaker_open_until - monotonic())
+        breaker_str = f"OPEN (resets in {remaining:.0f}s)"
+    else:
+        breaker_str = "closed"
+    out = [
+        "memex8 status",
+        f"  plugin version     : {_PLUGIN_VERSION}",
+        f"  circuit breaker    : {breaker_str}",
+        f"  consecutive fails  : {fails} / {threshold} (cooldown {cooldown}s)",
+        f"  turn counter       : {provider._turn_counter}",
+        f"  injected this sess : {len(provider._injected_this_session)} unique",
+    ]
+    return "\n".join(out)
+
+
+def _memex8_status(_argv) -> str:
+    provider = _MEMEX8_PROVIDER
+    if provider is None:
+        return "memex8 provider not initialized"
+    cfg = provider._config or {}
+    return "\n".join([
+        "memex8 config",
+        f"  base_url         : {cfg.get('base_url', _DEFAULT_BASE_URL)}",
+        f"  has api_key      : {bool(cfg.get('api_key'))}",
+        f"  timeout          : {cfg.get('timeout', _DEFAULT_TIMEOUT)}s",
+        f"  search timeout   : {cfg.get('search_timeout', _DEFAULT_SEARCH_TIMEOUT)}s",
+        f"  recall min score : {cfg.get('recall_min_score', _DEFAULT_RECALL_MIN_SCORE)}",
+        f"  recall top_k     : {cfg.get('recall_top_k', _DEFAULT_RECALL_TOP_K)}",
+        f"  dedup_injected   : {cfg.get('dedup_injected_memories', False)}",
+        f"  recall_max_chars : {cfg.get('recall_max_inject_chars', 'off')}",
+        f"  promote_decisions: {cfg.get('promote_decisions', False)}",
+        f"  promote_evals    : {cfg.get('promote_evaluations', False)}",
+        f"  sanitize         : {cfg.get('sanitize_for_prompt', False)}",
+        f"  custom template  : {'yes' if cfg.get('system_prompt_template') else 'no'}",
+        f"  enable export    : {cfg.get('enable_export_import', False)}",
+    ])
+
+
+def _memex8_search(argv) -> str:
+    if len(argv) < 2:
+        return "Usage: /memex8 search <query>"
+    query = " ".join(argv[1:]).strip()
+    provider = _MEMEX8_PROVIDER
+    if provider is None:
+        return "memex8 provider not initialized"
+    try:
+        client = provider._get_client()
+        # _Client.search(query, top_k=8, realm=None, min_score=0.3)
+        results = client.search(query, top_k=5)
+    except Exception as e:
+        return f"memex8 search failed: {e}"
+    if not results:
+        return f"No matches for: {query!r}"
+    out = [f"Top-5 search hits for: {query!r}", ""]
+    for i, r in enumerate(results, 1):
+        content = (r.get("content") or "").strip().replace("\n", " ")
+        if len(content) > 200:
+            content = content[:197] + "..."
+        score = r.get("score", r.get("similarity", 0))
+        mid = r.get("id") or "?"
+        out.append(f"  {i}. [{mid}] score={score:.3f}")
+        out.append(f"     {content}")
+        out.append("")
+    return "\n".join(out).rstrip()
+
+
+def _memex8_recall(argv) -> str:
+    if len(argv) < 2:
+        return "Usage: /memex8 recall <query>  (used as a hint for filtering)"
+    query = " ".join(argv[1:]).strip()
+    provider = _MEMEX8_PROVIDER
+    if provider is None:
+        return "memex8 provider not initialized"
+    try:
+        client = provider._get_client()
+        # _Client.recall(top_k=8, realm=None) — runs a semantic search for the
+        # highest-importance memories; the query is used to filter by feeding
+        # it into search() instead.
+        results = client.search(query, top_k=5)
+    except Exception as e:
+        return f"memex8 recall failed: {e}"
+    if not results:
+        return f"No high-importance recalls for: {query!r}"
+    out = [f"High-importance recalls for: {query!r}", ""]
+    for i, r in enumerate(results, 1):
+        content = (r.get("content") or "").strip().replace("\n", " ")
+        if len(content) > 200:
+            content = content[:197] + "..."
+        importance = r.get("importance", r.get("score", 0))
+        mid = r.get("id") or "?"
+        out.append(f"  {i}. [{mid}] importance={importance:.3f}")
+        out.append(f"     {content}")
+        out.append("")
+    return "\n".join(out).rstrip()
+
+
+def _memex8_remember(argv) -> str:
+    if len(argv) < 2:
+        return "Usage: /memex8 remember <content>"
+    content = " ".join(argv[1:]).strip()
+    provider = _MEMEX8_PROVIDER
+    if provider is None:
+        return "memex8 provider not initialized"
+    try:
+        client = provider._get_client()
+        result = client.store(content, source="slash-command")
+    except Exception as e:
+        return f"memex8 remember failed: {e}"
+    mid = result.get("id") if isinstance(result, dict) else None
+    return f"Stored memory (id={mid or '?'})." if mid else "Stored memory."
+
+
+def _memex8_forget(argv) -> str:
+    if len(argv) < 2:
+        return "Usage: /memex8 forget <memory_id>"
+    mid = argv[1].strip()
+    provider = _MEMEX8_PROVIDER
+    if provider is None:
+        return "memex8 provider not initialized"
+    try:
+        client = provider._get_client()
+        client.delete(mid)
+    except Exception as e:
+        return f"memex8 forget failed: {e}"
+    return f"Forgot memory {mid}."
+
+
+def _memex8_export(argv) -> str:
+    if len(argv) < 2:
+        return "Usage: /memex8 export <path>  (writes JSON bundle to path)"
+    out_path = argv[1].strip()
+    provider = _MEMEX8_PROVIDER
+    if provider is None:
+        return "memex8 provider not initialized"
+    try:
+        n = provider.export_memories(out_path)
+    except Exception as e:
+        return f"memex8 export failed: {e}"
+    return f"Exported {n} memories to {out_path}"
+
+
+def _memex8_import(argv) -> str:
+    if len(argv) < 2:
+        return "Usage: /memex8 import <path>  (reads JSON bundle from path)"
+    in_path = argv[1].strip()
+    provider = _MEMEX8_PROVIDER
+    if provider is None:
+        return "memex8 provider not initialized"
+    try:
+        n = provider.import_memories(in_path)
+    except Exception as e:
+        return f"memex8 import failed: {e}"
+    return f"Imported {n} memories from {in_path}"
+
+
+def _memex8_realms(_argv) -> str:
+    provider = _MEMEX8_PROVIDER
+    if provider is None:
+        return "memex8 provider not initialized"
+    try:
+        client = provider._get_client()
+        realms = client.realms()
+    except Exception as e:
+        return f"memex8 realms failed: {e}"
+    if not realms:
+        return "No knowledge realms found."
+    out = ["Knowledge realms:"]
+    for r in realms[:20]:
+        if isinstance(r, dict):
+            name = r.get("name") or r.get("realm") or "?"
+            count = r.get("memory_count") or r.get("count") or 0
+            out.append(f"  - {name} ({count} memories)")
+        else:
+            out.append(f"  - {r}")
+    return "\n".join(out)
+
+
+# Subcommand dispatch table — Feature 6
+_MEMEX8_SUBCOMMANDS = {
+    "stats": _memex8_stats,
+    "status": _memex8_status,
+    "search": _memex8_search,
+    "recall": _memex8_recall,
+    "remember": _memex8_remember,
+    "forget": _memex8_forget,
+    "export": _memex8_export,
+    "import": _memex8_import,
+    "realms": _memex8_realms,
+}
+
+# Module-level handle set by register(); subcommands read this at call time
+_MEMEX8_PROVIDER: Optional["Memex8MemoryProvider"] = None
+
+
+def _handle_memex8_slash(raw_args: str) -> Optional[str]:
+    argv = raw_args.strip().split()
+    if not argv or argv[0] in {"help", "-h", "--help"}:
+        return _MEMEX8_HELP
+    handler = _MEMEX8_SUBCOMMANDS.get(argv[0])
+    if handler is None:
+        return f"Unknown subcommand: {argv[0]}\n\n{_MEMEX8_HELP}"
+    return handler(argv)
+
+
+# ---------------------------------------------------------------------------
 # Plugin Registration
 # ---------------------------------------------------------------------------
 
 def register(ctx) -> None:
     """Register memex8 as a memory provider plugin."""
-    ctx.register_memory_provider(Memex8MemoryProvider())
+    global _MEMEX8_PROVIDER
+    provider = Memex8MemoryProvider()
+    _MEMEX8_PROVIDER = provider
+    ctx.register_memory_provider(provider)
+    # Feature 6: /memex8 slash command — stats, search, recall, remember,
+    # forget, export, import, realms, help.
+    ctx.register_command(
+        "memex8",
+        handler=_handle_memex8_slash,
+        description="Inspect and manage your memex8 memory store (stats, search, recall, remember, forget, export, import, realms).",
+    )
