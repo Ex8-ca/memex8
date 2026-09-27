@@ -48,6 +48,9 @@ _DEFAULT_SEARCH_TOP_K = 8
 _DEFAULT_RECALL_MIN_SCORE = 0.3
 _DEFAULT_TIMEOUT = 10.0
 _DEFAULT_SEARCH_TIMEOUT = 15.0
+# Plugin version (kept in sync with plugin.yaml) — exposed via
+# {{version}} in the configurable system_prompt_block template
+_PLUGIN_VERSION = "1.1.0"
 
 # Trivial messages that shouldn't be synced to memory
 _TRIVIAL_RE = re.compile(
@@ -103,6 +106,45 @@ def _sanitize_for_prompt(text: str, enabled: bool = True) -> str:
     for pattern, replacement in _SANITIZE_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
+
+
+# Feature 4: default system-prompt preamble. Used as fallback when the user
+# hasn't set `system_prompt_template` in memex8.json. Exported as a constant
+# so it can be tested independently.
+_DEFAULT_SYSTEM_PROMPT_BLOCK = (
+    "# memex8 Memory\n"
+    "Active. Self-hosted vector memory with semantic search and "
+    "auto-organizing knowledge realms.\n"
+    "Relevant context is automatically provided before each turn.\n"
+    "Use memex8_search to find specific memories, memex8_remember to "
+    "store important facts, memex8_recall for high-importance context."
+)
+
+# Available {{variables}} for system_prompt_template (Feature 4)
+_TEMPLATE_VARS = {
+    "tool_search": "memex8_search",
+    "tool_remember": "memex8_remember",
+    "tool_recall": "memex8_recall",
+    "tool_realms": "memex8_realms",
+    "tool_forget": "memex8_forget",
+    "tool_get": "memex8_get",
+    "version": _PLUGIN_VERSION,
+}
+
+
+def _render_system_prompt(template: str, base_url: str) -> str:
+    """Substitute {{variables}} in a user-supplied system-prompt template.
+
+    Feature 4. Unknown variables are left as literal ``{{name}}`` so the
+    user sees the typo (rather than crashing the agent at turn-start).
+    """
+    from re import Match
+    subs = dict(_TEMPLATE_VARS)
+    subs["base_url"] = base_url
+    def repl(match: Match[str]) -> str:
+        key = match.group(1).strip()
+        return subs.get(key, "{{" + key + "}}")
+    return re.sub(r"\{\{\s*(\w+)\s*\}\}", repl, template)
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +662,18 @@ class Memex8MemoryProvider(MemoryProvider):
                 "default": "false",
                 "choices": ["true", "false"],
             },
+            # Feature 4: configurable system-prompt template
+            {
+                "key": "system_prompt_template",
+                "description": (
+                    "Optional. Override the default system-prompt preamble "
+                    "with a custom template. Available {{variables}}: "
+                    "tool_search, tool_remember, tool_recall, tool_realms, "
+                    "tool_forget, tool_get, base_url, version. Leave empty "
+                    "to use the built-in default."
+                ),
+                "default": "",
+            },
         ]
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
@@ -709,14 +763,31 @@ class Memex8MemoryProvider(MemoryProvider):
         t.start()
 
     def system_prompt_block(self) -> str:
-        return (
-            "# memex8 Memory\n"
-            "Active. Self-hosted vector memory with semantic search and "
-            "auto-organizing knowledge realms.\n"
-            "Relevant context is automatically provided before each turn.\n"
-            "Use memex8_search to find specific memories, memex8_remember to "
-            "store important facts, memex8_recall for high-importance context."
-        )
+        """Return the static preamble added to the system prompt.
+
+        Feature 4: if the user has set ``system_prompt_template`` in
+        ~/.hermes/memex8.json, render that template with the available
+        {{variables}} (``tool_search``, ``tool_remember``, ``tool_recall``,
+        ``tool_realms``, ``tool_forget``, ``tool_get``, ``base_url``,
+        ``version``). Otherwise return the default 4-line block — zero
+        behavior change for users who don't customize.
+        """
+        if not self._config or not self._config.get("system_prompt_template"):
+            return _DEFAULT_SYSTEM_PROMPT_BLOCK
+
+        template = self._config["system_prompt_template"]
+        if not isinstance(template, str) or not template.strip():
+            return _DEFAULT_SYSTEM_PROMPT_BLOCK
+
+        base_url = self._config.get("base_url", _DEFAULT_BASE_URL)
+        try:
+            return _render_system_prompt(template, base_url)
+        except Exception as e:
+            # Bad template — fall back to default, log warning
+            logger.warning(
+                "memex8 system_prompt_template render failed: %s — using default", e
+            )
+            return _DEFAULT_SYSTEM_PROMPT_BLOCK
 
     # -- Background prefetch --
 
