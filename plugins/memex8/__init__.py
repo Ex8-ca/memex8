@@ -70,6 +70,40 @@ _EVAL_RE = re.compile(
     r"recommendation|avoid|conclusion|takeaway)\b"
 )
 
+# Feature 3: prompt-injection sanitization patterns
+# Patterns chosen for HIGH PRECISION — false positives are worse than missed
+# injections because they destroy legitimate memory content. Audited against
+# the memos dataset + the memory-os `_INJECTION_PATTERNS` blocklist.
+_SANITIZE_PATTERNS = [
+    # Template injection (unambiguous: backslash-escaped braces are rare in
+    # natural text; template syntax is unmistakable)
+    (re.compile(r"\{\{[^{}]{1,200}\}\}"), "[REDACTED:template]"),
+    (re.compile(r"\$\{[^{}]{1,200}\}"), "[REDACTED:template]"),
+    # Markdown-break: an unbalanced triple-backtick that opens without a
+    # matching close (or vice versa) breaks downstream rendering of the
+    # system prompt. Conservative — only catches triple-backticks specifically;
+    # single-backtick code spans (`foo`) are common in technical memories
+    # and are left alone.
+    (re.compile(r"```"), "[code-fence]"),
+    # URL-scheme injection: javascript:, vbscript:, data:text/html
+    (re.compile(r"(?i)(javascript|vbscript)\s*:"), "[REDACTED:url-scheme]:"),
+    (re.compile(r"(?i)data\s*:\s*text/html"), "[REDACTED:html-data]:"),
+]
+
+
+def _sanitize_for_prompt(text: str, enabled: bool = True) -> str:
+    """Strip prompt-injection vectors from memory content before it enters the
+    system prompt. Conservative — only matches unambiguous patterns.
+
+    Feature 3. Set ``enabled=False`` to bypass (default-off for users; opt-in
+    via ``sanitize_for_prompt=true`` in config).
+    """
+    if not text or not enabled:
+        return text
+    for pattern, replacement in _SANITIZE_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -353,6 +387,7 @@ def _build_context_block(
     already_injected: Optional[set] = None,
     char_budget: Optional[int] = None,
     priorities: Optional[Dict[str, float]] = None,
+    sanitize: bool = False,
 ) -> str:
     """Format recall/search results as a context block for the system prompt.
 
@@ -360,6 +395,11 @@ def _build_context_block(
     memories whose ID is in the set. If ``char_budget`` is provided, drop the
     lowest-priority memories until the formatted block fits within the budget
     and record the kept IDs in ``already_injected``.
+
+    Feature 3 (sanitize): if ``sanitize=True``, each memory's content is
+    passed through ``_sanitize_for_prompt`` to strip prompt-injection
+    vectors (template braces, unbalanced triple-backticks, javascript:/data:
+    URLs) before being formatted into the block.
     """
     def memory_id(r: dict) -> str:
         # Prefer server-provided 'id'; fall back to content hash for legacy
@@ -394,7 +434,7 @@ def _build_context_block(
             kept: list[str] = []
             used = 0  # excludes the header "[memex8 — Important Context]\n"
             for mid, r in candidates:
-                content = (r.get("content") or "").strip()
+                content = _sanitize_for_prompt((r.get("content") or "").strip(), sanitize)
                 if len(content) > 200:
                     content = content[:197] + "..."
                 realm = r.get("realm_name", r.get("realm", ""))
@@ -410,7 +450,7 @@ def _build_context_block(
             lines.extend(kept)
         else:
             for mid, r in candidates:
-                content = (r.get("content") or "").strip()
+                content = _sanitize_for_prompt((r.get("content") or "").strip(), sanitize)
                 if len(content) > 200:
                     content = content[:197] + "..."
                 realm = r.get("realm_name", r.get("realm", ""))
@@ -422,7 +462,7 @@ def _build_context_block(
     if search_results:
         lines.append("[memex8 — Search Results]")
         for r in search_results[:5]:
-            content = (r.get("content") or "").strip()
+            content = _sanitize_for_prompt((r.get("content") or "").strip(), sanitize)
             if len(content) > 200:
                 content = content[:197] + "..."
             realm = r.get("realm_name", r.get("realm", ""))
@@ -563,6 +603,19 @@ class Memex8MemoryProvider(MemoryProvider):
                     "Promote turns containing evaluation/learning verbs "
                     "(learned, noticed, realized, etc.) to "
                     "memory_type='fact' so they decay slower. Off by default."
+                ),
+                "default": "false",
+                "choices": ["true", "false"],
+            },
+            # Feature 3: prompt-injection sanitization
+            {
+                "key": "sanitize_for_prompt",
+                "description": (
+                    "Sanitize memory content before it enters the system "
+                    "prompt: neutralize {{template}}, ${template}, "
+                    "unbalanced triple-backticks, and javascript:/vbscript:/"
+                    "data:text/html URLs. Off by default to preserve "
+                    "existing content fidelity."
                 ),
                 "default": "false",
                 "choices": ["true", "false"],
@@ -730,6 +783,8 @@ class Memex8MemoryProvider(MemoryProvider):
             char_budget = int(char_budget_raw) if char_budget_raw not in (None, "") else None
         except (TypeError, ValueError):
             char_budget = None
+        # Feature 3 — read config-gated prompt-injection sanitization
+        sanitize_enabled = bool(cfg.get("sanitize_for_prompt", False))
 
         already_injected = self._injected_this_session if dedup_enabled else None
         if dedup_enabled and char_budget is not None:
@@ -749,12 +804,15 @@ class Memex8MemoryProvider(MemoryProvider):
                     already_injected=already_injected,
                     char_budget=char_budget,
                     priorities=priorities,
+                    sanitize=sanitize_enabled,
                 )
         elif dedup_enabled:
             with self._dedup_lock:
-                block = _build_context_block(recall, already_injected=already_injected)
+                block = _build_context_block(
+                    recall, already_injected=already_injected, sanitize=sanitize_enabled
+                )
         else:
-            block = _build_context_block(recall)
+            block = _build_context_block(recall, sanitize=sanitize_enabled)
         return f"## memex8 Memory (persistent context)\n{block}" if block else ""
 
     # -- Turn sync --
