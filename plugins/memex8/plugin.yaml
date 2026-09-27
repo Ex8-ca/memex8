@@ -1,7 +1,10 @@
 name: memex8
 version: 1.0.0
-description: "memex8 — self-hosted AI memory system with Qdrant, ScalarQuant compression, and auto-discovered knowledge realms."
+description: "memex8 — self-hosted vector memory with semantic search, auto-discovered knowledge realms, TurboQuant compression, and a slumber pipeline for memory consolidation."
 pip_dependencies:
   - requests
 requires_env:
   - MEMEX8_API_KEY
+hooks:
+  - on_session_end
+  - on_pre_compress
