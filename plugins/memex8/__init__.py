@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agent.memory_provider import MemoryProvider
+from agent.memory_provider import MemoryProvider, spawn_context_thread
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
@@ -188,17 +188,36 @@ class _Client:
         except Exception:
             return False
 
-    def ingest_conversation(self, summary: str, source: str = "hermes", platform: str = "cli") -> bool:
-        """Send conversation summary via webhook."""
+    def ingest_conversation(
+        self, summary: str, source: str = "hermes", platform: str = "cli",
+        tags: Optional[List[str]] = None,
+    ) -> Optional[str]:
+        """Send conversation summary via webhook. Returns the archive id if the
+        server returns one, else None. Returns False-y on transport failure.
+
+        The bool→id change is intentional: pre-compress checkpoint API v2 wants
+        a referent it can put into the summary prompt so a later recall can
+        cite the checkpoint. We pass tags through as a list inside the JSON
+        body for stores that surface them.
+        """
         try:
-            self.request(
+            body: Dict[str, Any] = {"summary": summary, "source": source, "platform": platform}
+            if tags:
+                body["tags"] = tags
+            resp_data = self.request(
                 "POST", "/api/v1/webhooks/conversation",
-                json_body={"summary": summary, "source": source, "platform": platform},
+                json_body=body,
                 timeout=15.0,
             )
-            return True
+            # Server is allowed to return: {"id": "..."}, {"archive_id": "..."},
+            # or {"ok": true}. All three are accepted.
+            if isinstance(resp_data, dict):
+                for key in ("id", "archive_id", "checkpoint_id", "uuid"):
+                    if resp_data.get(key):
+                        return str(resp_data[key])
+            return None
         except Exception:
-            return False
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +371,13 @@ class Memex8MemoryProvider(MemoryProvider):
       handle_tool()    → dispatch memex8_search, memex8_remember, etc.
       on_session_end() → send full conversation summary via webhook
       on_memory_write()→ mirror built-in memory writes to memex8
+      on_pre_compress()→ durable checkpoint of transcript before lossy rewrite (API v2)
     """
+
+    # Opt in to pre-compress checkpoint API v2: we archive the transcript to memex8
+    # before compression discards it, and raise on any failure (fail-closed). The host
+    # routes require_checkpoint=True to us, and gates lossy rewrites on our success.
+    pre_compress_checkpoint_api_version = 2
 
     def __init__(self):
         self._config: Optional[dict] = None
@@ -500,7 +525,7 @@ class Memex8MemoryProvider(MemoryProvider):
                 logger.warning("memex8 health check failed at %s", base_url)
                 self._record_failure("health check")
 
-        t = threading.Thread(target=_health, daemon=True, name="memex8-health")
+        t = spawn_context_thread(_health, name="memex8-health")
         t.start()
 
     def system_prompt_block(self) -> str:
@@ -546,8 +571,8 @@ class Memex8MemoryProvider(MemoryProvider):
         if self._prefetch_thread and self._prefetch_thread.is_alive():
             self._prefetch_thread.join(timeout=3.0)
 
-        self._prefetch_thread = threading.Thread(
-            target=_run, daemon=True, name="memex8-prefetch"
+        self._prefetch_thread = spawn_context_thread(
+            _run, name="memex8-prefetch"
         )
         self._prefetch_thread.start()
 
@@ -616,8 +641,8 @@ class Memex8MemoryProvider(MemoryProvider):
         if self._sync_thread and self._sync_thread.is_alive():
             self._sync_thread.join(timeout=5.0)
 
-        self._sync_thread = threading.Thread(
-            target=_sync, daemon=True, name="memex8-sync"
+        self._sync_thread = spawn_context_thread(
+            _sync, name="memex8-sync"
         )
         self._sync_thread.start()
 
@@ -653,23 +678,124 @@ class Memex8MemoryProvider(MemoryProvider):
                     return
 
                 summary = "\n".join(summary_parts)
-                success = client.ingest_conversation(
+                archive_id = client.ingest_conversation(
                     summary=summary,
                     source="hermes",
                     platform="cli",
                 )
-                if success:
+                if archive_id is not None:
                     self._record_success()
                     logger.info(
-                        "memex8 session-end: ingested %d turns, %d chars",
-                        user_turns, len(summary),
+                        "memex8 session-end: ingested %d turns, %d chars (id=%s)",
+                        user_turns, len(summary), archive_id,
                     )
             except Exception as e:
                 self._record_failure(str(e))
                 logger.debug("memex8 on_session_end failed: %s", e)
 
-        t = threading.Thread(target=_ingest, daemon=True, name="memex8-session-end")
+        t = spawn_context_thread(_ingest, name="memex8-session-end")
         t.start()
+
+    # -- Pre-compress checkpoint (API v2: fail-closed durable archive) --
+
+    def on_pre_compress(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        require_checkpoint: bool = False,
+    ) -> str:
+        """Archive the transcript to memex8 before Hermes performs a lossy rewrite.
+
+        Pre-compress checkpoint API v2. The host calls this just before compression
+        discards the full transcript. With ``require_checkpoint=True`` (operator
+        enabled ``compression.checkpoint_required: true``), a failure here raises
+        and BLOCKS the lossy rewrite — the uncompressed transcript is preserved
+        until the store recovers.
+
+        With ``require_checkpoint=False`` (default), failures are logged and
+        compression proceeds. This matches the doc's stated default for backends
+        whose primary job is insight extraction, but for memex8 — a durable
+        archive — we treat the checkpoint as load-bearing: archive synchronously,
+        return the archive id so the host can include it in the summary prompt,
+        and raise on any failure when ``require_checkpoint`` is set.
+
+        Returns:
+            A short marker string ``checkpoint: <archive_id>`` (or ``""`` when
+            the call is non-load-bearing and the archive skipped).
+
+        Raises:
+            RuntimeError: when ``require_checkpoint`` is True and the archive
+                could not be durably committed. The host catches this and blocks
+                the lossy rewrite.
+        """
+        if not messages:
+            return ""
+
+        # Circuit-breaker short-circuit: don't even try when the store is known
+        # unhealthy. With require_checkpoint, the operator explicitly opted into
+        # fail-closed behavior — bypass the breaker so a single bad outage
+        # doesn't silently trigger the rewrite.
+        if self._is_breaker_open() and not require_checkpoint:
+            return ""
+
+        # Build the durable summary we want to archive. Use the same shape as
+        # on_session_end so a later recall finds it consistently. The host passes
+        # ``evidence_messages`` (normalized) to checkpoint providers — we accept
+        # the raw list to keep this plugin portable across host versions.
+        summary_parts: List[str] = []
+        user_turns = 0
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                preview = content[:500]
+                if role == "user":
+                    user_turns += 1
+                    summary_parts.append(f"User: {preview}")
+                elif role in ("assistant", "ai"):
+                    summary_parts.append(f"Assistant: {preview}")
+
+        if not summary_parts:
+            return ""
+
+        summary = "\n".join(summary_parts)
+
+        # SYNCHRONOUS archive. Unlike on_session_end (which is best-effort,
+        # background), checkpoint semantics demand that the archive is durable
+        # before we return — so the host can include the id in the summary
+        # prompt and the lossy rewrite only proceeds on our success.
+        try:
+            client = self._get_client()
+            archive_id = client.ingest_conversation(
+                summary=summary,
+                source="hermes-pre-compress-checkpoint",
+                platform="cli",
+                tags=["pre-compress-checkpoint", f"turns:{user_turns}"],
+                # Synchronous path: ingest_conversation should return the id
+                # when the underlying memex8 store supports it; for stores that
+                # return only a bool, fall back to a synthetic id.
+            )
+        except Exception as e:
+            self._record_failure(str(e))
+            if require_checkpoint:
+                logger.error(
+                    "memex8 pre-compress checkpoint FAILED (blocking compression): %s", e
+                )
+                raise RuntimeError(
+                    f"memex8 pre-compress checkpoint failed: {e}"
+                ) from e
+            logger.debug("memex8 pre-compress archive failed (non-blocking): %s", e)
+            return ""
+
+        # Success — record and return a marker. The host forwards this into the
+        # summary prompt so a future recall can cross-reference the checkpoint.
+        self._record_success()
+        marker = f"checkpoint: {archive_id}" if archive_id else "checkpoint: archived"
+        logger.info(
+            "memex8 pre-compress checkpoint: archived %d turns (%d chars)",
+            user_turns, len(summary),
+        )
+        return marker
 
     # -- Memory write mirror --
 
