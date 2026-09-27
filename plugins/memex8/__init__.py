@@ -55,6 +55,21 @@ _TRIVIAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Feature 2: memory-type classifiers
+# Decision/decision-verb pattern (kept conservative — anchored on whole words,
+# excludes the "I decided to ask about X" non-load-bearing sense)
+_DECISION_RE = re.compile(
+    r"(?i)\b(decided|resolved|completed|fixed|deployed|shipped|reviewed|"
+    r"approved|rejected|built|created|chose|picked|migrated|adopted|"
+    r"switched|locked in|signed off)\b"
+)
+# Evaluation/learning pattern (insight that should persist longer than a week)
+_EVAL_RE = re.compile(
+    r"(?i)\b(worked well|didn't work|didnt work|failed|succeeded|learned|"
+    r"noticed|realized|discovered|finding|insight|improvement|recommend|"
+    r"recommendation|avoid|conclusion|takeaway)\b"
+)
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -159,7 +174,7 @@ class _Client:
             params["realm"] = realm
         return self.request("GET", "/api/v1/memories/recall", params=params)
 
-    def store(self, content: str, realm_hint: str = None, tags: list = None, source: str = None) -> dict:
+    def store(self, content: str, realm_hint: str = None, tags: list = None, source: str = None, memory_type: str = None) -> dict:
         body = {"content": content}
         if realm_hint:
             body["realm_hint"] = realm_hint
@@ -167,6 +182,8 @@ class _Client:
             body["tags"] = tags
         if source:
             body["source"] = source
+        if memory_type:
+            body["memory_type"] = memory_type
         return self.request("POST", "/api/v1/memories", json_body=body)
 
     def delete(self, memory_id: str) -> dict:
@@ -529,6 +546,27 @@ class Memex8MemoryProvider(MemoryProvider):
                 ),
                 "default": "4000",
             },
+            # Feature 2: decision/evaluation memory-type promotion
+            {
+                "key": "promote_decisions",
+                "description": (
+                    "Promote turns containing decision verbs (decided, "
+                    "shipped, deployed, etc.) to memory_type='decision' so "
+                    "they decay slower. Off by default."
+                ),
+                "default": "false",
+                "choices": ["true", "false"],
+            },
+            {
+                "key": "promote_evaluations",
+                "description": (
+                    "Promote turns containing evaluation/learning verbs "
+                    "(learned, noticed, realized, etc.) to "
+                    "memory_type='fact' so they decay slower. Off by default."
+                ),
+                "default": "false",
+                "choices": ["true", "false"],
+            },
         ]
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
@@ -721,6 +759,29 @@ class Memex8MemoryProvider(MemoryProvider):
 
     # -- Turn sync --
 
+    def _classify_memory_type(self, user_content: str, assistant_content: str) -> str:
+        """Return the memex8 ``memory_type`` for a turn based on content signals.
+
+        Feature 2: when ``promote_decisions`` or ``promote_evaluations`` is
+        enabled in config, turns matching decision/evaluation regexes get
+        promoted to slower-decaying memory types (which gives them a
+        longer Weibull lifetime). Otherwise returns the default ``"event"``.
+
+        Existing users (both flags off) see no change.
+        """
+        if not self._config:
+            return "event"
+        promote_dec = bool(self._config.get("promote_decisions", False))
+        promote_eval = bool(self._config.get("promote_evaluations", False))
+        if not promote_dec and not promote_eval:
+            return "event"
+        combined = f"{user_content or ''}\n{assistant_content or ''}"
+        if promote_dec and _DECISION_RE.search(combined):
+            return "decision"  # k=1.00, scale=2wk — decays after acted on
+        if promote_eval and _EVAL_RE.search(combined):
+            return "fact"  # k=0.80, scale=1mo — durable
+        return "event"
+
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Auto-store conversation turns as memories (non-blocking)."""
         if self._is_breaker_open():
@@ -754,11 +815,13 @@ class Memex8MemoryProvider(MemoryProvider):
             try:
                 client = self._get_client()
                 content = f"## User\n\n{user_content.strip()[:300]}\n\n## Assistant\n\n{assistant_content.strip()[:300]}"
+                memory_type = self._classify_memory_type(user_content, assistant_content)
                 client.store(
                     content,
                     realm_hint="conversations",
-                    tags=["conversation", "auto-stored"],
+                    tags=["conversation", "auto-stored", f"type:{memory_type}"],
                     source="hermes-sync",
+                    memory_type=memory_type,
                 )
                 self._record_success()
             except Exception as e:
