@@ -23,6 +23,7 @@ Environment variables:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -328,18 +329,77 @@ GET_SCHEMA = {
 # Overlay formatter
 # ---------------------------------------------------------------------------
 
-def _build_context_block(recall_results: list, search_results: list = None) -> str:
-    """Format recall/search results as a context block for the system prompt."""
+def _build_context_block(
+    recall_results: list,
+    search_results: Optional[list] = None,
+    *,
+    already_injected: Optional[set] = None,
+    char_budget: Optional[int] = None,
+    priorities: Optional[Dict[str, float]] = None,
+) -> str:
+    """Format recall/search results as a context block for the system prompt.
+
+    Feature 1 (per-session dedup): if ``already_injected`` is provided, skip
+    memories whose ID is in the set. If ``char_budget`` is provided, drop the
+    lowest-priority memories until the formatted block fits within the budget
+    and record the kept IDs in ``already_injected``.
+    """
+    def memory_id(r: dict) -> str:
+        # Prefer server-provided 'id'; fall back to content hash for legacy
+        # payloads (older Qdrant records may lack an id field).
+        mid = r.get("id") or r.get("memory_id") or ""
+        if mid:
+            return str(mid)
+        content = r.get("content", "")
+        return "hash:" + hashlib.sha1(content.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
     lines: list[str] = []
 
     if recall_results:
         lines.append("[memex8 — Important Context]")
+        # Phase 1: build candidate list with dedup applied
+        candidates: list = []
         for r in recall_results[:5]:
-            content = (r.get("content") or "").strip()
-            if len(content) > 200:
-                content = content[:197] + "..."
-            realm = r.get("realm_name", r.get("realm", ""))
-            lines.append(f"- [{realm}] {content}")
+            mid = memory_id(r)
+            if already_injected is not None and mid in already_injected:
+                continue
+            candidates.append((mid, r))
+
+        # Phase 2: sort by priority and apply char budget gate
+        if char_budget is not None and candidates:
+            def prio(item):
+                mid, r = item
+                if priorities is not None and mid in priorities:
+                    return priorities[mid]
+                return float(r.get("importance", r.get("score", 0.5)) or 0.5)
+
+            candidates.sort(key=prio, reverse=True)
+            kept: list[str] = []
+            used = 0  # excludes the header "[memex8 — Important Context]\n"
+            for mid, r in candidates:
+                content = (r.get("content") or "").strip()
+                if len(content) > 200:
+                    content = content[:197] + "..."
+                realm = r.get("realm_name", r.get("realm", ""))
+                line = f"- [{realm}] {content}"
+                cost = len(line) + 1  # +1 for newline
+                # Reserve room for trailing empty line below
+                if used + cost + 1 > char_budget:
+                    continue
+                kept.append(line)
+                used += cost
+                if already_injected is not None:
+                    already_injected.add(mid)
+            lines.extend(kept)
+        else:
+            for mid, r in candidates:
+                content = (r.get("content") or "").strip()
+                if len(content) > 200:
+                    content = content[:197] + "..."
+                realm = r.get("realm_name", r.get("realm", ""))
+                lines.append(f"- [{realm}] {content}")
+                if already_injected is not None:
+                    already_injected.add(mid)
         lines.append("")
 
     if search_results:
@@ -400,6 +460,12 @@ class Memex8MemoryProvider(MemoryProvider):
         self._breaker_threshold = 5
         self._breaker_cooldown = 120  # seconds
 
+        # Per-session dedup tracking (Feature 1)
+        # Memory IDs already injected via system prompt this session, so we
+        # don't repeat them across turns. Cleared on session start/end.
+        self._injected_this_session: set[str] = set()
+        self._dedup_lock = threading.Lock()
+
     # -- Core identity --
 
     @property
@@ -442,6 +508,26 @@ class Memex8MemoryProvider(MemoryProvider):
                 "key": "recall_top_k",
                 "description": "Max memories returned per auto-recall",
                 "default": str(_DEFAULT_RECALL_TOP_K),
+            },
+            # Feature 1: per-session injection dedup
+            {
+                "key": "dedup_injected_memories",
+                "description": (
+                    "Don't re-inject a memory that was already in the system "
+                    "prompt earlier this session. Off by default to preserve "
+                    "existing behavior."
+                ),
+                "default": "false",
+                "choices": ["true", "false"],
+            },
+            {
+                "key": "recall_max_inject_chars",
+                "description": (
+                    "Hard cap on the size of the [memex8 — Important Context] "
+                    "block injected per turn. Lowest-priority memories are "
+                    "dropped to fit. Ignored when dedup_injected_memories is off."
+                ),
+                "default": "4000",
             },
         ]
 
@@ -508,6 +594,9 @@ class Memex8MemoryProvider(MemoryProvider):
         self._turn_counter = 0
         self._session_turns = []
         self._recall_result = []
+        # Feature 1: reset per-session dedup state on every new session
+        with self._dedup_lock:
+            self._injected_this_session = set()
 
         self._config = _load_config(self._hermes_home)
         base_url = self._config.get("base_url", _DEFAULT_BASE_URL)
@@ -577,7 +666,14 @@ class Memex8MemoryProvider(MemoryProvider):
         self._prefetch_thread.start()
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        """Return prefetched context block."""
+        """Return prefetched context block.
+
+        Feature 1: when ``dedup_injected_memories`` is enabled in config,
+        skip memories that have already been injected this session (cleared
+        on ``initialize``/``on_session_end``). When ``recall_max_inject_chars``
+        is set, additionally sort candidates by importance and drop
+        lowest-priority memories to fit within the budget.
+        """
         if self._prefetch_thread and self._prefetch_thread.is_alive():
             self._prefetch_thread.join(timeout=3.0)
 
@@ -588,7 +684,39 @@ class Memex8MemoryProvider(MemoryProvider):
         if not recall:
             return ""
 
-        block = _build_context_block(recall)
+        # Feature 1 — read config-gated dedup state
+        cfg = self._config or {}
+        dedup_enabled = bool(cfg.get("dedup_injected_memories", False))
+        char_budget_raw = cfg.get("recall_max_inject_chars")
+        try:
+            char_budget = int(char_budget_raw) if char_budget_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            char_budget = None
+
+        already_injected = self._injected_this_session if dedup_enabled else None
+        if dedup_enabled and char_budget is not None:
+            # Annotate priorities by `importance` field (fallback `score`)
+            priorities: Dict[str, float] = {}
+            for r in recall[:5]:
+                mid = str(r.get("id") or r.get("memory_id") or "") or (
+                    "hash:" + hashlib.sha1(
+                        (r.get("content") or "").encode("utf-8", errors="ignore")
+                    ).hexdigest()[:16]
+                )
+                priorities[mid] = float(r.get("importance", r.get("score", 0.5)) or 0.5)
+
+            with self._dedup_lock:
+                block = _build_context_block(
+                    recall,
+                    already_injected=already_injected,
+                    char_budget=char_budget,
+                    priorities=priorities,
+                )
+        elif dedup_enabled:
+            with self._dedup_lock:
+                block = _build_context_block(recall, already_injected=already_injected)
+        else:
+            block = _build_context_block(recall)
         return f"## memex8 Memory (persistent context)\n{block}" if block else ""
 
     # -- Turn sync --
@@ -653,6 +781,9 @@ class Memex8MemoryProvider(MemoryProvider):
 
         Called when a session ends (exit, /reset, timeout).
         """
+        # Feature 1: clear per-session dedup state on session end
+        with self._dedup_lock:
+            self._injected_this_session = set()
         if not messages or self._is_breaker_open():
             return
 
