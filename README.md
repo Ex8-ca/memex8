@@ -22,6 +22,35 @@ A self-hosted memory system that models how **human memory actually works**: mem
 
 **[⭐ Star on GitHub](https://github.com/Ex8-ca/memex8) · [Source (GitLab)](https://gitlab.chillygeek.com/marcus2004/memex8) · [Report Issue](https://github.com/Ex8-ca/memex8/issues)**
 
+## Install as a Hermes Agent plugin
+
+memex8 ships a `plugins/memex8/` directory that turns it into a drop-in memory
+backend for [Hermes Agent](https://hermes-agent.nousresearch.com/). Once the
+plugin is in the Hermes catalog, installation is one command:
+
+```bash
+hermes plugins install memex8
+hermes memory setup       # pick "memex8", enter URL + API key
+```
+
+The plugin is a **standalone third-party plugin** and is intentionally NOT in
+the hermes-agent `plugins/memory/` in-tree directory — see the
+[Hermes plugin policy](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins)
+for why (memex8 evolves fast and Nous doesn't own it). Promoted in the Nous
+Research Discord `#plugins-skills-and-skins` channel.
+
+What's wired up:
+
+- **Auto-recall** before each turn (background semantic search → injected context)
+- **Auto-sync** of conversation turns (skips trivial replies)
+- **Session-end ingestion** of the full conversation summary
+- **Memory-write mirroring** of Hermes' built-in `memory` tool calls
+- **Pre-compress checkpoint** (Hermes memory-provider API v2) — archives the
+  full transcript before lossy context rewrites; opt-in fail-closed via
+  `compression.checkpoint_required: true`
+
+See [`plugins/memex8/README.md`](plugins/memex8/README.md) for full setup.
+
 ---
 
 <img width="1867" height="756" alt="image" src="https://github.com/user-attachments/assets/b6f58404-7e13-48c2-bbcc-aeee32b6a5c3" />

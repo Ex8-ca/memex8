@@ -1,6 +1,6 @@
 # memex8 Memory Plugin for Hermes Agent
 
-> Persistent vector memory with semantic search, auto-organizing knowledge realms, and ScalarQuant compression.
+> Persistent vector memory with semantic search, auto-organizing knowledge realms, and TurboQuant 8× compression.
 
 ## Overview
 
@@ -34,26 +34,33 @@ docker compose up -d
 curl http://localhost:8080/health
 ```
 
-### 2. Install the plugin
+### 2. Install the plugin (catalog — recommended)
 
 ```bash
-# Copy to Hermes bundled plugins (in the hermes-agent source tree):
-cp -r ~/memex8/plugins/memex8 /path/to/hermes-agent/plugins/memory/
-
-# Or to user plugins (preferred for dev):
-cp -r ~/memex8/plugins/memex8 ~/.hermes/plugins/
+hermes plugins install memex8
+hermes memory setup       # pick "memex8", enter URL + API key
 ```
+
+Then restart Hermes. The catalog entry pins the plugin to a known-good SHA, and future `hermes update` keeps the pin fresh.
+
+### Alternative install paths
+
+```bash
+# User-level (no catalog pin — for development):
+cp -r plugins/memex8 ~/.hermes/plugins/memex8
+
+# From a private fork (for staged rollouts):
+hermes plugins install Ex8-ca/memex8 --ref my-branch
+```
+
+The plugin is a **standalone third-party plugin** and is intentionally NOT in
+the hermes-agent `plugins/memory/` in-tree directory. See
+[Hermes plugin policy](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins)
+for why.
 
 ### 3. Activate in Hermes
 
-```bash
-hermes memory setup
-# → Select "memex8"
-# → Enter memex8 URL (default: http://localhost:8080)
-# → Enter API key
-```
-
-Or edit `~/.hermes/config.yaml` directly:
+If you skipped `hermes memory setup`, edit `~/.hermes/config.yaml` directly:
 
 ```yaml
 memory:
@@ -120,19 +127,20 @@ Hermes Agent
   │
   │  memory provider → memex8 plugin
   │
-  ├── initialize()     → health check, create HTTP client
-  ├── prefetch()       → return cached background recall results
-  ├── queue_prefetch() → launch async recall before next turn
-  ├── sync_turn()      → auto-save conversation turns
-  ├── memex8_search    → POST /api/v1/memories/search
-  ├── memex8_remember  → POST /api/v1/memories
-  ├── memex8_recall    → GET  /api/v1/memories/recall
-  ├── on_session_end() → POST /api/v1/webhooks/conversation
-  └── on_memory_write()→ mirror built-in memory writes
+  ├── initialize()       → health check, create HTTP client
+  ├── prefetch()         → return cached background recall results
+  ├── queue_prefetch()   → launch async recall before next turn
+  ├── sync_turn()        → auto-save conversation turns
+  ├── memex8_search      → POST /api/v1/memories/search
+  ├── memex8_remember    → POST /api/v1/memories
+  ├── memex8_recall      → GET  /api/v1/memories/recall
+  ├── on_session_end()   → POST /api/v1/webhooks/conversation
+  ├── on_memory_write()  → mirror built-in memory writes
+  └── on_pre_compress()  → archive transcript before lossy rewrite (API v2)
         │
         ▼
-  memex8 Engine
-  (chunk → embed → realm → Qdrant store)
+ memex8 Engine
+ (chunk → embed → realm → Qdrant store)
 ```
 
 ### Automatic behaviors
@@ -141,17 +149,65 @@ Hermes Agent
 - **Auto-sync**: Conversation turns are stored as memories (skips trivial replies like "ok", "thanks")
 - **Session-end**: Full conversation summary is sent via webhook at session close
 - **Memory mirroring**: When you use Hermes' built-in `memory` tool (add/replace/remove), memex8 stores a copy too
-- **Circuit breaker**: After 5 consecutive failures, API calls pause for 2 minutes to avoid hammering a down server
+- **Circuit breaker**: After 5 consecutive failures, API calls pause for 2 minutes to avoid hammering a down server. **The breaker is bypassed during a pre-compress checkpoint** when `require_checkpoint=True` — see below.
+
+## Pre-Compress Checkpoints (Hermes API v2)
+
+This plugin opts into the **fail-closed pre-compress checkpoint** contract
+(`pre_compress_checkpoint_api_version = 2`). What that means:
+
+- Before Hermes performs a lossy context rewrite (memory compression), the
+  plugin synchronously archives the full transcript to memex8.
+- If the operator enables `compression.checkpoint_required: true` in
+  `~/.hermes/config.yaml`, an archive failure raises and **blocks the lossy
+  rewrite** — the uncompressed transcript is preserved until the store recovers.
+- With `require_checkpoint=False` (the default), archive failures are logged
+  and compression proceeds. This is the right default for insight-extraction
+  providers, but for an archive like memex8 the checkpoint is load-bearing:
+  every successful checkpoint gets a referent (`checkpoint: <archive_id>`) that
+  the host forwards into the summary prompt so a later recall can cite it.
+
+To enable fail-closed mode, add to `~/.hermes/config.yaml`:
+
+```yaml
+compression:
+  checkpoint_required: true    # default: false
+```
+
+See [Hermes memory-provider docs](https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-plugin#pre-compress-checkpoints-fail-closed)
+for the full contract.
+
+### Implementation note
+
+All background work (`queue_prefetch`, `sync_turn`, `on_session_end`,
+`initialize` health probe) runs through `agent.memory_provider.spawn_context_thread`
+so writes bind to the correct profile under multiplex. Bare `threading.Thread`
+runs with empty contextvars and would silently write to the default profile;
+the host's wrapper propagates the spawning context so per-profile writes
+(config, secrets, logging scope) land where they should.
 
 ## Troubleshooting
 
 ### "memex8 plugin not found"
-```bash
-# Check bundled plugins
-ls /path/to/hermes-agent/plugins/memory/memex8/__init__.py
 
-# Or check user plugins
+If you installed via the catalog, the path is:
+
+```bash
 ls ~/.hermes/plugins/memex8/__init__.py
+# (the catalog copies into your HERMES_HOME/plugins/)
+```
+
+For development installs:
+
+```bash
+ls ~/nvme-data/Documents/myprojs/memex8/plugins/memex8/__init__.py
+```
+
+To force a reinstall of the catalog pin:
+
+```bash
+hermes plugins remove memex8
+hermes plugins install memex8
 ```
 
 ### "Connection refused"
