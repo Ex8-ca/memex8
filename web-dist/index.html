@@ -636,7 +636,18 @@
                 document.getElementById(`view-${tab.dataset.view}`).classList.add('active');
 
                 if (tab.dataset.view === 'graph') {
-                    initGraph();
+                    // Defer initGraph until the view is actually visible and laid out.
+                    // Without this, container.clientWidth is 0 on mobile (display:none → block
+                    // happens synchronously but style resolution lags a frame), so the canvas
+                    // renders at 0×0 and the graph never appears. requestAnimationFrame
+                    // + a 150ms fallback guarantees we measure after the next paint.
+                    requestAnimationFrame(() => {
+                        if (initGraph()) return;
+                        // First attempt measured 0×0 — the container hasn't been laid out
+                        // yet (mobile + display:none → block is often slower than a frame).
+                        // Retry once after layout has had time to commit.
+                        setTimeout(() => initGraph(), 150);
+                    });
                 }
             });
         });
@@ -1298,20 +1309,34 @@
             drawGraph();
         }
 
-        // Initialize the graph canvas
+        // Initialize the graph canvas.
+        // Returns false (and bails) if the container has no width yet — on mobile,
+        // the view starts hidden (display:none) so clientWidth is 0 until layout
+        // settles after the tab-switch. The caller is responsible for retrying.
         function initGraph() {
-            if (gAnimFrame) return; // already running
+            if (gAnimFrame) return true; // already running — treat as success
 
             const canvas = document.getElementById('graph-canvas');
             const container = document.getElementById('graph-container');
 
-            // Size canvas to container
+            // Bail if the container has not been laid out yet. Caller retries.
+            if (container.clientWidth === 0 || container.clientHeight === 0) {
+                return false;
+            }
+
+            // Size canvas to container.
+            // Guard against zero-width (parent is display:none / not yet laid out)
+            // — on mobile the Graph view starts hidden, so the first measurement
+            // can legitimately be 0×0 until the tab is switched. Math.max(1, ...)
+            // prevents the canvas from collapsing to nothing in that window.
             function resize() {
                 const dpr = window.devicePixelRatio || 1;
-                canvas.width = container.clientWidth * dpr;
-                canvas.height = container.clientHeight * dpr;
-                canvas.style.width = container.clientWidth + 'px';
-                canvas.style.height = container.clientHeight + 'px';
+                const w = Math.max(1, container.clientWidth);
+                const h = Math.max(1, container.clientHeight);
+                canvas.width = w * dpr;
+                canvas.height = h * dpr;
+                canvas.style.width = w + 'px';
+                canvas.style.height = h + 'px';
                 const ctx = canvas.getContext('2d');
                 ctx.scale(dpr, dpr);
                 gDpr = dpr;
@@ -1328,6 +1353,8 @@
 
             // Start continuous simulation (like Obsidian - never fully stops)
             settleGraph();
+
+            return true;
 
             // ─── Mouse interactions ────────────────────────────────
 
