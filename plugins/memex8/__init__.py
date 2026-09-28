@@ -698,9 +698,11 @@ class Memex8MemoryProvider(MemoryProvider):
             {
                 "key": "enable_export_import",
                 "description": (
-                    "Permit export_memories() and import_memories() to run "
-                    "even when the circuit breaker is open. Disabled by "
-                    "default; only flip on temporarily for backup/migration."
+                    "Let /memex8 export|import read and write arbitrary host "
+                    "paths, and run even when the circuit breaker is open. "
+                    "Disabled by default: paths are then confined to "
+                    "$HERMES_HOME/plugin-data/memex8/. Only flip on "
+                    "temporarily for backup/migration."
                 ),
                 "default": "false",
                 "choices": ["true", "false"],
@@ -1153,6 +1155,25 @@ class Memex8MemoryProvider(MemoryProvider):
 
     # -- Export / Import (Feature 5) --
 
+    def _export_import_enabled(self) -> bool:
+        cfg = self._config or {}
+        return str(cfg.get("enable_export_import", "false")).strip().lower() == "true"
+
+    def resolve_bundle_path(self, raw: str) -> str:
+        """Confine a chat-supplied export/import path to the plugin data dir
+        unless the operator set ``enable_export_import`` to true."""
+        if self._export_import_enabled():
+            return raw
+        base = (Path(self._hermes_home or os.path.expanduser("~/.hermes"))
+                / "plugin-data" / "memex8").resolve()
+        resolved = (base / raw).resolve()
+        if base not in resolved.parents:
+            raise ValueError(
+                f"{raw}: outside {base}; set enable_export_import=true to use other paths"
+            )
+        base.mkdir(parents=True, exist_ok=True)
+        return str(resolved)
+
     def export_memories(
         self,
         output_path: str,
@@ -1185,7 +1206,7 @@ class Memex8MemoryProvider(MemoryProvider):
         - Writes are atomic: write to ``<output_path>.tmp`` then rename.
         - Caller is responsible for permissions / path safety.
         """
-        if self._is_breaker_open() and not (self._config and self._config.get("enable_export_import")):
+        if self._is_breaker_open() and not self._export_import_enabled():
             raise RuntimeError("memex8 circuit breaker is open; export cancelled")
         client = self._get_client()
         exported: List[Dict[str, Any]] = []
@@ -1412,6 +1433,8 @@ Usage:
   /memex8 forget <memory_id>     Delete a memory by id (irrevocable)
   /memex8 export <file>          Dump all memories to a JSON bundle
   /memex8 import <file>          Restore memories from a JSON bundle
+                                 (<file> lives under $HERMES_HOME/plugin-data/memex8/
+                                 unless enable_export_import=true)
   /memex8 realms                 List knowledge realms + counts
   /memex8 help                   Show this message
 
@@ -1561,11 +1584,11 @@ def _memex8_forget(argv) -> str:
 def _memex8_export(argv) -> str:
     if len(argv) < 2:
         return "Usage: /memex8 export <path>  (writes JSON bundle to path)"
-    out_path = argv[1].strip()
     provider = _MEMEX8_PROVIDER
     if provider is None:
         return "memex8 provider not initialized"
     try:
+        out_path = provider.resolve_bundle_path(argv[1].strip())
         n = provider.export_memories(out_path)
     except Exception as e:
         return f"memex8 export failed: {e}"
@@ -1575,11 +1598,11 @@ def _memex8_export(argv) -> str:
 def _memex8_import(argv) -> str:
     if len(argv) < 2:
         return "Usage: /memex8 import <path>  (reads JSON bundle from path)"
-    in_path = argv[1].strip()
     provider = _MEMEX8_PROVIDER
     if provider is None:
         return "memex8 provider not initialized"
     try:
+        in_path = provider.resolve_bundle_path(argv[1].strip())
         n = provider.import_memories(in_path)
     except Exception as e:
         return f"memex8 import failed: {e}"
