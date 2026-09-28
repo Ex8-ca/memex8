@@ -592,8 +592,26 @@ class Memex8MemoryProvider(MemoryProvider):
         return "memex8"
 
     def is_available(self) -> bool:
-        """Check if memex8 is configured (API key present). No network calls."""
-        return bool(os.environ.get("MEMEX8_API_KEY"))
+        """Check if memex8 is configured (API key present). No network calls.
+
+        Checks the environment var first, then falls back to the JSON config
+        file — a user who configured everything in ``~/.hermes/memex8.json``
+        without setting ``MEMEX8_API_KEY`` in the environment should still
+        count as available (matches the documented config precedence).
+        """
+        if os.environ.get("MEMEX8_API_KEY"):
+            return True
+        # Fall back to the JSON config file if hermes_home is known.
+        if self._hermes_home:
+            try:
+                cfg_path = Path(self._hermes_home) / "memex8.json"
+                if cfg_path.exists():
+                    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                    if bool(cfg.get("api_key")):
+                        return True
+            except (OSError, json.JSONDecodeError):
+                pass
+        return False
 
     def get_config_schema(self) -> List[Dict[str, Any]]:
         """Config fields for `hermes memory setup`."""
@@ -1161,17 +1179,31 @@ class Memex8MemoryProvider(MemoryProvider):
 
     def resolve_bundle_path(self, raw: str) -> str:
         """Confine a chat-supplied export/import path to the plugin data dir
-        unless the operator set ``enable_export_import`` to true."""
+        unless the operator set ``enable_export_import`` to true.
+
+        Returns the resolved absolute path. Rejects anything whose resolved
+        location is not strictly inside ``base`` — including ``..`` segments,
+        absolute paths, and symlinks that point outside (``resolve()``
+        collapses symlink targets before the ancestry check).
+        """
         if self._export_import_enabled():
             return raw
         base = (Path(self._hermes_home or os.path.expanduser("~/.hermes"))
                 / "plugin-data" / "memex8").resolve()
         resolved = (base / raw).resolve()
+        # `resolved.parents` starts at resolved's immediate parent, so a file
+        # directly inside base passes, and anything deeper in the tree passes
+        # too. Anything escaping base (upward traversal, abs paths, escaped
+        # symlinks) does not.
         if base not in resolved.parents:
             raise ValueError(
                 f"{raw}: outside {base}; set enable_export_import=true to use other paths"
             )
-        base.mkdir(parents=True, exist_ok=True)
+        # Create the full destination directory chain, not just the base —
+        # nested paths like 'backups/weekly/dump.json' would otherwise pass
+        # the confinement check and then fail on open() with FileNotFoundError
+        # because 'backups/weekly/' was never created.
+        resolved.parent.mkdir(parents=True, exist_ok=True)
         return str(resolved)
 
     def export_memories(
