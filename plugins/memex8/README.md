@@ -92,9 +92,20 @@ New sessions will use memex8 for memory.
   "auto_sync": true,
   "recall_top_k": 8,
   "recall_min_score": 0.3,
-  "timeout": 10.0
+  "timeout": 10.0,
+
+  "// v1.1.0 features (all opt-in):": "",
+  "dedup_injected_memories": false,
+  "recall_max_inject_chars": 4000,
+  "promote_decisions": false,
+  "promote_evaluations": false,
+  "sanitize_for_prompt": false,
+  "system_prompt_template": "",
+  "enable_export_import": false
 }
 ```
+
+See [v1.1.0 Features](#v110-features) below for what each of these does.
 
 ### Environment variables
 
@@ -108,6 +119,77 @@ New sessions will use memex8 for memory.
 1. **Environment variables** — highest priority (overrides everything)
 2. **`~/.hermes/memex8.json`** — persistent config from `hermes memory setup`
 3. **Hardcoded defaults** — fallback
+
+## v1.1.0 Features
+
+All v1.1.0 features are **opt-in** — none change behaviour at default config. Enable them in `~/.hermes/memex8.json`.
+
+### Per-session injection dedup
+
+Stop re-injecting the same memory every turn as the recall query varies. Once a memory has appeared in the system prompt earlier this session, it's skipped on subsequent turns until the session resets.
+
+```json
+{
+  "dedup_injected_memories": true,
+  "recall_max_inject_chars": 4000
+}
+```
+
+`recall_max_inject_chars` is a soft char budget for the injected block (default off; ignored when `dedup_injected_memories` is off). The actual hard cap on items injected per turn is 5 (`recall_top_k` controls how many the server returns, not how many reach the prompt).
+
+### Decision / evaluation memory-type promotion
+
+"Decided to migrate to Postgres" should outlast "what's the weather". When enabled, `sync_turn()` regex-classifies each turn and stores decisions/evaluations as slow-decaying memory types so they decay slower than the default ephemeral type. Decisions and evaluations are separate config keys so you can enable one without the other.
+
+```json
+{
+  "promote_decisions": true,
+  "promote_evaluations": true
+}
+```
+
+### Prompt-injection sanitization
+
+Qdrant payload contents flow directly into the injected context block. Enable sanitization to neutralize `{{template}}`, `${template}`, unbalanced triple-backticks (which break downstream markdown), and `javascript:` / `vbscript:` / `data:text/html` URLs. Conservative patterns; defaults to off so existing users are unaffected.
+
+```json
+{ "sanitize_for_prompt": true }
+```
+
+### Configurable `system_prompt_block` template
+
+The 4-line preamble in the injected block is normally hardcoded. Set `system_prompt_template` to override it. Available variables: `{{realm_count}}`, `{{memory_count}}`, `{{version}}`, `{{base_url}}`. Unknown variables are left literal (no silent drops).
+
+```json
+{
+  "system_prompt_template": "[memex8 — {{memory_count}} memories across {{realm_count}} realms, v{{version}}]\nUse the memex8_search / memex8_recall tools when relevant context lives outside the current transcript."
+}
+```
+
+### Export / import memories as JSON
+
+Backup, migrate between machines, or share a realm. Gated by `enable_export_import` so writes to disk must be explicitly opted into.
+
+```json
+{ "enable_export_import": true }
+```
+
+After enabling, use the `/memex8 export` and `/memex8 import` slash commands to write or read a JSON bundle. Paths are confined to the plugin's data directory unless you've also enabled `enable_export_import` for arbitrary paths.
+
+### `/memex8` slash command
+
+Inspect and operate the plugin without editing config:
+
+```
+/memex8 stats       # memory count, realm sizes, last ingest
+/memex8 realms      # list realms
+/memex8 recall --query "..."
+/memex8 export --output /path/to/bundle.json   # requires enable_export_import
+/memex8 import --input  /path/to/bundle.json   # requires enable_export_import
+/memex8 config      # show the merged config (use this to verify your edits landed)
+```
+
+Output is human-readable by default; pass `--json` for machine-readable.
 
 ## MCP Tools Provided
 
@@ -219,8 +301,8 @@ cd ~/memex8 && docker compose ps
 ### "Unauthorized"
 Check your API key:
 ```bash
-curl -H "Authorization: Bearer $MEMEX8_API_KEY" \
-  http://localhost:8080/health
+curl -H "Authorization: Bearer *api_key*" \
+  http://localhost:8080/api/v1/health
 ```
 
 ### Memories not being recalled

@@ -20,7 +20,7 @@ A self-hosted memory system that models how **human memory actually works**: mem
                              └──────────────────────┘
 ```
 
-**[⭐ Star on GitHub](https://github.com/Ex8-ca/memex8) · [Source (GitLab)](https://gitlab.chillygeek.com/marcus2004/memex8) · [Report Issue](https://github.com/Ex8-ca/memex8/issues)**
+**[⭐ Star on GitHub](https://github.com/Ex8-ca/memex8) · [Report Issue](https://github.com/Ex8-ca/memex8/issues)**
 
 ## Install as a Hermes Agent plugin
 
@@ -356,7 +356,7 @@ memex8 stats         # System statistics
 || `POST` | `/api/v1/inference/gaps/{id}/resolve` | Mark a gap as resolved |
 || `POST` | `/api/v1/inference/gaps/{id}/dismiss` | Dismiss a gap |
 
-All endpoints (except `/health`) require `Authorization: Bearer <key>`
+All endpoints (except `/health`) require `Authorization: Bearer *api_key*`.
 
 ---
 
