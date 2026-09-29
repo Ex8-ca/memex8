@@ -1,7 +1,7 @@
 """memex8 memory plugin — MemoryProvider interface for Hermes Agent.
 
 Self-hosted vector memory with semantic search, auto-organizing knowledge
-realms, and ScalarQuant compression.
+realms, and TurboQuant compression.
 
 Features:
   - Semantic vector search via Qdrant
@@ -30,7 +30,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BASE_URL = "http://localhost:8080"
 _DEFAULT_RECALL_TOP_K = 8
 _DEFAULT_SEARCH_TOP_K = 8
+_DEFAULT_RECALL_INJECT_CAP = 5  # hard cap on memories actually injected into the prompt
 _DEFAULT_RECALL_MIN_SCORE = 0.3
 _DEFAULT_TIMEOUT = 10.0
 _DEFAULT_SEARCH_TIMEOUT = 15.0
@@ -476,9 +477,11 @@ def _build_context_block(
 
     if recall_results:
         lines.append("[memex8 — Important Context]")
-        # Phase 1: build candidate list with dedup applied
+        # Phase 1: build candidate list with dedup applied.
+        # Hard-cap at _DEFAULT_RECALL_INJECT_CAP so a configured recall_top_k > cap
+        # doesn't blow past the prompt's reserved block.
         candidates: list = []
-        for r in recall_results[:5]:
+        for r in recall_results[:_DEFAULT_RECALL_INJECT_CAP]:
             mid = memory_id(r)
             if already_injected is not None and mid in already_injected:
                 continue
@@ -523,7 +526,7 @@ def _build_context_block(
 
     if search_results:
         lines.append("[memex8 — Search Results]")
-        for r in search_results[:5]:
+        for r in search_results[:_DEFAULT_RECALL_INJECT_CAP]:
             content = _sanitize_for_prompt((r.get("content") or "").strip(), sanitize)
             if len(content) > 200:
                 content = content[:197] + "..."
@@ -912,7 +915,7 @@ class Memex8MemoryProvider(MemoryProvider):
         if dedup_enabled and char_budget is not None:
             # Annotate priorities by `importance` field (fallback `score`)
             priorities: Dict[str, float] = {}
-            for r in recall[:5]:
+            for r in recall[:_DEFAULT_RECALL_INJECT_CAP]:
                 mid = str(r.get("id") or r.get("memory_id") or "") or (
                     "hash:" + hashlib.sha1(
                         (r.get("content") or "").encode("utf-8", errors="ignore")
@@ -1260,7 +1263,7 @@ class Memex8MemoryProvider(MemoryProvider):
                 break  # server returned a short page = end of results
         bundle = {
             "version": _PLUGIN_VERSION,
-            "exported_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
             "realm": realm,
             "count": len(exported),
             "page_size": page_size,
@@ -1511,7 +1514,6 @@ def _memex8_status(_argv) -> str:
         f"  base_url         : {cfg.get('base_url', _DEFAULT_BASE_URL)}",
         f"  has api_key      : {bool(cfg.get('api_key'))}",
         f"  timeout          : {cfg.get('timeout', _DEFAULT_TIMEOUT)}s",
-        f"  search timeout   : {cfg.get('search_timeout', _DEFAULT_SEARCH_TIMEOUT)}s",
         f"  recall min score : {cfg.get('recall_min_score', _DEFAULT_RECALL_MIN_SCORE)}",
         f"  recall top_k     : {cfg.get('recall_top_k', _DEFAULT_RECALL_TOP_K)}",
         f"  dedup_injected   : {cfg.get('dedup_injected_memories', False)}",
