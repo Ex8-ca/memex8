@@ -143,7 +143,10 @@ pub async fn write_digest_md(
         ));
     }
     if report.realms_pruned > 0 {
-        entry.push_str(&format!("- 🧹 Pruned {} empty realms\n", report.realms_pruned));
+        entry.push_str(&format!(
+            "- 🧹 Pruned {} empty realms\n",
+            report.realms_pruned
+        ));
     }
 
     // Top important memories this run — use config.max_memories, not hardcoded 5
@@ -208,7 +211,10 @@ pub async fn write_digest_md(
     // This prevents bloating from rapid re-runs with identical results
     let is_duplicate = existing_entries.last().map_or(false, |last| {
         let stats_match = last.contains(&format!("Scanned {} memories", report.memories_scanned))
-            && last.contains(&format!("ScalarQuant compressed {} vectors", report.quantized))
+            && last.contains(&format!(
+                "ScalarQuant compressed {} vectors",
+                report.quantized
+            ))
             && last.contains(&format!("Updated {} realms", report.realms_updated));
         last.starts_with(&format!("## {}", date)) && stats_match
     });

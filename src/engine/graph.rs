@@ -68,7 +68,9 @@ impl KnowledgeGraph {
         let mut seen = HashSet::new();
 
         // Helper: run a regex and process captures
-        let mut add_from_re = |re: Result<Regex, _>, get_name: &dyn Fn(&regex::Captures) -> Option<String>, etype: &str| {
+        let mut add_from_re = |re: Result<Regex, _>,
+                               get_name: &dyn Fn(&regex::Captures) -> Option<String>,
+                               etype: &str| {
             if let Ok(re) = re {
                 for cap in re.captures_iter(text) {
                     if let Some(name) = get_name(&cap) {
@@ -153,19 +155,118 @@ impl KnowledgeGraph {
 
         // 7. Single capitalized words (conservative)
         let common_starters: HashSet<&str> = [
-            "The", "This", "That", "These", "Those", "There", "Here", "When", "Where", "What",
-            "Which", "Who", "Why", "How", "If", "But", "And", "For", "Not", "Now", "Then",
-            "All", "Each", "Every", "Some", "Any", "No", "Many", "Much", "More", "Most",
-            "Other", "Another", "Such", "Only", "Just", "Also", "Very", "Still", "Even",
-            "However", "Therefore", "Moreover", "Furthermore", "Additionally", "Consequently",
-            "Meanwhile", "Otherwise", "Instead", "Rather", "Yet", "So", "Or", "Nor",
-            "A", "An", "In", "On", "At", "To", "Of", "By", "With", "From", "Up", "About",
-            "Into", "Over", "After", "Before", "Between", "Under", "Through", "During",
-            "Without", "Until", "Within", "Across", "Behind", "Beyond", "Around",
-            "It", "Its", "Is", "Are", "Was", "Were", "Be", "Been", "Being", "Have", "Has", "Had",
-            "Do", "Does", "Did", "Will", "Would", "Could", "Should", "May", "Might", "Must",
-            "Can", "Shall", "Need", "Dare", "Used", "Ought",
-        ].into_iter().collect();
+            "The",
+            "This",
+            "That",
+            "These",
+            "Those",
+            "There",
+            "Here",
+            "When",
+            "Where",
+            "What",
+            "Which",
+            "Who",
+            "Why",
+            "How",
+            "If",
+            "But",
+            "And",
+            "For",
+            "Not",
+            "Now",
+            "Then",
+            "All",
+            "Each",
+            "Every",
+            "Some",
+            "Any",
+            "No",
+            "Many",
+            "Much",
+            "More",
+            "Most",
+            "Other",
+            "Another",
+            "Such",
+            "Only",
+            "Just",
+            "Also",
+            "Very",
+            "Still",
+            "Even",
+            "However",
+            "Therefore",
+            "Moreover",
+            "Furthermore",
+            "Additionally",
+            "Consequently",
+            "Meanwhile",
+            "Otherwise",
+            "Instead",
+            "Rather",
+            "Yet",
+            "So",
+            "Or",
+            "Nor",
+            "A",
+            "An",
+            "In",
+            "On",
+            "At",
+            "To",
+            "Of",
+            "By",
+            "With",
+            "From",
+            "Up",
+            "About",
+            "Into",
+            "Over",
+            "After",
+            "Before",
+            "Between",
+            "Under",
+            "Through",
+            "During",
+            "Without",
+            "Until",
+            "Within",
+            "Across",
+            "Behind",
+            "Beyond",
+            "Around",
+            "It",
+            "Its",
+            "Is",
+            "Are",
+            "Was",
+            "Were",
+            "Be",
+            "Been",
+            "Being",
+            "Have",
+            "Has",
+            "Had",
+            "Do",
+            "Does",
+            "Did",
+            "Will",
+            "Would",
+            "Could",
+            "Should",
+            "May",
+            "Might",
+            "Must",
+            "Can",
+            "Shall",
+            "Need",
+            "Dare",
+            "Used",
+            "Ought",
+        ]
+        .into_iter()
+        .collect();
 
         if let Ok(re) = Regex::new(r"\b([A-Z][a-z]{2,})\b") {
             for cap in re.captures_iter(text) {
@@ -295,9 +396,7 @@ impl KnowledgeGraph {
             adj.entry(edge.from_memory_id.clone())
                 .or_default()
                 .push(edge);
-            adj.entry(edge.to_memory_id.clone())
-                .or_default()
-                .push(edge);
+            adj.entry(edge.to_memory_id.clone()).or_default().push(edge);
         }
 
         // BFS
@@ -336,8 +435,8 @@ impl KnowledgeGraph {
                     });
 
                     if let Some(_memory) = self.store.get_memory(next_id).await? {
-                        let relevance = new_path.iter().map(|s| s.weight).sum::<f32>()
-                            / new_path.len() as f32;
+                        let relevance =
+                            new_path.iter().map(|s| s.weight).sum::<f32>() / new_path.len() as f32;
                         results.push(GraphTraversalResult {
                             memory_id: next_id.clone(),
                             depth: new_path.len(),
@@ -411,9 +510,31 @@ fn classify_proper_noun(name: &str) -> String {
     let lower = name.to_lowercase();
 
     let product_indicators = [
-        "api", "sdk", "cli", "gui", "ide", "os", "app", "bot", "tool", "service",
-        "platform", "framework", "library", "engine", "system", "server", "client",
-        "cloud", "net", "web", "db", "ai", "ml", "gpu", "cpu",
+        "api",
+        "sdk",
+        "cli",
+        "gui",
+        "ide",
+        "os",
+        "app",
+        "bot",
+        "tool",
+        "service",
+        "platform",
+        "framework",
+        "library",
+        "engine",
+        "system",
+        "server",
+        "client",
+        "cloud",
+        "net",
+        "web",
+        "db",
+        "ai",
+        "ml",
+        "gpu",
+        "cpu",
     ];
     for indicator in &product_indicators {
         if lower.contains(indicator) {
@@ -422,8 +543,18 @@ fn classify_proper_noun(name: &str) -> String {
     }
 
     let place_indicators = [
-        "street", "avenue", "road", "boulevard", "city", "state", "country",
-        "university", "college", "park", "center", "plaza",
+        "street",
+        "avenue",
+        "road",
+        "boulevard",
+        "city",
+        "state",
+        "country",
+        "university",
+        "college",
+        "park",
+        "center",
+        "plaza",
     ];
     for indicator in &place_indicators {
         if lower.contains(indicator) {
@@ -440,16 +571,94 @@ fn classify_proper_noun(name: &str) -> String {
 
 fn looks_like_proper_noun(word: &str) -> bool {
     let common_nouns: HashSet<&str> = [
-        "The", "This", "That", "There", "Here", "When", "Where", "What", "Which",
-        "One", "Two", "Three", "First", "Second", "Third", "Last", "Next", "Previous",
-        "New", "Old", "Good", "Best", "Better", "Great", "Small", "Large", "Long",
-        "High", "Low", "Big", "Little", "Important", "Main", "Key", "Basic", "Simple",
-        "Complex", "Full", "Empty", "True", "False", "Right", "Left", "Top", "Bottom",
-        "Front", "Back", "Side", "Part", "Way", "Time", "Day", "Year", "Week", "Month",
-        "Use", "Used", "Using", "Make", "Made", "Find", "Found", "Set", "Get", "Go",
-        "Run", "Work", "Call", "Try", "Ask", "Need", "Take", "Give", "Come", "Know",
-        "Think", "See", "Look", "Want", "Put", "Help", "Show", "Start", "End", "Turn",
-    ].into_iter().collect();
+        "The",
+        "This",
+        "That",
+        "There",
+        "Here",
+        "When",
+        "Where",
+        "What",
+        "Which",
+        "One",
+        "Two",
+        "Three",
+        "First",
+        "Second",
+        "Third",
+        "Last",
+        "Next",
+        "Previous",
+        "New",
+        "Old",
+        "Good",
+        "Best",
+        "Better",
+        "Great",
+        "Small",
+        "Large",
+        "Long",
+        "High",
+        "Low",
+        "Big",
+        "Little",
+        "Important",
+        "Main",
+        "Key",
+        "Basic",
+        "Simple",
+        "Complex",
+        "Full",
+        "Empty",
+        "True",
+        "False",
+        "Right",
+        "Left",
+        "Top",
+        "Bottom",
+        "Front",
+        "Back",
+        "Side",
+        "Part",
+        "Way",
+        "Time",
+        "Day",
+        "Year",
+        "Week",
+        "Month",
+        "Use",
+        "Used",
+        "Using",
+        "Make",
+        "Made",
+        "Find",
+        "Found",
+        "Set",
+        "Get",
+        "Go",
+        "Run",
+        "Work",
+        "Call",
+        "Try",
+        "Ask",
+        "Need",
+        "Take",
+        "Give",
+        "Come",
+        "Know",
+        "Think",
+        "See",
+        "Look",
+        "Want",
+        "Put",
+        "Help",
+        "Show",
+        "Start",
+        "End",
+        "Turn",
+    ]
+    .into_iter()
+    .collect();
 
     !common_nouns.contains(word) && word.len() >= 3
 }
@@ -470,7 +679,10 @@ mod tests {
     fn test_extract_entities_technical_terms() {
         let text = "Use `Rust` and `tokio` for async programming";
         let entities = KnowledgeGraph::extract_entities(text);
-        let tech_terms: Vec<_> = entities.iter().filter(|e| e.entity_type == "tech_term").collect();
+        let tech_terms: Vec<_> = entities
+            .iter()
+            .filter(|e| e.entity_type == "tech_term")
+            .collect();
         assert_eq!(tech_terms.len(), 2);
         assert!(tech_terms.iter().any(|e| e.name == "Rust"));
         assert!(tech_terms.iter().any(|e| e.name == "tokio"));
@@ -488,7 +700,10 @@ mod tests {
     fn test_extract_entities_acronyms() {
         let text = "The API uses JWT auth with OAuth2 and HTTP";
         let entities = KnowledgeGraph::extract_entities(text);
-        let acronyms: Vec<_> = entities.iter().filter(|e| e.entity_type == "acronym").collect();
+        let acronyms: Vec<_> = entities
+            .iter()
+            .filter(|e| e.entity_type == "acronym")
+            .collect();
         assert!(acronyms.iter().any(|e| e.name == "API"));
         assert!(acronyms.iter().any(|e| e.name == "JWT"));
     }
@@ -497,7 +712,10 @@ mod tests {
     fn test_extract_entities_config() {
         let text = "Set port: 8080 and provider: ollama for the server";
         let entities = KnowledgeGraph::extract_entities(text);
-        let configs: Vec<_> = entities.iter().filter(|e| e.entity_type == "config").collect();
+        let configs: Vec<_> = entities
+            .iter()
+            .filter(|e| e.entity_type == "config")
+            .collect();
         assert_eq!(configs.len(), 2);
         assert!(configs.iter().any(|e| e.name == "port:8080"));
         assert!(configs.iter().any(|e| e.name == "provider:ollama"));
@@ -508,7 +726,8 @@ mod tests {
         let text = "John Smith works at Google Inc in New York";
         let entities = KnowledgeGraph::extract_entities(text);
         // Should find at least the multi-word entities
-        let multi_word: Vec<_> = entities.iter()
+        let multi_word: Vec<_> = entities
+            .iter()
             .filter(|e| e.name.split_whitespace().count() >= 2)
             .collect();
         assert!(multi_word.iter().any(|e| e.name == "John Smith"));

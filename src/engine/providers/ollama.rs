@@ -24,7 +24,12 @@ pub struct OllamaEmbedder {
 }
 
 impl OllamaEmbedder {
-    pub fn new(url: &str, model: &str, dimensions: u32, max_concurrent: usize) -> anyhow::Result<Self> {
+    pub fn new(
+        url: &str,
+        model: &str,
+        dimensions: u32,
+        max_concurrent: usize,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             url: url.trim_end_matches('/').to_string(),
             model: model.to_string(),
@@ -200,7 +205,9 @@ impl Embedder for OllamaEmbedder {
 
         tracing::info!(
             "Ollama embed_batch: total={}, completed={}, errors={}",
-            total, completed, errors
+            total,
+            completed,
+            errors
         );
         Ok(final_results)
     }

@@ -21,7 +21,7 @@ pub fn weibull_params() -> HashMap<&'static str, (f64, f64)> {
     m.insert("preference", (0.40, 4380.0)); // ~6 months, slow
     m.insert("relationship", (0.35, 8760.0)); // ~1 year, people
     m.insert("learning", (0.70, 1440.0)); // ~2 months
-    // Medium-term working knowledge
+                                          // Medium-term working knowledge
     m.insert("fact", (0.80, 720.0)); // ~1 month, near-exponential
     m.insert("entity", (0.50, 4380.0)); // ~6 months, slow
     m.insert("setup", (0.60, 2160.0)); // ~3 months
@@ -29,18 +29,18 @@ pub fn weibull_params() -> HashMap<&'static str, (f64, f64)> {
     m.insert("context", (0.85, 360.0)); // ~15 days
     m.insert("observation", (0.90, 480.0)); // ~20 days
     m.insert("artifact", (0.75, 2160.0)); // ~3 months
-    // Decaying / time-sensitive
+                                          // Decaying / time-sensitive
     m.insert("project", (0.85, 1080.0)); // ~45 days
     m.insert("goal", (0.90, 720.0)); // ~1 month
     m.insert("decision", (1.00, 336.0)); // ~2 weeks
     m.insert("commitment", (1.00, 240.0)); // ~10 days
-    // Fast-decaying
+                                           // Fast-decaying
     m.insert("event", (1.20, 168.0)); // ~1 week
     m.insert("instruction", (0.90, 480.0)); // ~20 days
     m.insert("error", (1.10, 336.0)); // ~2 weeks
     m.insert("issue", (1.10, 336.0)); // ~2 weeks
     m.insert("request", (1.50, 72.0)); // ~3 days, fastest
-    // Default
+                                       // Default
     m.insert("general", (1.00, 168.0)); // ~1 week
     m
 }
@@ -58,10 +58,7 @@ pub fn weibull_params() -> HashMap<&'static str, (f64, f64)> {
 ///   memory_type: Maps to Weibull params; unknown types use "general" default.
 pub fn weibull_boost(timestamp: &str, query_time: DateTime<Utc>, memory_type: &str) -> f64 {
     let params = weibull_params();
-    let (k, eta_hours) = params
-        .get(memory_type)
-        .copied()
-        .unwrap_or((1.00, 168.0));
+    let (k, eta_hours) = params.get(memory_type).copied().unwrap_or((1.00, 168.0));
 
     let access_ts = match DateTime::parse_from_rfc3339(timestamp) {
         Ok(dt) => dt.with_timezone(&Utc),
@@ -103,9 +100,22 @@ mod tests {
         let pref = weibull_boost(&t(30 * 24), now, "preference");
         let req = weibull_boost(&t(30 * 24), now, "request");
         // Request (k=1.5, eta=72h) decays MUCH faster than preference (k=0.4, eta=4380h)
-        assert!(pref > req, "preference {} should exceed request {}", pref, req);
-        assert!(pref > 0.5, "30-day-old preference should still be >0.5, got {}", pref);
-        assert!(req < 0.05, "30-day-old request should be near-zero, got {}", req);
+        assert!(
+            pref > req,
+            "preference {} should exceed request {}",
+            pref,
+            req
+        );
+        assert!(
+            pref > 0.5,
+            "30-day-old preference should still be >0.5, got {}",
+            pref
+        );
+        assert!(
+            req < 0.05,
+            "30-day-old request should be near-zero, got {}",
+            req
+        );
     }
 
     #[test]
@@ -130,9 +140,14 @@ mod tests {
         let mut prev = 1.0;
         for hours in [1, 24, 168, 720, 4380] {
             let b = weibull_boost(&t(hours), now, "fact");
-            assert!(b < prev, "decay not monotonic at {}h: {} >= {}", hours, b, prev);
+            assert!(
+                b < prev,
+                "decay not monotonic at {}h: {} >= {}",
+                hours,
+                b,
+                prev
+            );
             prev = b;
         }
     }
 }
-

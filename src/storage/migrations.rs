@@ -25,6 +25,9 @@ pub async fn migrate_reaction_scores(store: &QdrantStore) -> anyhow::Result<usiz
         migrated += 1;
     }
 
-    tracing::info!("Migration: verified {} memories have reaction_score field", migrated);
+    tracing::info!(
+        "Migration: verified {} memories have reaction_score field",
+        migrated
+    );
     Ok(migrated)
 }

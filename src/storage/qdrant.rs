@@ -113,11 +113,11 @@ pub struct CollectionStats {
 pub struct GapPoint {
     pub id: String,
     pub vector: Vec<f32>,
-    pub gap_type: String,           // "MissingPrerequisite", "TemporalNext", "UndiscoveredTopic"
-    pub status: String,             // "open", "resolved", "dismissed"
-    pub cluster_id: String,         // which topic cluster this gap belongs to
-    pub suggested_topic: String,    // human-readable suggested topic to explore
-    pub description: String,        // detailed explanation of the gap
+    pub gap_type: String, // "MissingPrerequisite", "TemporalNext", "UndiscoveredTopic"
+    pub status: String,   // "open", "resolved", "dismissed"
+    pub cluster_id: String, // which topic cluster this gap belongs to
+    pub suggested_topic: String, // human-readable suggested topic to explore
+    pub description: String, // detailed explanation of the gap
     pub related_memory_ids: Vec<String>,
     pub suggested_search_queries: Vec<String>,
     pub importance: f32,
@@ -129,7 +129,7 @@ pub struct GapPoint {
 pub struct GraphEdge {
     pub from_memory_id: String,
     pub to_memory_id: String,
-    pub relation_type: String,   // "co_occurs", "similar", "references"
+    pub relation_type: String, // "co_occurs", "similar", "references"
     pub weight: f32,
 }
 
@@ -578,10 +578,11 @@ impl QdrantStore {
 
         self.client
             .set_payload(
-                SetPayloadPointsBuilder::new(MEMORIES, payload)
-                    .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
+                SetPayloadPointsBuilder::new(MEMORIES, payload).points_selector(
+                    PointsSelectorOneOf::Points(PointsIdsList {
                         ids: vec![id.into()],
-                    })),
+                    }),
+                ),
             )
             .await?;
         Ok(())
@@ -861,9 +862,7 @@ impl QdrantStore {
     /// (Qdrant has no group-by aggregate; the memories collection is small
     /// enough that a payload-only scroll is fine — same pattern as
     /// `get_tag_suggestions`).
-    pub async fn count_by_verification_status(
-        &self,
-    ) -> anyhow::Result<VerificationStatusCounts> {
+    pub async fn count_by_verification_status(&self) -> anyhow::Result<VerificationStatusCounts> {
         let all = self.scroll_all_memories().await?;
         let mut counts = VerificationStatusCounts::default();
         for mem in &all {
@@ -1323,13 +1322,14 @@ impl QdrantStore {
         .unwrap_or_default();
 
         self.client
-            .upsert_points(
-                UpsertPointsBuilder::new(GAPS, vec![PointStruct::new(
+            .upsert_points(UpsertPointsBuilder::new(
+                GAPS,
+                vec![PointStruct::new(
                     gap.id.clone(),
                     gap.vector.clone(),
                     payload,
-                )]),
-            )
+                )],
+            ))
             .await?;
         Ok(())
     }
@@ -1348,7 +1348,7 @@ impl QdrantStore {
                     .with_payload(true)
                     .with_vectors(false)
                     .limit(100)
-                    .filter(filter)
+                    .filter(filter),
             )
             .await?;
 
@@ -1400,8 +1400,7 @@ impl QdrantStore {
         let filter = Filter::must([Condition::matches("id", gap_id.to_string())]);
         self.client
             .delete_points(
-                DeletePointsBuilder::new(GAPS)
-                    .points(PointsSelectorOneOf::Filter(filter)),
+                DeletePointsBuilder::new(GAPS).points(PointsSelectorOneOf::Filter(filter)),
             )
             .await?;
         Ok(())
@@ -1423,17 +1422,19 @@ impl QdrantStore {
         .unwrap_or_default();
 
         self.client
-            .upsert_points(
-                UpsertPointsBuilder::new(GRAPHS, vec![PointStruct::new(
-                    point_id, vector, payload,
-                )]),
-            )
+            .upsert_points(UpsertPointsBuilder::new(
+                GRAPHS,
+                vec![PointStruct::new(point_id, vector, payload)],
+            ))
             .await?;
         Ok(())
     }
 
     /// Get all graph edges for a specific memory.
-    pub async fn get_graph_edges_for_memory(&self, memory_id: &str) -> anyhow::Result<Vec<GraphEdge>> {
+    pub async fn get_graph_edges_for_memory(
+        &self,
+        memory_id: &str,
+    ) -> anyhow::Result<Vec<GraphEdge>> {
         let filter = Filter::should([
             Condition::matches("from_memory_id", memory_id.to_string()),
             Condition::matches("to_memory_id", memory_id.to_string()),
@@ -1443,7 +1444,10 @@ impl QdrantStore {
         let mut offset: Option<String> = None;
 
         loop {
-            let mut builder = ScrollPointsBuilder::new(GRAPHS).limit(500).with_payload(true).filter(filter.clone());
+            let mut builder = ScrollPointsBuilder::new(GRAPHS)
+                .limit(500)
+                .with_payload(true)
+                .filter(filter.clone());
             if let Some(ref off) = offset {
                 builder = builder.offset(off.clone());
             }
@@ -1459,7 +1463,10 @@ impl QdrantStore {
             if resp.next_page_offset.is_none() {
                 break;
             }
-            offset = resp.next_page_offset.as_ref().map(|p| point_id_to_string(Some(p)));
+            offset = resp
+                .next_page_offset
+                .as_ref()
+                .map(|p| point_id_to_string(Some(p)));
         }
 
         Ok(edges)
@@ -1471,7 +1478,9 @@ impl QdrantStore {
         let mut offset: Option<String> = None;
 
         loop {
-            let mut builder = ScrollPointsBuilder::new(GRAPHS).limit(500).with_payload(true);
+            let mut builder = ScrollPointsBuilder::new(GRAPHS)
+                .limit(500)
+                .with_payload(true);
             if let Some(ref off) = offset {
                 builder = builder.offset(off.clone());
             }
@@ -1487,7 +1496,10 @@ impl QdrantStore {
             if resp.next_page_offset.is_none() {
                 break;
             }
-            offset = resp.next_page_offset.as_ref().map(|p| point_id_to_string(Some(p)));
+            offset = resp
+                .next_page_offset
+                .as_ref()
+                .map(|p| point_id_to_string(Some(p)));
         }
 
         Ok(edges)
@@ -1514,7 +1526,10 @@ impl QdrantStore {
             if resp.next_page_offset.is_none() {
                 break;
             }
-            offset = resp.next_page_offset.as_ref().map(|p| point_id_to_string(Some(p)));
+            offset = resp
+                .next_page_offset
+                .as_ref()
+                .map(|p| point_id_to_string(Some(p)));
         }
 
         if !point_ids.is_empty() {

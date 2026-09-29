@@ -10,8 +10,8 @@ pub mod memex8_md;
 pub mod providers;
 pub mod quantizer;
 pub mod query_intent;
-pub mod realms;
 pub mod reactions;
+pub mod realms;
 pub mod scheduler;
 pub mod session;
 pub mod slumber;
@@ -137,7 +137,12 @@ impl Engine {
                      Add OPENAI_API_KEY=sk-... to your .env file or set EMBEDDING_PROVIDER=ollama."
                 ));
             }
-            tracing::info!("Using OpenAI-compatible embeddings: {} at {} ({}d)", model, openai_base_url, dimensions);
+            tracing::info!(
+                "Using OpenAI-compatible embeddings: {} at {} ({}d)",
+                model,
+                openai_base_url,
+                dimensions
+            );
         } else {
             tracing::info!("Using Ollama embeddings: {} ({}d)", model, dimensions);
         }
@@ -171,13 +176,16 @@ impl Engine {
     }
 
     /// Load TurboVec index from disk if it exists, otherwise return empty.
-    fn init_turbovec_index(config: &AppConfig) -> Arc<RwLock<Option<quantizer::TurboQuantVectorIndex>>> {
+    fn init_turbovec_index(
+        config: &AppConfig,
+    ) -> Arc<RwLock<Option<quantizer::TurboQuantVectorIndex>>> {
         let index_path = config.turbovec.index_path.clone();
         let id_map_path = config.turbovec.id_map_path.clone();
         let bit_width = config.turbovec.bit_width;
         let dims = config.embedding.dimensions as usize;
 
-        let loaded = quantizer::TurboQuantVectorIndex::load(&index_path, &id_map_path, dims, bit_width);
+        let loaded =
+            quantizer::TurboQuantVectorIndex::load(&index_path, &id_map_path, dims, bit_width);
         match loaded {
             Ok(index) => {
                 tracing::info!(
@@ -191,7 +199,11 @@ impl Engine {
                 Arc::new(RwLock::new(Some(index)))
             }
             Err(e) => {
-                tracing::debug!("TurboVec index not found at {} (will create on first slumber): {}", index_path, e);
+                tracing::debug!(
+                    "TurboVec index not found at {} (will create on first slumber): {}",
+                    index_path,
+                    e
+                );
                 Arc::new(RwLock::new(None))
             }
         }
@@ -578,7 +590,9 @@ impl Engine {
                 // Fetch full payloads from Qdrant by ID
                 let mut fetched: Vec<_> = Vec::new();
                 for (i, &id) in ids.iter().enumerate() {
-                    if i >= scores.len() { break; }
+                    if i >= scores.len() {
+                        break;
+                    }
                     if let Ok(Some(point)) = self.store.get_memory(id).await {
                         let score = scores[i];
                         if score >= min_score {
@@ -594,22 +608,31 @@ impl Engine {
                 // TurboVec not loaded — fall back to Qdrant
                 let qr = if let Some(tags) = tags {
                     if tags.is_empty() {
-                        self.store.search(&query_vector, limit + offset, min_score, realm).await?
+                        self.store
+                            .search(&query_vector, limit + offset, min_score, realm)
+                            .await?
                     } else {
-                        self.store.search_by_tags(&query_vector, tags, limit + offset).await?
+                        self.store
+                            .search_by_tags(&query_vector, tags, limit + offset)
+                            .await?
                             .into_iter()
                             .filter(|r| r.score >= min_score)
                             .filter(|r| realm.map_or(true, |re| r.payload.realm_name == re))
                             .collect()
                     }
                 } else {
-                    self.store.search(&query_vector, limit + offset, min_score, realm).await?
+                    self.store
+                        .search(&query_vector, limit + offset, min_score, realm)
+                        .await?
                 };
                 qr.into_iter().map(|r| (r.score, r.payload)).collect()
             }
         } else {
             // Tag filters active — must use Qdrant (TurboVec has no tag support)
-            let qr = self.store.search_by_tags(&query_vector, tags.as_ref().unwrap(), limit + offset).await?
+            let qr = self
+                .store
+                .search_by_tags(&query_vector, tags.as_ref().unwrap(), limit + offset)
+                .await?
                 .into_iter()
                 .filter(|r| r.score >= min_score)
                 .filter(|r| realm.map_or(true, |re| r.payload.realm_name == re))
@@ -640,7 +663,11 @@ impl Engine {
             .into_iter()
             .map(|(score, p)| {
                 // Compute per-memory recency boost (same Weibull formula as recall)
-                let mem_type = if p.memory_type.is_empty() { "general" } else { &p.memory_type };
+                let mem_type = if p.memory_type.is_empty() {
+                    "general"
+                } else {
+                    &p.memory_type
+                };
                 let query_time = chrono::Utc::now();
                 let recency = decay::weibull_boost(&p.last_accessed, query_time, mem_type) as f32;
 
@@ -732,7 +759,11 @@ impl Engine {
             .map(|m| {
                 // Per-type Weibull decay (replaces uniform 1/(1 + days * 0.1))
                 // Empty/legacy memory_type falls back to "general" defaults.
-                let mem_type = if m.memory_type.is_empty() { "general" } else { &m.memory_type };
+                let mem_type = if m.memory_type.is_empty() {
+                    "general"
+                } else {
+                    &m.memory_type
+                };
                 let query_time = chrono::DateTime::from_timestamp(now as i64, 0)
                     .unwrap_or_else(|| chrono::Utc::now());
                 let recency = decay::weibull_boost(&m.last_accessed, query_time, mem_type) as f32;
@@ -812,19 +843,35 @@ impl Engine {
         match sort {
             "importance" => sorted.sort_by(|a, b| {
                 let cmp = a.importance.partial_cmp(&b.importance).unwrap();
-                if descending { cmp } else { cmp.reverse() }
+                if descending {
+                    cmp
+                } else {
+                    cmp.reverse()
+                }
             }),
             "last_accessed" => sorted.sort_by(|a, b| {
                 let cmp = a.last_accessed.cmp(&b.last_accessed);
-                if descending { cmp } else { cmp.reverse() }
+                if descending {
+                    cmp
+                } else {
+                    cmp.reverse()
+                }
             }),
             "access_count" => sorted.sort_by(|a, b| {
                 let cmp = a.access_count.cmp(&b.access_count);
-                if descending { cmp } else { cmp.reverse() }
+                if descending {
+                    cmp
+                } else {
+                    cmp.reverse()
+                }
             }),
             _ => sorted.sort_by(|a, b| {
                 let cmp = a.ingested_at.cmp(&b.ingested_at);
-                if descending { cmp } else { cmp.reverse() }
+                if descending {
+                    cmp
+                } else {
+                    cmp.reverse()
+                }
             }),
         }
         Ok(sorted)
@@ -1159,7 +1206,8 @@ impl Engine {
                 let count = memories.len();
                 for m in &memories {
                     let realm_id = m.memory.realm_id.as_deref().unwrap_or("");
-                    let reaction_score = crate::engine::reactions::infer_reaction(&m.memory.content);
+                    let reaction_score =
+                        crate::engine::reactions::infer_reaction(&m.memory.content);
                     self.store
                         .store_memory(
                             &m.memory.id,
@@ -1269,13 +1317,13 @@ impl Engine {
             mem.topic_clusters.first().cloned()
         } else if let Some(t) = topic {
             // Search for memories matching the topic and find the most relevant cluster
-            let _results = self
-                .search(t, None, None, 5, 0, 0.3)
-                .await?;
+            let _results = self.search(t, None, None, 5, 0, 0.3).await?;
             // Collect all memories and their topic clusters
             let all_memories = self.store.scroll_all_memories().await?;
-            let mut cluster_memories: std::collections::HashMap<String, Vec<&crate::storage::qdrant::MemoryPoint>> =
-                std::collections::HashMap::new();
+            let mut cluster_memories: std::collections::HashMap<
+                String,
+                Vec<&crate::storage::qdrant::MemoryPoint>,
+            > = std::collections::HashMap::new();
             for mem in &all_memories {
                 for cluster_id in &mem.topic_clusters {
                     cluster_memories
@@ -1330,7 +1378,11 @@ impl Engine {
             .collect();
 
         // Sort by importance (confidence) descending
-        suggestions.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        suggestions.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         suggestions.truncate(limit);
 
         Ok(suggestions)
@@ -1399,7 +1451,10 @@ impl Engine {
     }
 
     /// List available backups sorted by date (newest first).
-    pub fn list_backups(&self, backup_dir: Option<&str>) -> anyhow::Result<Vec<backup::BackupInfo>> {
+    pub fn list_backups(
+        &self,
+        backup_dir: Option<&str>,
+    ) -> anyhow::Result<Vec<backup::BackupInfo>> {
         backup::list_backups(backup_dir)
     }
 }

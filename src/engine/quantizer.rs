@@ -5,7 +5,7 @@
 //! only payload/metadata.
 
 use anyhow::{Context, Result};
-use turbovec::{TurboQuantIndex, SearchResults};
+use turbovec::{SearchResults, TurboQuantIndex};
 
 /// TurboQuant-compressed vector index with string UUID mapping.
 ///
@@ -76,9 +76,8 @@ impl TurboQuantVectorIndex {
             })?;
         }
         let json = serde_json::to_string(&self.id_map)?;
-        std::fs::write(id_map_path, json).with_context(|| {
-            format!("Failed to write id_map to {}", id_map_path)
-        })?;
+        std::fs::write(id_map_path, json)
+            .with_context(|| format!("Failed to write id_map to {}", id_map_path))?;
         Ok(())
     }
 
@@ -86,12 +85,10 @@ impl TurboQuantVectorIndex {
     pub fn load(index_path: &str, id_map_path: &str, dim: usize, bit_width: usize) -> Result<Self> {
         let index = TurboQuantIndex::load(index_path)
             .with_context(|| format!("Failed to load TurboVec index from {}", index_path))?;
-        let id_map_json = std::fs::read_to_string(id_map_path).with_context(|| {
-            format!("Failed to read id_map from {}", id_map_path)
-        })?;
-        let id_map: Vec<String> = serde_json::from_str(&id_map_json).with_context(|| {
-            format!("Failed to parse id_map from {}", id_map_path)
-        })?;
+        let id_map_json = std::fs::read_to_string(id_map_path)
+            .with_context(|| format!("Failed to read id_map from {}", id_map_path))?;
+        let id_map: Vec<String> = serde_json::from_str(&id_map_json)
+            .with_context(|| format!("Failed to parse id_map from {}", id_map_path))?;
         Ok(Self {
             index,
             dim,
@@ -130,7 +127,7 @@ impl TurboQuantVectorIndex {
 pub fn decide_bit_width(access_count: u64, importance: f64) -> Option<usize> {
     let old_bw = decide_bit_width_legacy(access_count, importance);
     match old_bw {
-        None => None,             // unquantized
+        None => None, // unquantized
         Some(bw) if bw <= 2.0 => Some(2),
         Some(_) => Some(4),
     }

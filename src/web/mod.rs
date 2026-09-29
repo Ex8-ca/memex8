@@ -89,7 +89,9 @@ fn inject_api_key(html: &[u8], api_key: Option<&str>) -> Vec<u8> {
             // Backslash-escape any backticks in the key so it stays valid
             // inside a JS template literal. The HTML's wrapping quotes are
             // the HTML's responsibility; we just emit the raw token.
-            html_str.replace(placeholder, &key.replace('`', "\\`")).into_bytes()
+            html_str
+                .replace(placeholder, &key.replace('`', "\\`"))
+                .into_bytes()
         }
         None => {
             // No key configured — leave the placeholder so JS prompts the user

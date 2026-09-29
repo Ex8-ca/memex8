@@ -198,12 +198,21 @@ pub async fn list(
 
     let memories = state
         .engine
-        .list_memories(params.realm.as_deref(), &params.sort, params.direction.as_str() != "asc")
+        .list_memories(
+            params.realm.as_deref(),
+            &params.sort,
+            params.direction.as_str() != "asc",
+        )
         .await?;
     let total = memories.len();
     let page: Vec<_> = memories.into_iter().skip(offset).take(limit).collect();
 
-    Ok(Json(ListResponse { memories: page, total, limit, offset }))
+    Ok(Json(ListResponse {
+        memories: page,
+        total,
+        limit,
+        offset,
+    }))
 }
 
 #[derive(Serialize)]
@@ -272,10 +281,7 @@ pub async fn update_memory(
         );
     }
     if let Some(i) = req.get("importance").and_then(|v| v.as_f64()) {
-        payload_obj.insert(
-            "importance".to_string(),
-            serde_json::json!(i as f32),
-        );
+        payload_obj.insert("importance".to_string(), serde_json::json!(i as f32));
     }
     if payload_obj.is_empty() {
         return Ok(Json(serde_json::json!({"id": id, "status": "no-op"})));
@@ -283,10 +289,7 @@ pub async fn update_memory(
     let payload: qdrant_client::Payload = serde_json::Value::Object(payload_obj)
         .try_into()
         .unwrap_or_default();
-    state
-        .engine
-        .update_memory_payload(&id, payload)
-        .await?;
+    state.engine.update_memory_payload(&id, payload).await?;
     Ok(Json(serde_json::json!({"id": id, "status": "updated"})))
 }
 
@@ -317,10 +320,9 @@ pub async fn upvote_by_content(
         .engine
         .search(&req.query, None, None, 1, 0, min_score - 0.01)
         .await?;
-    let top = results
-        .into_iter()
-        .next()
-        .ok_or_else(|| ApiError::NotFound(format!("no memory matched query (min_score={})", min_score)))?;
+    let top = results.into_iter().next().ok_or_else(|| {
+        ApiError::NotFound(format!("no memory matched query (min_score={})", min_score))
+    })?;
     if top.score < min_score {
         return Err(ApiError::NotFound(format!(
             "top match score {:.3} below threshold {}",
