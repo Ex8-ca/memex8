@@ -67,7 +67,10 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
     if !force {
         let count = count_memories(engine).await?;
         if count > 0 {
-            println!("⚠️  You have {} existing memories. Restore will ADD to them.", count);
+            println!(
+                "⚠️  You have {} existing memories. Restore will ADD to them.",
+                count
+            );
             println!("   Use --force to skip this confirmation.");
             println!("Proceed? [y/N] ");
             let mut input = String::new();
@@ -127,7 +130,13 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
         for r in &realms {
             engine
                 .store()
-                .store_realm(&r.id, &r.centroid, &r.name, r.description.as_deref(), r.is_user_pinned)
+                .store_realm(
+                    &r.id,
+                    &r.centroid,
+                    &r.name,
+                    r.description.as_deref(),
+                    r.is_user_pinned,
+                )
                 .await?;
         }
         tracing::info!("Restored {} realms", realms.len());
@@ -147,7 +156,11 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
     // Clean up
     let _ = fs::remove_dir_all(&temp_dir);
 
-    tracing::info!("Restore complete: {} items restored from {}", restored, path.display());
+    tracing::info!(
+        "Restore complete: {} items restored from {}",
+        restored,
+        path.display()
+    );
     Ok(restored)
 }
 
@@ -163,9 +176,9 @@ pub fn list_backups(backup_dir: Option<&str>) -> anyhow::Result<Vec<BackupInfo>>
         let entry = entry?;
         let path = entry.path();
         if path.extension().map(|e| e == "gz").unwrap_or(false)
-            && path.file_name().map_or(false, |n| {
-                n.to_string_lossy().starts_with("memex8_backup_")
-            })
+            && path
+                .file_name()
+                .map_or(false, |n| n.to_string_lossy().starts_with("memex8_backup_"))
         {
             let metadata = path.metadata()?;
             backups.push(BackupInfo {

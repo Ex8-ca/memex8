@@ -62,7 +62,10 @@ pub async fn traverse(
 ) -> Result<Json<GraphTraverseResponse>, crate::api::error::ApiError> {
     let depth = params.depth.unwrap_or(3);
 
-    let results = state.engine.graph_traverse(&params.memory_id, depth).await?;
+    let results = state
+        .engine
+        .graph_traverse(&params.memory_id, depth)
+        .await?;
 
     let graph_results: Vec<GraphResult> = results
         .into_iter()

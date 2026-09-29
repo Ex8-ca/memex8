@@ -28,7 +28,12 @@ pub struct OpenAiEmbedder {
 }
 
 impl OpenAiEmbedder {
-    pub fn new(api_key: &str, base_url: &str, model: &str, dimensions: u32) -> anyhow::Result<Self> {
+    pub fn new(
+        api_key: &str,
+        base_url: &str,
+        model: &str,
+        dimensions: u32,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             api_key: api_key.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -58,7 +63,12 @@ impl Embedder for OpenAiEmbedder {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await?;
-            anyhow::bail!("Embedding API error at {} ({}): {}", self.base_url, status, body);
+            anyhow::bail!(
+                "Embedding API error at {} ({}): {}",
+                self.base_url,
+                status,
+                body
+            );
         }
 
         let result: OpenAiResponse = resp.json().await?;
@@ -88,7 +98,12 @@ impl Embedder for OpenAiEmbedder {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await?;
-            anyhow::bail!("Embedding API error at {} ({}): {}", self.base_url, status, body);
+            anyhow::bail!(
+                "Embedding API error at {} ({}): {}",
+                self.base_url,
+                status,
+                body
+            );
         }
 
         let result: OpenAiResponse = resp.json().await?;

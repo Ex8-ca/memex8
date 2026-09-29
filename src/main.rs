@@ -670,9 +670,18 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         println!("Graph traversal from {} (depth {}):\n", memory_id, depth);
                         for (i, r) in results.iter().enumerate() {
-                            println!("{}. [depth {} relevance {:.2}] {}", i + 1, r.depth, r.relevance, r.memory_id);
+                            println!(
+                                "{}. [depth {} relevance {:.2}] {}",
+                                i + 1,
+                                r.depth,
+                                r.relevance,
+                                r.memory_id
+                            );
                             for step in &r.path {
-                                println!("   {} --({}: {:.2})--> {}", step.from_id, step.relation_type, step.weight, step.to_id);
+                                println!(
+                                    "   {} --({}: {:.2})--> {}",
+                                    step.from_id, step.relation_type, step.weight, step.to_id
+                                );
                             }
                         }
                     }
@@ -684,8 +693,15 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         println!("Neighbors of {} ({}):\n", memory_id, neighbors.len());
                         for rel in &neighbors {
-                            let other = if rel.from_id == memory_id { &rel.to_id } else { &rel.from_id };
-                            println!("   {} --({}: {:.2})--> {}", memory_id, rel.relation_type, rel.weight, other);
+                            let other = if rel.from_id == memory_id {
+                                &rel.to_id
+                            } else {
+                                &rel.from_id
+                            };
+                            println!(
+                                "   {} --({}: {:.2})--> {}",
+                                memory_id, rel.relation_type, rel.weight, other
+                            );
                         }
                     }
                 }
@@ -717,10 +733,16 @@ async fn main() -> anyhow::Result<()> {
                     println!("💡 Gap suggestions ({}):\n", suggestions.len());
                     for (i, s) in suggestions.iter().enumerate() {
                         println!("{}. [{}] {}", i + 1, s.gap_type, s.suggested_topic);
-                        println!("   Confidence: {:.2} | Importance: {:.2}", s.confidence, s.importance);
+                        println!(
+                            "   Confidence: {:.2} | Importance: {:.2}",
+                            s.confidence, s.importance
+                        );
                         println!("   {}", s.description);
                         if !s.suggested_search_queries.is_empty() {
-                            println!("   Try searching: {}", s.suggested_search_queries.join(", "));
+                            println!(
+                                "   Try searching: {}",
+                                s.suggested_search_queries.join(", ")
+                            );
                         }
                         println!("   Gap ID: {}", s.id);
                         println!();
@@ -754,7 +776,13 @@ async fn main() -> anyhow::Result<()> {
                         format!("{:.1} MB", b.size as f64 / (1024.0 * 1024.0))
                     };
                     let created: chrono::DateTime<chrono::Utc> = b.created.into();
-                    println!("  {}. {} ({}) — {}", i + 1, created.format("%Y-%m-%d %H:%M:%S UTC"), size, b.path);
+                    println!(
+                        "  {}. {} ({}) — {}",
+                        i + 1,
+                        created.format("%Y-%m-%d %H:%M:%S UTC"),
+                        size,
+                        b.path
+                    );
                 }
             }
         }

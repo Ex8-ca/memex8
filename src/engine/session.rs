@@ -95,10 +95,7 @@ impl SessionEngine {
     /// 1. LLM-assisted extraction of decisions, follow-ups, and insights
     /// 2. Store session summary as a high-importance memory
     /// 3. Store each extracted item as an individual memory
-    pub async fn run_session_end(
-        &self,
-        input: SessionInput,
-    ) -> anyhow::Result<SessionReport> {
+    pub async fn run_session_end(&self, input: SessionInput) -> anyhow::Result<SessionReport> {
         // Step 1: LLM-assisted extraction
         let extraction = self.extract(&input).await?;
 
@@ -112,15 +109,33 @@ impl SessionEngine {
 
         // Step 3: Store individual extracted items
         let decisions_stored = self
-            .store_extracted_items(&extraction.decisions, "decision", &realm_id, &realm_name, &input)
+            .store_extracted_items(
+                &extraction.decisions,
+                "decision",
+                &realm_id,
+                &realm_name,
+                &input,
+            )
             .await?;
 
         let follow_ups_stored = self
-            .store_extracted_items(&extraction.follow_ups, "follow_up", &realm_id, &realm_name, &input)
+            .store_extracted_items(
+                &extraction.follow_ups,
+                "follow_up",
+                &realm_id,
+                &realm_name,
+                &input,
+            )
             .await?;
 
         let insights_stored = self
-            .store_extracted_items(&extraction.insights, "insight", &realm_id, &realm_name, &input)
+            .store_extracted_items(
+                &extraction.insights,
+                "insight",
+                &realm_id,
+                &realm_name,
+                &input,
+            )
             .await?;
 
         tracing::info!(
@@ -192,9 +207,7 @@ Only output valid JSON. Be precise and extract only things explicitly present in
             messages_text = messages_text
         );
 
-        let raw_response = self
-            .call_llm(&llm_url, llm_key.as_deref(), &prompt)
-            .await?;
+        let raw_response = self.call_llm(&llm_url, llm_key.as_deref(), &prompt).await?;
 
         // Parse JSON from LLM response
         let extraction = match serde_json::from_str::<SessionExtraction>(&raw_response) {
@@ -308,10 +321,7 @@ Only output valid JSON. Be precise and extract only things explicitly present in
     }
 
     /// Resolve a realm by name, or create it if it doesn't exist.
-    async fn resolve_or_create_realm(
-        &self,
-        name: &str,
-    ) -> anyhow::Result<(String, String)> {
+    async fn resolve_or_create_realm(&self, name: &str) -> anyhow::Result<(String, String)> {
         // Try to find existing realm
         if let Some(realm) = self.store.find_realm_by_name(name).await? {
             return Ok((realm.id, realm.name));
@@ -399,7 +409,10 @@ Only output valid JSON. Be precise and extract only things explicitly present in
 
         // Update importance separately (store_memory normalizes it)
         // Re-store with higher importance by updating the memory's importance field
-        let _ = self.store.set_memory_importance(&memory_id, importance).await;
+        let _ = self
+            .store
+            .set_memory_importance(&memory_id, importance)
+            .await;
 
         tracing::info!(
             "📋 Stored session summary memory (id: {}, realm: {})",
@@ -432,11 +445,7 @@ Only output valid JSON. Be precise and extract only things explicitly present in
                 continue;
             }
 
-            let content = format!(
-                "[{}] {}",
-                item.item_type.to_uppercase(),
-                item.content
-            );
+            let content = format!("[{}] {}", item.item_type.to_uppercase(), item.content);
 
             let vector = embedder.embed(&content).await?;
             let memory_id = uuid::Uuid::new_v4().to_string();
@@ -450,10 +459,7 @@ Only output valid JSON. Be precise and extract only things explicitly present in
                     &vector,
                     &content,
                     None,
-                    Some(&format!(
-                        "session:{}:{}",
-                        input.session_id, item.item_type
-                    )),
+                    Some(&format!("session:{}:{}", input.session_id, item.item_type)),
                     realm_id,
                     realm_name,
                     "",
@@ -463,7 +469,10 @@ Only output valid JSON. Be precise and extract only things explicitly present in
                 )
                 .await?;
 
-                let _ = self.store.set_memory_importance(&memory_id, importance).await;
+            let _ = self
+                .store
+                .set_memory_importance(&memory_id, importance)
+                .await;
             stored += 1;
         }
 

@@ -15,10 +15,10 @@ impl SlumberEngine {
     /// This ensures slumber uses the same embedding provider as the main engine.
     fn embedder(&self) -> anyhow::Result<Box<dyn embedder::Embedder>> {
         let mut cfg = self.config.clone();
-        cfg.embedding.provider = std::env::var("EMBEDDING_PROVIDER")
-            .unwrap_or_else(|_| cfg.embedding.provider.clone());
-        cfg.embedding.model = std::env::var("EMBEDDING_MODEL")
-            .unwrap_or_else(|_| cfg.embedding.model.clone());
+        cfg.embedding.provider =
+            std::env::var("EMBEDDING_PROVIDER").unwrap_or_else(|_| cfg.embedding.provider.clone());
+        cfg.embedding.model =
+            std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| cfg.embedding.model.clone());
         cfg.embedding.dimensions = std::env::var("EMBEDDING_DIMENSIONS")
             .ok()
             .and_then(|d| d.parse().ok())
@@ -400,7 +400,11 @@ impl SlumberEngine {
             // Guard against runaway recursive splits: cap the number of -a/-b
             // suffix levels. Without this, repeated splits produce names like
             // "Discord Ill-a-a-b-b-b-a-b-b-a-a-a-..." that blow up.
-            let split_depth = realm.name.split('-').filter(|s| *s == "a" || *s == "b").count();
+            let split_depth = realm
+                .name
+                .split('-')
+                .filter(|s| *s == "a" || *s == "b")
+                .count();
             if split_depth >= 3 {
                 tracing::info!(
                     "  Skipping split of '{}': already split depth {} (max 3)",
@@ -1754,9 +1758,12 @@ impl SlumberEngine {
             }
 
             // Embed the consolidated summary to get a proper semantic vector
-            let embedder = self.embedder()
+            let embedder = self
+                .embedder()
                 .map_err(|e| anyhow::anyhow!("Failed to create embedder: {}", e))?;
-            let summary_vector = embedder.embed(&summary).await
+            let summary_vector = embedder
+                .embed(&summary)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to embed summary: {}", e))?;
 
             // Collect IDs to delete
@@ -2083,14 +2090,19 @@ impl SlumberEngine {
 
     /// Detect topic clusters using k-means clustering.
     /// Returns (cluster_id, Vec<memory_id>) mappings.
-    async fn detect_topic_clusters(&self) -> anyhow::Result<anyhow::Result<Vec<(String, Vec<String>)>>> {
+    async fn detect_topic_clusters(
+        &self,
+    ) -> anyhow::Result<anyhow::Result<Vec<(String, Vec<String>)>>> {
         use crate::engine::associations::detect_topic_clusters;
 
         let all_with_vectors = match self.store.scroll_all_memories_with_vectors().await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("  scroll_all_memories_with_vectors failed: {}", e);
-                return Ok(Err(anyhow::anyhow!("Failed to get memories with vectors: {}", e)));
+                return Ok(Err(anyhow::anyhow!(
+                    "Failed to get memories with vectors: {}",
+                    e
+                )));
             }
         };
 
@@ -2127,10 +2139,8 @@ impl SlumberEngine {
             }
         }
 
-        let result: Vec<(String, Vec<String>)> = clusters
-            .into_iter()
-            .map(|c| (c.id, c.memory_ids))
-            .collect();
+        let result: Vec<(String, Vec<String>)> =
+            clusters.into_iter().map(|c| (c.id, c.memory_ids)).collect();
 
         Ok(Ok(result))
     }
@@ -2147,7 +2157,10 @@ impl SlumberEngine {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("  scroll_all_memories_with_vectors failed: {}", e);
-                return Ok(Err(anyhow::anyhow!("Failed to get memories with vectors: {}", e)));
+                return Ok(Err(anyhow::anyhow!(
+                    "Failed to get memories with vectors: {}",
+                    e
+                )));
             }
         };
 
@@ -2241,7 +2254,8 @@ impl SlumberEngine {
 
             let has_followup = recent_memories.iter().any(|r| {
                 r.realm_name == mem.realm_name
-                    || r.content.contains(&mem.content[..mem.content.len().min(100)])
+                    || r.content
+                        .contains(&mem.content[..mem.content.len().min(100)])
             });
 
             let current_importance = mem.importance;
@@ -2282,16 +2296,9 @@ impl SlumberEngine {
         for realm in &realms {
             if realm.memory_count == 0 && !realm.is_user_pinned {
                 if let Err(e) = self.store.delete_realm(&realm.id).await {
-                    tracing::warn!(
-                        "  Failed to delete empty realm '{}': {}",
-                        realm.name,
-                        e
-                    );
+                    tracing::warn!("  Failed to delete empty realm '{}': {}", realm.name, e);
                 } else {
-                    tracing::info!(
-                        "  Pruned empty realm '{}'",
-                        realm.name
-                    );
+                    tracing::info!("  Pruned empty realm '{}'", realm.name);
                     pruned += 1;
                 }
             }
@@ -2360,8 +2367,7 @@ impl SlumberEngine {
             }
         }
 
-        const FAST_REALMS: [&str; 4] =
-            ["environment", "technical", "infrastructure", "services"];
+        const FAST_REALMS: [&str; 4] = ["environment", "technical", "infrastructure", "services"];
         let mut fast: Vec<&MemoryPoint> = eligible
             .iter()
             .filter(|m| {
@@ -2462,7 +2468,10 @@ impl SlumberEngine {
                     .await
             }
             other => {
-                tracing::warn!("  Verification sweep: unknown backend '{}', skipping", other);
+                tracing::warn!(
+                    "  Verification sweep: unknown backend '{}', skipping",
+                    other
+                );
                 return Ok((0, VerificationStatusCounts::default()));
             }
         };

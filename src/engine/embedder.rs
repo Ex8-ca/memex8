@@ -29,6 +29,9 @@ pub fn create_embedder(config: &AppConfig) -> anyhow::Result<Box<dyn Embedder>> 
                 config.embedding.openai.dimensions,
             )?))
         }
-        _ => anyhow::bail!("Unknown embedding provider: {}. Supported: ollama, openai, openai-compatible", config.embedding.provider),
+        _ => anyhow::bail!(
+            "Unknown embedding provider: {}. Supported: ollama, openai, openai-compatible",
+            config.embedding.provider
+        ),
     }
 }

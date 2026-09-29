@@ -54,7 +54,11 @@ pub fn classify(query: &str) -> (Intent, f32) {
                 r"\b\w+'s\s+(favorite|favourite)\b",
             ],
             0.85,
-            Weights { vector_bias: 1.0, importance_bias: 1.4, recency_bias: 0.5 },
+            Weights {
+                vector_bias: 1.0,
+                importance_bias: 1.4,
+                recency_bias: 0.5,
+            },
         ),
         (
             "temporal",
@@ -68,7 +72,11 @@ pub fn classify(query: &str) -> (Intent, f32) {
                 r"\b\d+\s+(day|week|month|year|hour|minute)s?\s+(ago|from now|later|earlier)\b",
             ],
             0.9,
-            Weights { vector_bias: 0.7, importance_bias: 0.8, recency_bias: 1.5 },
+            Weights {
+                vector_bias: 0.7,
+                importance_bias: 0.8,
+                recency_bias: 1.5,
+            },
         ),
         (
             "factual",
@@ -80,7 +88,11 @@ pub fn classify(query: &str) -> (Intent, f32) {
                 r"\bhow\s+(many|much|long|far)\b",
             ],
             0.8,
-            Weights { vector_bias: 1.0, importance_bias: 1.2, recency_bias: 0.7 },
+            Weights {
+                vector_bias: 1.0,
+                importance_bias: 1.2,
+                recency_bias: 0.7,
+            },
         ),
         (
             "entity",
@@ -89,7 +101,11 @@ pub fn classify(query: &str) -> (Intent, f32) {
                 r"\babout\s+\w+\b",
             ],
             0.7,
-            Weights { vector_bias: 1.2, importance_bias: 1.1, recency_bias: 0.8 },
+            Weights {
+                vector_bias: 1.2,
+                importance_bias: 1.1,
+                recency_bias: 0.8,
+            },
         ),
         (
             "procedural",
@@ -99,7 +115,11 @@ pub fn classify(query: &str) -> (Intent, f32) {
                 r"\b(step|steps|guide|tutorial|instructions?)\b",
             ],
             0.8,
-            Weights { vector_bias: 1.3, importance_bias: 1.0, recency_bias: 0.6 },
+            Weights {
+                vector_bias: 1.3,
+                importance_bias: 1.0,
+                recency_bias: 0.6,
+            },
         ),
     ];
 
@@ -128,11 +148,31 @@ pub fn classify(query: &str) -> (Intent, f32) {
 pub fn weights_for(query: &str) -> Weights {
     let (intent, _conf) = classify(query);
     match intent {
-        Intent::Temporal => Weights { vector_bias: 0.7, importance_bias: 0.8, recency_bias: 1.5 },
-        Intent::Factual => Weights { vector_bias: 1.0, importance_bias: 1.2, recency_bias: 0.7 },
-        Intent::Entity => Weights { vector_bias: 1.2, importance_bias: 1.1, recency_bias: 0.8 },
-        Intent::Preference => Weights { vector_bias: 1.0, importance_bias: 1.4, recency_bias: 0.5 },
-        Intent::Procedural => Weights { vector_bias: 1.3, importance_bias: 1.0, recency_bias: 0.6 },
+        Intent::Temporal => Weights {
+            vector_bias: 0.7,
+            importance_bias: 0.8,
+            recency_bias: 1.5,
+        },
+        Intent::Factual => Weights {
+            vector_bias: 1.0,
+            importance_bias: 1.2,
+            recency_bias: 0.7,
+        },
+        Intent::Entity => Weights {
+            vector_bias: 1.2,
+            importance_bias: 1.1,
+            recency_bias: 0.8,
+        },
+        Intent::Preference => Weights {
+            vector_bias: 1.0,
+            importance_bias: 1.4,
+            recency_bias: 0.5,
+        },
+        Intent::Procedural => Weights {
+            vector_bias: 1.3,
+            importance_bias: 1.0,
+            recency_bias: 0.6,
+        },
         Intent::General => Weights::DEFAULT,
     }
 }

@@ -139,7 +139,6 @@ fn default_graph_edges() -> String {
     "graph_edges".into()
 }
 
-
 impl Default for QdrantConfig {
     fn default() -> Self {
         Self {
@@ -404,12 +403,10 @@ fn default_turbovec_bit_width() -> usize {
     4
 }
 fn default_turbovec_index_path() -> String {
-    std::env::var("TURBOVEC_INDEX_PATH")
-        .unwrap_or_else(|_| "data/memories.tv".into())
+    std::env::var("TURBOVEC_INDEX_PATH").unwrap_or_else(|_| "data/memories.tv".into())
 }
 fn default_turbovec_id_map_path() -> String {
-    std::env::var("TURBOVEC_ID_MAP_PATH")
-        .unwrap_or_else(|_| "data/memories_ids.json".into())
+    std::env::var("TURBOVEC_ID_MAP_PATH").unwrap_or_else(|_| "data/memories_ids.json".into())
 }
 
 impl Default for TurbovecConfig {
