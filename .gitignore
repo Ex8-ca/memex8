@@ -2,3 +2,13 @@
 config.toml
 .env
 *.md.bak
+
+# Python bytecode caches (plugin + scripts/)
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor / IDE scratch
+.vscode/
+.idea/
+.DS_Store
