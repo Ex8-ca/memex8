@@ -11,6 +11,10 @@ pub struct StoreRequest {
     pub tags: Option<Vec<String>>,
     pub realm_hint: Option<String>,
     pub source: Option<String>,
+    /// "private" (default) | "public". Unknown values fall back to
+    /// "private" so a malformed caller can never accidentally mark a
+    /// memory shareable.
+    pub visibility: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -21,6 +25,8 @@ pub struct SearchRequest {
     pub realm: Option<String>,
     pub tags: Option<Vec<String>>,
     pub min_score: Option<f32>,
+    /// Optional visibility filter ("private" | "public").
+    pub visibility: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -47,6 +53,7 @@ pub async fn store(
             req.tags,
             req.realm_hint.as_deref(),
             req.source.as_deref(),
+            req.visibility.as_deref(),
         )
         .await?;
     Ok(Json(StoreResponse {
@@ -177,6 +184,8 @@ pub struct ListParams {
     /// Sort direction: "asc" or "desc". Default: "desc" (newest first)
     #[serde(default = "default_dir")]
     pub direction: String,
+    /// Visibility filter: "private" | "public". Omit for all.
+    pub visibility: Option<String>,
 }
 
 fn default_sort() -> String {
@@ -202,6 +211,7 @@ pub async fn list(
             params.realm.as_deref(),
             &params.sort,
             params.direction.as_str() != "asc",
+            params.visibility.as_deref(),
         )
         .await?;
     let total = memories.len();
@@ -230,6 +240,74 @@ pub async fn verification_summary(
 ) -> Result<Json<crate::storage::qdrant::VerificationStatusCounts>, crate::api::error::ApiError> {
     let counts = state.engine.verification_summary().await?;
     Ok(Json(counts))
+}
+
+/// GET /api/v1/memories/public — discovery endpoint for A2A peers.
+///
+/// Returns a list of public memories with their IDs, headings, and
+/// short content previews. Used by the Hermes-A2A bridge to populate
+/// the slice envelope's "what's available" payload before a peer
+/// requests a specific memory by ID. Only visibility="public" is
+/// ever returned. Operators who want zero discoverability can gate
+/// this behind an auth check (a future commit) or rely on the
+/// approved_peers list to refuse the subsequent fetch.
+pub async fn public_memories(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<PublicMemoriesParams>,
+) -> Result<Json<PublicMemoriesResponse>, crate::api::error::ApiError> {
+    let limit = params.limit.unwrap_or(50);
+    let offset = params.offset.unwrap_or(0);
+    let memories = state
+        .engine
+        .list_memories(None, "ingested_at", true, Some("public"))
+        .await?;
+    let total = memories.len();
+    // Truncate content for the discovery payload so a curious peer
+    // can't pull a 50k-token memory through this endpoint.
+    let page: Vec<_> = memories
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|m| {
+            let preview: String = m.content.chars().take(280).collect();
+            PublicMemoryPreview {
+                id: m.id,
+                heading: m.heading,
+                realm_name: m.realm_name,
+                content_preview: preview,
+                tags: m.tags,
+            }
+        })
+        .collect();
+    Ok(Json(PublicMemoriesResponse {
+        memories: page,
+        total,
+        limit,
+        offset,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct PublicMemoriesParams {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct PublicMemoryPreview {
+    pub id: String,
+    pub heading: Option<String>,
+    pub realm_name: String,
+    pub content_preview: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct PublicMemoriesResponse {
+    pub memories: Vec<PublicMemoryPreview>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
 }
 
 pub async fn ingest(
@@ -266,7 +344,7 @@ pub async fn downvote(
 }
 
 /// PATCH /api/v1/memories/{id} — partial update of payload fields.
-/// Accepts any subset of {memory_type, importance}; applies via Qdrant set_payload.
+/// Accepts any subset of {memory_type, importance, visibility}; applies via Qdrant set_payload.
 pub async fn update_memory(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -282,6 +360,14 @@ pub async fn update_memory(
     }
     if let Some(i) = req.get("importance").and_then(|v| v.as_f64()) {
         payload_obj.insert("importance".to_string(), serde_json::json!(i as f32));
+    }
+    if let Some(v) = req.get("visibility").and_then(|v| v.as_str()) {
+        // Normalize here so PATCH can't sneak through an invalid value.
+        let normalized = crate::storage::qdrant::normalize_visibility(v);
+        payload_obj.insert(
+            "visibility".to_string(),
+            serde_json::Value::String(normalized.to_string()),
+        );
     }
     if payload_obj.is_empty() {
         return Ok(Json(serde_json::json!({"id": id, "status": "no-op"})));

@@ -404,6 +404,8 @@ Only output valid JSON. Be precise and extract only things explicitly present in
                 "session_summary",
                 "session_summary",
                 reaction_score,
+                // Session summaries are operator-private by default.
+                "private",
             )
             .await?;
 
@@ -466,6 +468,8 @@ Only output valid JSON. Be precise and extract only things explicitly present in
                     memory_type,
                     memory_type,
                     reaction_score,
+                    // Extracted session items are operator-private.
+                    "private",
                 )
                 .await?;
 

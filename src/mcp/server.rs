@@ -160,9 +160,13 @@ async fn handle_tool_call(
                     .collect()
             });
             let realm_hint = arguments.get("realm_hint").and_then(|v| v.as_str());
+            // MCP tool callers can opt in to public explicitly; default
+            // to private so an MCP-driven capture session can't leak
+            // everything it touches to the A2A bridge.
+            let visibility = arguments.get("visibility").and_then(|v| v.as_str());
 
             let id = engine
-                .store_memory(content, tags, realm_hint, Some("mcp"))
+                .store_memory(content, tags, realm_hint, Some("mcp"), visibility)
                 .await?;
             Ok(json!({ "id": id, "status": "stored" }))
         }

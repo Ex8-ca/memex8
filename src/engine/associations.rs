@@ -1185,6 +1185,7 @@ mod tests {
             verification_confidence: None,
             verification_status: "unverified".into(),
             memory_type: "general".into(),
+            visibility: "private".into(),
         };
 
         let mem_b = MemoryPoint {
@@ -1212,6 +1213,7 @@ mod tests {
             verification_confidence: None,
             verification_status: "unverified".into(),
             memory_type: "general".into(),
+            visibility: "private".into(),
         };
 
         let (link_type, confidence, _) = classify_relationship(&mem_a, &mem_b, 0.8);

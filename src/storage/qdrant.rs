@@ -57,6 +57,12 @@ pub struct MemoryPoint {
     /// Empty string = legacy memory, treated as "general" in decay.
     #[serde(default)]
     pub memory_type: String,
+    /// Visibility for cross-agent sharing via Hermes-A2A.
+    /// "private" (default) = never leaves memex8.
+    /// "public" = eligible for A2A sharing, gated by the central allowlist.
+    /// Empty string = legacy memory, treated as "private".
+    #[serde(default)]
+    pub visibility: String,
 }
 
 /// Memory with its embedding vector (internal use only, not serialized).
@@ -301,8 +307,21 @@ fn memory_to_payload(mem: &MemoryPoint) -> Payload {
         "verification_confidence": mem.verification_confidence,
         "verification_status": mem.verification_status,
         "memory_type": mem.memory_type,
+        "visibility": mem.visibility,
     });
     Payload::try_from(json).unwrap_or_default()
+}
+
+/// Normalize a caller-supplied visibility value.
+///
+/// Accepts: "private", "public". Case-insensitive. Unknown / empty
+/// values fall back to "private" so a malformed caller can never
+/// accidentally mark a memory shareable.
+pub fn normalize_visibility(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "public" => "public",
+        _ => "private",
+    }
 }
 
 fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value>) -> MemoryPoint {
@@ -335,6 +354,17 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
         verification_status: map_str(map, "verification_status")
             .unwrap_or_else(|| "unverified".to_string()),
         memory_type: map_str(map, "memory_type").unwrap_or_default(),
+        // Empty/missing visibility defaults to "private" so legacy
+        // memories never accidentally become shareable on upgrade.
+        visibility: map_str(map, "visibility")
+            .map(|v| {
+                if v.is_empty() {
+                    "private".to_string()
+                } else {
+                    v
+                }
+            })
+            .unwrap_or_else(|| "private".to_string()),
     }
 }
 
@@ -413,6 +443,7 @@ impl QdrantStore {
                 ("tags", FieldType::Keyword),
                 ("chunk_type", FieldType::Keyword),
                 ("importance", FieldType::Float),
+                ("visibility", FieldType::Keyword),
             ] {
                 self.client
                     .create_field_index(CreateFieldIndexCollectionBuilder::new(
@@ -422,6 +453,11 @@ impl QdrantStore {
             }
             tracing::info!("  + indexes created for {}", MEMORIES);
         }
+
+        // Idempotent visibility backfill — stamps "private" on every
+        // legacy memory that doesn't have the field. Safe to call on
+        // every startup; no-op once the migration has run.
+        self.backfill_visibility().await?;
 
         // ── realms ──
         if !self.client.collection_exists(REALMS).await? {
@@ -513,6 +549,7 @@ impl QdrantStore {
         chunk_type: &str,
         memory_type: &str,
         reaction_score: f32,
+        visibility: &str,
     ) -> anyhow::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let mem = MemoryPoint {
@@ -540,6 +577,7 @@ impl QdrantStore {
             verification_confidence: None,
             verification_status: "unverified".to_string(),
             memory_type: memory_type.to_string(),
+            visibility: normalize_visibility(visibility).to_string(),
         };
         let payload = memory_to_payload(&mem);
         let point = PointStruct::new(id.to_string(), vector.to_vec(), payload);
@@ -668,6 +706,7 @@ impl QdrantStore {
             "reaction_score": 0.0f32,
             "topic_clusters": Vec::<String>::new(),
             "memory_type": "general",
+            "visibility": "private",
         })
         .try_into()
         .unwrap_or_default();
@@ -794,6 +833,88 @@ impl QdrantStore {
     pub async fn scroll_all_memories(&self) -> anyhow::Result<Vec<MemoryPoint>> {
         let results = self.scroll_memories_internal(false).await?;
         Ok(results.into_iter().map(|m| m.memory).collect())
+    }
+
+    /// Scroll all memories WITH a visibility filter (server-side).
+    /// Used by the `GET /api/v1/memories?visibility=public` and the
+    /// `/memories/public` discovery endpoint. Visibility values other
+    /// than "private" / "public" are treated as "private" so legacy
+    /// records cannot leak.
+    pub async fn scroll_memories_by_visibility(
+        &self,
+        visibility: &str,
+    ) -> anyhow::Result<Vec<MemoryPoint>> {
+        let target = normalize_visibility(visibility);
+        let mut memories = Vec::new();
+        let mut offset: Option<String> = None;
+        let filter = Filter::must([Condition::matches("visibility", target.to_string())]);
+
+        loop {
+            let mut builder = ScrollPointsBuilder::new(MEMORIES)
+                .limit(500)
+                .with_payload(true)
+                .filter(filter.clone());
+            if let Some(ref off) = offset {
+                builder = builder.offset(off.clone());
+            }
+
+            let resp = self.client.scroll(builder).await?;
+            for point in resp.result {
+                let pid = point_id_to_string(point.id.as_ref());
+                let map = map_to_json(&point.payload);
+                memories.push(memory_from_payload(&pid, &map));
+            }
+
+            if resp.next_page_offset.is_none() {
+                break;
+            }
+            offset = resp
+                .next_page_offset
+                .as_ref()
+                .map(|p| point_id_to_string(Some(p)));
+        }
+        Ok(memories)
+    }
+
+    /// Backfill the `visibility` field on every existing memory that
+    /// doesn't have it. Idempotent: memories already stamped are
+    /// skipped. Called from `ensure_collections()` after index creation
+    /// so an upgrade from a pre-visibility memex8 silently gets a safe
+    /// default. Logs at info level for transparency.
+    pub async fn backfill_visibility(&self) -> anyhow::Result<u64> {
+        use std::collections::HashSet;
+        let all = self.scroll_all_memories().await?;
+        let mut updated: u64 = 0;
+        let mut seen_ids: HashSet<String> = HashSet::new();
+        for mem in &all {
+            if !seen_ids.insert(mem.id.clone()) {
+                continue; // defensive: scroll could theoretically re-emit
+            }
+            if mem.visibility.is_empty() {
+                let payload: Payload = serde_json::json!({
+                    "visibility": "private",
+                })
+                .try_into()
+                .unwrap_or_default();
+                self.client
+                    .set_payload(
+                        SetPayloadPointsBuilder::new(MEMORIES, payload)
+                            .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
+                                ids: vec![mem.id.clone().into()],
+                            }))
+                            .wait(false),
+                    )
+                    .await?;
+                updated += 1;
+            }
+        }
+        if updated > 0 {
+            tracing::info!(
+                "🔒 backfill_visibility: stamped {} legacy memories as 'private'",
+                updated
+            );
+        }
+        Ok(updated)
     }
 
     /// Scroll all memories WITH their embedding vectors.
@@ -1543,5 +1664,92 @@ impl QdrantStore {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for visibility normalization and payload round-trips.
+    //!
+    //! These run without a live Qdrant — they exercise only the pure
+    //! helper + the in-process payload serializer, so they're safe to
+    //! run in CI and on a developer laptop with no docker-compose.
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_visibility_accepts_public() {
+        assert_eq!(normalize_visibility("public"), "public");
+        assert_eq!(normalize_visibility("PUBLIC"), "public");
+        assert_eq!(normalize_visibility("  Public  "), "public");
+    }
+
+    #[test]
+    fn normalize_visibility_defaults_private_on_unknown() {
+        // Fail-closed: any unrecognized value becomes "private" so a
+        // malformed caller can never accidentally mark a memory
+        // shareable.
+        assert_eq!(normalize_visibility("private"), "private");
+        assert_eq!(normalize_visibility(""), "private");
+        assert_eq!(normalize_visibility("public-all"), "private");
+        assert_eq!(normalize_visibility("wat"), "private");
+        assert_eq!(normalize_visibility("🦀"), "private");
+    }
+
+    #[test]
+    fn memory_round_trip_preserves_visibility() {
+        let original = MemoryPoint {
+            id: "test-1".into(),
+            content: "hello".into(),
+            summary: None,
+            source_file: None,
+            realm_id: None,
+            realm_name: "general".into(),
+            importance: 1.0,
+            upvotes: 0,
+            tags: vec![],
+            ingested_at: "2026-01-01T00:00:00Z".into(),
+            last_accessed: "2026-01-01T00:00:00Z".into(),
+            access_count: 0,
+            chunk_type: "manual".into(),
+            heading: None,
+            source_hash: "".into(),
+            related_memory_ids: vec![],
+            association_strengths: vec![],
+            reaction_score: 0.0,
+            topic_clusters: vec![],
+            quantized_bit_width: 0.0,
+            last_verified: None,
+            verification_confidence: None,
+            verification_status: "unverified".into(),
+            memory_type: "general".into(),
+            visibility: "public".into(),
+        };
+
+        // payload -> JSON object -> payload value -> Map.
+        // We don't talk to Qdrant in this test; we only verify that
+        // memory_to_payload + memory_from_payload round-trip the new
+        // visibility field through the same code path the engine uses.
+        let payload = memory_to_payload(&original);
+        let as_json: serde_json::Value = payload.into();
+        let obj = as_json
+            .as_object()
+            .expect("payload should serialize to a JSON object");
+        assert_eq!(obj.get("visibility"), Some(&json!("public")));
+
+        let decoded = memory_from_payload("test-1", obj);
+        assert_eq!(decoded.visibility, "public");
+    }
+
+    #[test]
+    fn legacy_memory_reads_as_private() {
+        // Pre-visibility records: no "visibility" key in the payload.
+        // memory_from_payload must default to "private" so the
+        // backfill in ensure_collections() is correct-by-construction.
+        let mut map = serde_json::Map::new();
+        map.insert("content".into(), json!("legacy"));
+        map.insert("realm_name".into(), json!("general"));
+        let decoded = memory_from_payload("legacy-1", &map);
+        assert_eq!(decoded.visibility, "private");
     }
 }

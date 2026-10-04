@@ -32,7 +32,16 @@ pub async fn conversation_end(
 
     let id = state
         .engine
-        .store_memory(&content, Some(tags), realm_hint.as_deref(), Some(source))
+        .store_memory(
+            &content,
+            Some(tags),
+            realm_hint.as_deref(),
+            Some(source),
+            // Webhook ingestion is for the agent's own records; never
+            // share these with peers. Operators can mark individual
+            // conversations public later via PATCH.
+            Some("private"),
+        )
         .await?;
 
     tracing::info!("📥 Webhook: stored {} conversation (id: {})", platform, id);
@@ -73,6 +82,8 @@ pub async fn skill_executed(
             Some(tags),
             payload.realm_hint.as_deref(),
             Some("openclaw"),
+            // Skill execution traces are operator-private by default.
+            Some("private"),
         )
         .await?;
 
