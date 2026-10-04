@@ -1,5 +1,5 @@
 name: memex8
-version: 1.1.0
+version: 1.2.0
 description: "memex8 — self-hosted vector memory with semantic search, auto-discovered knowledge realms, TurboQuant compression, and a slumber pipeline for memory consolidation."
 pip_dependencies:
   - requests
