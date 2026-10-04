@@ -1507,7 +1507,20 @@ impl SlumberEngine {
     // ─── Phase 4: Prune Flagging ─────────────────────────────────────────────
 
     /// Score memories for retention and flag low-value ones for review.
-    /// Does NOT auto-delete — flags for human review.
+    ///
+    /// Previously this phase only **counted** candidates — the
+    /// `flagged_for_prune` field in `SlumberReport` ticked up but nothing
+    /// actually happened to the memories. That made the report a lie and
+    /// let stale, low-importance memories accumulate forever (worst case:
+    /// cron-job summaries crowding out real user memories in recall).
+    ///
+    /// Fix: when a memory matches the prune criteria, actually archive it
+    /// (set `importance` to ~0.01). That drops its recall score
+    /// immediately and stops it from being surfaced. The change is
+    /// idempotent — once `importance < prune_threshold` (0.1 default),
+    /// the memory no longer passes the check and won't be re-archived.
+    ///
+    /// See `fix/prune-and-cron-filter`.
     async fn prune_flag(&self) -> anyhow::Result<usize> {
         let all = self.store.scroll_all_memories().await?;
         let now = chrono::Utc::now();
@@ -1531,17 +1544,28 @@ impl SlumberEngine {
                 && mem.importance < prune_threshold
                 && mem.access_count == 0
             {
-                tracing::debug!(
-                    "  Prune flag: id={} age={}d importance={:.2}",
+                tracing::info!(
+                    "  Prune-archive: id={} age={}d importance={:.2} content={}",
                     mem.id,
                     age_days,
-                    mem.importance
+                    mem.importance,
+                    mem.content.chars().take(80).collect::<String>()
                 );
+                // Actually act: drop importance to ~0 so this memory
+                // stops crowding recall. Mirrors `Engine::archive_memory`
+                // (engine/mod.rs): set importance via the store's
+                // update_upvotes primitive.
+                if let Err(e) = self.store.update_upvotes(&mem.id, 0, 0.01).await {
+                    tracing::warn!("  Prune-archive failed for id={}: {}", mem.id, e);
+                    // Continue — don't abort the whole phase on one
+                    // transient failure.
+                    continue;
+                }
                 flagged += 1;
             }
         }
 
-        tracing::info!("  Flagged {} memories for prune review", flagged);
+        tracing::info!("  Archived {} memories (prune flagging)", flagged);
         Ok(flagged)
     }
 
