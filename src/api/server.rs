@@ -56,9 +56,7 @@ pub async fn run_with_engine(
         tracing::warn!(
             "⚠️  No MEMEX8_API_KEY set — every /api/v1 request will return 401. Generate one with:"
         );
-        tracing::warn!(
-            "⚠️    python3 -c \"import secrets; print(secrets.token_urlsafe(32))\""
-        );
+        tracing::warn!("⚠️    python3 -c \"import secrets; print(secrets.token_urlsafe(32))\"");
         tracing::warn!(
             "⚠️  To intentionally disable auth (NOT recommended), pass --allow-no-api-key to `memex8 serve`."
         );

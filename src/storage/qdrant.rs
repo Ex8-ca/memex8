@@ -416,7 +416,16 @@ fn realm_from_payload(
 impl QdrantStore {
     pub async fn new(url: &str) -> anyhow::Result<Self> {
         tracing::info!("Connecting to Qdrant at {}", url);
-        let client = Qdrant::from_url(url).build()?;
+        // Skip the client/server major-version compatibility check at
+        // boot. qdrant-client 1.17 emits a loud
+        // "Client version X is not compatible with server version Y"
+        // warning whenever the server minor version differs by 1+ from
+        // the client's — the binary continues and operates normally,
+        // so the warning just reads as a startup error to first-time
+        // users. Pairs with `qdrant/qdrant:latest` in docker-compose,
+        // which moves independently of the Rust client crate.
+        // See issue #14.
+        let client = Qdrant::from_url(url).skip_compatibility_check().build()?;
         Ok(Self { client })
     }
 

@@ -499,6 +499,11 @@ memex8 stats
 memex8 search "test"
 ```
 
+**"Client version X is not compatible with server version Y" on boot:**
+Cosmetic only — the engine suppresses the warning via
+`skip_compatibility_check()`. The container continues normally; no
+action needed. See [#14](https://github.com/Ex8-ca/memex8/issues/14).
+
 ---
 
 ## License

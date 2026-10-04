@@ -533,7 +533,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Serve { host, port, allow_no_api_key } => {
+        Commands::Serve {
+            host,
+            port,
+            allow_no_api_key,
+        } => {
             // Clone the config so we can tweak `allow_no_api_key`
             // for this command without mutating the shared `config`
             // (which is used by other match arms above and below).
