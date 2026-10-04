@@ -98,6 +98,11 @@ class RememberSchemaTests(unittest.TestCase):
         self.assertEqual(vis["default"], "private")
         # visibility must be optional, not required
         self.assertNotIn("visibility", schema["parameters"]["required"])
+        # The schema's description should warn that public is a deliberate
+        # opt-in, not a default the model should reach for. A model that
+        # picks "public" by default is leaking data.
+        self.assertIn("public", vis["description"].lower())
+        self.assertIn("private", vis["description"].lower())
 
 
 class SlashCommandTests(unittest.TestCase):
