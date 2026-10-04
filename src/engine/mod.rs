@@ -283,6 +283,10 @@ impl Engine {
                     &chunk.chunk_type,
                     "general",
                     reaction_score,
+                    // File ingestion is operator-driven; mark private
+                    // by default. Use PATCH /api/v1/memories/{id} to
+                    // flip a batch to public after ingestion.
+                    "private",
                 )
                 .await?;
 
@@ -521,6 +525,10 @@ impl Engine {
                     &chunk.chunk_type,
                     "general",
                     reaction_score,
+                    // File ingestion is operator-driven; mark private
+                    // by default. Use PATCH /api/v1/memories/{id} to
+                    // flip a batch to public after ingestion.
+                    "private",
                 )
                 .await?;
         }
@@ -823,14 +831,20 @@ impl Engine {
             .collect())
     }
 
-    /// List all memories with optional realm filter and sort, without recency weighting.
+    /// List all memories with optional realm/visibility filter and sort, without recency weighting.
     pub async fn list_memories(
         &self,
         realm: Option<&str>,
         sort: &str,
         descending: bool,
+        visibility: Option<&str>,
     ) -> anyhow::Result<Vec<crate::storage::qdrant::MemoryPoint>> {
-        let all = self.store.scroll_all_memories().await?;
+        // Visibility filter applied server-side when set (faster than
+        // post-scroll in-memory filtering on large stores).
+        let all = match visibility {
+            Some(v) => self.store.scroll_memories_by_visibility(v).await?,
+            None => self.store.scroll_all_memories().await?,
+        };
 
         // Filter by realm if specified
         let filtered: Vec<_> = match realm {
@@ -1031,6 +1045,12 @@ impl Engine {
                 &existing.chunk_type,
                 &existing.memory_type,
                 reaction_score,
+                // Preserve the existing visibility on update.
+                if existing.visibility.is_empty() {
+                    "private"
+                } else {
+                    &existing.visibility
+                },
             )
             .await?;
 
@@ -1117,6 +1137,7 @@ impl Engine {
         _tags: Option<Vec<String>>,
         realm_hint: Option<&str>,
         source: Option<&str>,
+        visibility: Option<&str>,
     ) -> anyhow::Result<String> {
         let embedder = self.make_embedder()?;
         let vector = embedder.embed(content).await?;
@@ -1143,6 +1164,10 @@ impl Engine {
         // Infer reaction score from content
         let reaction_score = crate::engine::reactions::infer_reaction(content);
 
+        // Default to "private" — callers must explicitly opt in to sharing.
+        let visibility_str =
+            crate::storage::qdrant::normalize_visibility(visibility.unwrap_or("private"));
+
         self.store
             .store_memory(
                 &id,
@@ -1156,6 +1181,7 @@ impl Engine {
                 "manual",
                 "general",
                 reaction_score,
+                visibility_str,
             )
             .await?;
 
@@ -1221,6 +1247,12 @@ impl Engine {
                             &m.memory.chunk_type,
                             &m.memory.memory_type,
                             reaction_score,
+                            // Import path: preserve the source visibility.
+                            if m.memory.visibility.is_empty() {
+                                "private"
+                            } else {
+                                &m.memory.visibility
+                            },
                         )
                         .await?;
                 }
@@ -1251,6 +1283,12 @@ impl Engine {
                     &mem.chunk_type,
                     &mem.memory_type,
                     reaction_score,
+                    // Fallback import path: preserve source visibility.
+                    if mem.visibility.is_empty() {
+                        "private"
+                    } else {
+                        &mem.visibility
+                    },
                 )
                 .await?;
         }
