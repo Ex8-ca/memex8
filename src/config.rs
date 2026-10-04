@@ -177,6 +177,7 @@ pub struct SlumberConfig {
     pub idle_timeout: String,
     pub cron_ingest: String,
     pub quantize_bit_width: f32,
+    #[serde(default = "default_auto_archive_days")]
     pub auto_archive_days: u32,
     pub prune_threshold: f32,
     /// How much to bump importance each time a memory is recalled (touched).
@@ -381,6 +382,16 @@ fn default_consolidation_schedule() -> String {
 fn default_decay_rate_per_day() -> f32 {
     0.001
 }
+
+fn default_auto_archive_days() -> u32 {
+    // Lowered from 90 → 14 in `fix/score-based-prune` so phase 4
+    // starts working on freshly-ingested low-value noise (e.g.
+    // auto-generated cron summaries) within two weeks instead of
+    // three months. Combined with score-based pruning (see
+    // `prune_flag`), this lets the Weibull decay actually kick
+    // memories out of recall within a realistic timeframe.
+    14
+}
 fn default_association_top_k() -> u32 {
     5
 }
@@ -537,7 +548,7 @@ impl Default for AppConfig {
                 idle_timeout: "10m".into(),
                 cron_ingest: "*/5 * * * *".into(),
                 quantize_bit_width: 3.5,
-                auto_archive_days: 90,
+                auto_archive_days: default_auto_archive_days(),
                 prune_threshold: 0.1,
                 touch_importance_bump: 0.02,
                 summarize: SummarizeConfig::default(),
