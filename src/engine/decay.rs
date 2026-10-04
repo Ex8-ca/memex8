@@ -150,4 +150,37 @@ mod tests {
             prev = b;
         }
     }
+
+    #[test]
+    fn test_general_score_crosses_prune_threshold() {
+        // Documents the score-based prune heuristic in slumber phase 4:
+        // for a `general` memory with importance=1.0 and access_count=0,
+        // the recall-style score (importance × weibull_boost) crosses
+        // the default prune_threshold (0.1) somewhere between 14 and 30
+        // days. This is what lets phase 4 actually prune real cron-noise
+        // instead of waiting for the slow linear importance decay.
+        //
+        // Without this property, score-based pruning is no better than
+        // the old raw-importance check. If this test ever fails (e.g.
+        // someone tunes Weibull params to keep `general` near 1.0 for
+        // longer), prune will silently regress.
+        let now = Utc::now();
+        let score_14d = weibull_boost(&t(14 * 24), now, "general");
+        let score_30d = weibull_boost(&t(30 * 24), now, "general");
+        let threshold = 0.1_f64;
+        assert!(
+            score_14d > threshold,
+            "general score at 14d ({:.4}) should still be above prune threshold ({:.2}); \
+             if this changed, prune will fire too aggressively on fresh memories",
+            score_14d,
+            threshold
+        );
+        assert!(
+            score_30d < threshold,
+            "general score at 30d ({:.4}) should be below prune threshold ({:.2}); \
+             if this changed, score-based prune won't catch stale noise",
+            score_30d,
+            threshold
+        );
+    }
 }

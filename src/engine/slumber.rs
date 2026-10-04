@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::engine::decay;
 use crate::engine::embedder;
 use crate::engine::memex8_md::write_digest_md;
 use crate::engine::quantizer::{decide_bit_width, TurboQuantVectorIndex};
@@ -1514,13 +1515,24 @@ impl SlumberEngine {
     /// let stale, low-importance memories accumulate forever (worst case:
     /// cron-job summaries crowding out real user memories in recall).
     ///
-    /// Fix: when a memory matches the prune criteria, actually archive it
-    /// (set `importance` to ~0.01). That drops its recall score
-    /// immediately and stops it from being surfaced. The change is
-    /// idempotent — once `importance < prune_threshold` (0.1 default),
-    /// the memory no longer passes the check and won't be re-archived.
+    /// Fix (`fix/prune-and-cron-filter`): when a memory matches the prune
+    /// criteria, actually archive it (set `importance` to ~0.01). That
+    /// drops its recall score immediately and stops it from being
+    /// surfaced. The change is idempotent — once `importance <
+    /// prune_threshold` (0.1 default), the memory no longer passes the
+    /// check and won't be re-archived.
     ///
-    /// See `fix/prune-and-cron-filter`.
+    /// Fix (`fix/score-based-prune`): also rebase the threshold itself.
+    /// Previously the criterion was raw `importance < prune_threshold`.
+    /// That fought against the Weibull decay the recall scorer uses —
+    /// a `general` memory untouched for a month has `importance=1.0` (raw
+    /// decay rate is ~0.001/day → ~30 days to drop 0.03) but its recall
+    /// score has already fallen to ~0.014. Phase 4 was checking the
+    /// wrong axis. Now it computes the same `importance ×
+    /// weibull_boost × access_count_factor` score that recall uses and
+    /// prunes when that drops below `prune_threshold`.
+    ///
+    /// See `fix/prune-and-cron-filter` and `fix/score-based-prune`.
     async fn prune_flag(&self) -> anyhow::Result<usize> {
         let all = self.store.scroll_all_memories().await?;
         let now = chrono::Utc::now();
@@ -1539,16 +1551,37 @@ impl SlumberEngine {
                 .map(|dt| (now - dt.with_timezone(&chrono::Utc)).num_days())
                 .unwrap_or(0);
 
-            // Flag if: old AND low importance AND no access
-            if age_days > auto_archive_days
-                && mem.importance < prune_threshold
-                && mem.access_count == 0
-            {
+            if age_days <= auto_archive_days {
+                continue;
+            }
+
+            // Score-based prune: mirror the recall formula.
+            // Empty/legacy memory_type falls back to "general" decay
+            // params — same convention `Engine::recall` uses.
+            let mem_type = if mem.memory_type.is_empty() {
+                "general"
+            } else {
+                mem.memory_type.as_str()
+            };
+            let recency = decay::weibull_boost(&mem.last_accessed, now, mem_type) as f32;
+            let access_factor = 1.0 + mem.access_count as f32 * 0.05;
+            let score = mem.importance * recency * access_factor;
+
+            // Prune when the recall-style score drops below threshold.
+            // The old raw-importance check never tripped because
+            // `general` memories bottom out at the decay floor (0.05)
+            // for the Weibull curve — which is below 0.1 (the default
+            // `prune_threshold`), so the score-based formula lands on
+            // the same outcome for that case.
+            if score < prune_threshold {
                 tracing::info!(
-                    "  Prune-archive: id={} age={}d importance={:.2} content={}",
+                    "  Prune-archive: id={} age={}d score={:.4} importance={:.2} recency={:.3} type={} content={}",
                     mem.id,
                     age_days,
+                    score,
                     mem.importance,
+                    recency,
+                    mem_type,
                     mem.content.chars().take(80).collect::<String>()
                 );
                 // Actually act: drop importance to ~0 so this memory
