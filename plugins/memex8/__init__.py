@@ -60,6 +60,24 @@ _TRIVIAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Auto-generated cron / A2A / agent-internal messages that get passed in as
+# user_content but are not user-authored text. Storing these as memories
+# pollutes the corpus with hundreds of near-identical summaries of cron
+# runs, drowning real memories in recall. The match is anchored at the
+# start of the (stripped) message so genuine user messages that happen to
+# contain these substrings later still go through.
+_CRON_MARKER_RE = re.compile(
+    r"^\s*\[("
+    r"IMPORTANT:\s*You\s+are\s+running\s+as\s+a\s+scheduled\s+cron\s+job"
+    r"|SILENT"
+    r"|CRON_FAILURE"
+    r"|A2A\s+inbound"
+    r"|deliver.*the\s+output\s+yourself"  # the "do not use send_message" variant
+    r"|assistant\s+reply\s+was\s+empty"
+    r")",
+    re.IGNORECASE,
+)
+
 # Feature 2: memory-type classifiers
 # Decision/decision-verb pattern (kept conservative — anchored on whole words,
 # excludes the "I decided to ask about X" non-load-bearing sense)
@@ -1018,6 +1036,18 @@ class Memex8MemoryProvider(MemoryProvider):
 
         # Skip trivial messages
         if not user_content or _TRIVIAL_RE.match(user_content.strip()):
+            return
+
+        # Skip auto-generated cron / A2A / agent-internal messages. These
+        # look like user input to the plugin but aren't — storing them
+        # produces hundreds of near-identical "summary of cron run"
+        # memories that drown real memories in recall. See
+        # `fix/prune-and-cron-filter`.
+        if _CRON_MARKER_RE.match(user_content.strip()):
+            logger.debug(
+                "memex8 sync_turn skipped (cron/a2a marker): %.60s...",
+                user_content.strip(),
+            )
             return
 
         # Skip if too short
