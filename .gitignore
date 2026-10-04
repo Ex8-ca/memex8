@@ -12,3 +12,6 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+
+# Local secret env files (replaces ~/.hermes/.env mount path; see #10)
+.env.memex8
