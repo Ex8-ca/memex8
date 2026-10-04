@@ -993,7 +993,7 @@ impl Engine {
     pub async fn prune_queue(&self) -> anyhow::Result<Vec<crate::storage::qdrant::MemoryPoint>> {
         let memories = self.store.scroll_all_memories().await?;
         let now = chrono::Utc::now();
-        let auto_archive_days = self.config.slumber.auto_archive_days as i64;
+        let default_auto_archive_days = self.config.slumber.auto_archive_days as i64;
         let prune_threshold = self.config.slumber.prune_threshold;
 
         Ok(memories
@@ -1003,6 +1003,18 @@ impl Engine {
                 if m.importance > prune_threshold {
                     return false;
                 }
+                let mem_type_for_age = if m.memory_type.is_empty() {
+                    "general"
+                } else {
+                    m.memory_type.as_str()
+                };
+                let auto_archive_days =
+                    self.config
+                        .slumber
+                        .auto_archive_days_by_type
+                        .get(mem_type_for_age)
+                        .copied()
+                        .unwrap_or(default_auto_archive_days as u32) as i64;
                 let age_ok = chrono::DateTime::parse_from_rfc3339(&m.ingested_at)
                     .map(|dt| (now - dt.with_timezone(&chrono::Utc)).num_days() > auto_archive_days)
                     .unwrap_or(false);
