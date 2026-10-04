@@ -1017,6 +1017,61 @@ impl Engine {
         self.store.update_upvotes(id, 0, 0.01).await
     }
 
+    /// One-shot cleanup for auto-generated cron-dump memories.
+    ///
+    /// Identifies and (optionally) archives memories whose content
+    /// matches the shape of the auto-stored cron / A2A / agent-internal
+    /// summaries that accumulated before the `auto_sync` filter learned
+    /// to skip them (see `fix/prune-and-cron-filter`). Two signals are
+    /// combined — either matching is enough:
+    ///
+    /// 1. `realm_name` starts with `"Automatically Cron Deliver"` —
+    ///    that's the realm auto-assigned by the cron ingest path.
+    /// 2. Content starts with `"# Conversation Summary\n\nUser: [...]"`
+    ///    AND `chunk_type == "consolidated"` — that's the shape of the
+    ///    cron summary template.
+    ///
+    /// If `apply=true`, archives each match (sets importance to ~0.01).
+    /// If `apply=false`, returns the list of candidates without modifying
+    /// anything (use this for `--dry-run`).
+    ///
+    /// Returns `(candidates, archived)` — `archived == 0` if `apply=false`.
+    pub async fn cleanup_cron_dumps(
+        &self,
+        apply: bool,
+    ) -> anyhow::Result<(Vec<crate::storage::qdrant::MemoryPoint>, usize)> {
+        let all = self.store.scroll_all_memories().await?;
+        let mut candidates = Vec::new();
+        for mem in &all {
+            let realm_match = mem
+                .realm_name
+                .to_ascii_lowercase()
+                .starts_with("automatically cron deliver");
+            let content_match = mem.chunk_type == "consolidated"
+                && mem.content.starts_with("# Conversation Summary");
+            if realm_match || content_match {
+                candidates.push(mem.clone());
+            }
+        }
+
+        let mut archived = 0;
+        if apply {
+            for mem in &candidates {
+                if let Err(e) = self.archive_memory(&mem.id).await {
+                    tracing::warn!(
+                        "cleanup_cron_dumps: archive failed for id={}: {}",
+                        mem.id,
+                        e
+                    );
+                    continue;
+                }
+                archived += 1;
+            }
+        }
+
+        Ok((candidates, archived))
+    }
+
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
         self.store.delete_memory(id).await
     }

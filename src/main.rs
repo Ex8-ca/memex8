@@ -170,6 +170,13 @@ enum Commands {
     /// Start background daemon (cron + idle slumber scheduler)
     Daemon,
 
+    /// Operator-only maintenance commands (cleanup, backfill, etc.)
+    /// Use with care — these can mutate many memories in one shot.
+    Admin {
+        #[command(subcommand)]
+        action: AdminActions,
+    },
+
     /// Show integration config for an AI agent (copy-paste into agent config)
     Integration {
         /// Target platform: openclaw, hermes, or pi
@@ -247,6 +254,22 @@ enum Commands {
     BackupList {
         /// Backup directory (default: ~/memex8-backups/)
         dir: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdminActions {
+    /// One-shot cleanup for auto-generated cron-dump memories.
+    ///
+    /// Identifies memories whose content matches the shape of the
+    /// auto-stored cron / A2A summaries that accumulated before the
+    /// auto_sync filter learned to skip them (see #17). Default is
+    /// dry-run; pass `--apply` to actually archive.
+    CleanupCronDumps {
+        /// Actually archive the matching memories. Without this flag,
+        /// the command only lists what WOULD be archived (dry-run).
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -637,6 +660,52 @@ async fn main() -> anyhow::Result<()> {
                 _ => anyhow::bail!("Unknown platform: {}. Use: openclaw, hermes, pi", platform),
             }
         }
+        Commands::Admin { action } => match action {
+            AdminActions::CleanupCronDumps { apply } => {
+                let engine = engine::Engine::new(config).await?;
+                let (candidates, archived) = engine.cleanup_cron_dumps(apply).await?;
+                if candidates.is_empty() {
+                    println!("✅ No cron-dump memories found.");
+                    return Ok(());
+                }
+                if apply {
+                    println!(
+                        "🧹 Archived {} cron-dump memories (out of {} candidates).",
+                        archived,
+                        candidates.len()
+                    );
+                    // Show a small sample so the user can sanity-check
+                    // what got archived.
+                    for m in candidates.iter().take(5) {
+                        println!(
+                            "  • {} [{}] — {}",
+                            m.id,
+                            m.realm_name,
+                            m.content.chars().take(70).collect::<String>()
+                        );
+                    }
+                    if candidates.len() > 5 {
+                        println!("  … and {} more", candidates.len() - 5);
+                    }
+                } else {
+                    println!(
+                        "🟡 Dry run: would archive {} cron-dump memories. Pass --apply to commit.",
+                        candidates.len()
+                    );
+                    for m in candidates.iter().take(10) {
+                        println!(
+                            "  • {} [{}] — {}",
+                            m.id,
+                            m.realm_name,
+                            m.content.chars().take(70).collect::<String>()
+                        );
+                    }
+                    if candidates.len() > 10 {
+                        println!("  … and {} more", candidates.len() - 10);
+                    }
+                }
+            }
+        },
         Commands::Stats => {
             let engine = engine::Engine::new(config).await?;
             let stats = engine.stats().await?;
