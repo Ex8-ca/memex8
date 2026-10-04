@@ -52,7 +52,7 @@ _DEFAULT_TIMEOUT = 10.0
 _DEFAULT_SEARCH_TIMEOUT = 15.0
 # Plugin version (kept in sync with plugin.yaml) — exposed via
 # {{version}} in the configurable system_prompt_block template
-_PLUGIN_VERSION = "1.1.0"
+_PLUGIN_VERSION = "1.2.0"
 
 # Trivial messages that shouldn't be synced to memory
 _TRIVIAL_RE = re.compile(
@@ -252,7 +252,21 @@ class _Client:
             params["realm"] = realm
         return self.request("GET", "/api/v1/memories/recall", params=params)
 
-    def store(self, content: str, realm_hint: str = None, tags: list = None, source: str = None, memory_type: str = None) -> dict:
+    def store(
+        self,
+        content: str,
+        realm_hint: str = None,
+        tags: list = None,
+        source: str = None,
+        memory_type: str = None,
+        visibility: str = None,
+    ) -> dict:
+        """Store a memory. Pass ``visibility="public"`` to make it
+        eligible for sharing via the Hermes-A2A bridge; the default
+        ``None`` is treated as ``"private"`` by the server so a
+        forgetful caller can never accidentally mark a memory
+        shareable.
+        """
         body = {"content": content}
         if realm_hint:
             body["realm_hint"] = realm_hint
@@ -262,6 +276,11 @@ class _Client:
             body["source"] = source
         if memory_type:
             body["memory_type"] = memory_type
+        if visibility:
+            # Server-side normalize_visibility() fail-closes to
+            # "private" on any value it doesn't recognize, so passing
+            # garbage here is safe.
+            body["visibility"] = visibility
         return self.request("POST", "/api/v1/memories", json_body=body)
 
     def delete(self, memory_id: str) -> dict:
@@ -392,6 +411,19 @@ REMEMBER_SCHEMA = {
             "realm_hint": {
                 "type": "string",
                 "description": "Suggested realm: 'personal', 'environment', 'projects', 'troubleshooting'. Auto-assigned if omitted."
+            },
+            "visibility": {
+                "type": "string",
+                "enum": ["private", "public"],
+                "default": "private",
+                "description": (
+                    "Whether this memory is eligible for cross-agent sharing "
+                    "via the Hermes-A2A bridge. 'private' (default) never leaves "
+                    "memex8. 'public' becomes shareable with peers the operator "
+                    "has approved in ~/.hermes/a2a_bridge/public.yaml. Only set "
+                    "this to 'public' when the user explicitly asks for the "
+                    "memory to be shareable."
+                ),
             },
         },
         "required": ["content"],
@@ -1334,11 +1366,14 @@ class Memex8MemoryProvider(MemoryProvider):
                 continue
             try:
                 # Re-store. Pass through what we know about.
+                # Round-trip preserves visibility so an exported
+                # public memory stays public on re-import.
                 kwargs = {
                     "realm_hint": mem.get("realm") or target_realm,
                     "tags": mem.get("tags") if isinstance(mem.get("tags"), list) else None,
                     "source": mem.get("source") or "imported",
                     "memory_type": mem.get("memory_type"),
+                    "visibility": mem.get("visibility"),
                 }
                 # Filter out None values to match _Client.store's optional handling
                 kwargs = {k: v for k, v in kwargs.items() if v is not None}
@@ -1423,6 +1458,10 @@ class Memex8MemoryProvider(MemoryProvider):
                 content,
                 realm_hint=args.get("realm_hint"),
                 source="hermes-tool",
+                # Server treats None as "private"; pass through whatever
+                # the model sent (including "public") so the schema's
+                # enum constraint is the only gate.
+                visibility=args.get("visibility"),
             )
 
         if tool_name == "memex8_forget":
@@ -1464,7 +1503,8 @@ Usage:
   /memex8 status                 Show config + connection status
   /memex8 search <query>         Run a semantic search and print top-5 hits
   /memex8 recall <query>         Force a high-importance recall and print results
-  /memex8 remember <content>     Store a new memory (interactive prompt)
+  /memex8 remember <content>     Store a new memory (private by default)
+  /memex8 remember --public <c> Store a new memory marked public (A2A-shareable)
   /memex8 forget <memory_id>     Delete a memory by id (irrevocable)
   /memex8 export <file>          Dump all memories to a JSON bundle
   /memex8 import <file>          Restore memories from a JSON bundle
@@ -1586,18 +1626,31 @@ def _memex8_recall(argv) -> str:
 
 def _memex8_remember(argv) -> str:
     if len(argv) < 2:
-        return "Usage: /memex8 remember <content>"
-    content = " ".join(argv[1:]).strip()
+        return (
+            "Usage: /memex8 remember <content> [--public]\n"
+            "  --public  mark this memory as eligible for A2A sharing"
+        )
+    # Parse a leading --public flag without breaking on content
+    # that happens to contain the word "public" mid-sentence.
+    visibility = None
+    rest = argv[1:]
+    if rest and rest[0] == "--public":
+        visibility = "public"
+        rest = rest[1:]
+    if not rest:
+        return "Usage: /memex8 remember <content> [--public]"
+    content = " ".join(rest).strip()
     provider = _MEMEX8_PROVIDER
     if provider is None:
         return "memex8 provider not initialized"
     try:
         client = provider._get_client()
-        result = client.store(content, source="slash-command")
+        result = client.store(content, source="slash-command", visibility=visibility)
     except Exception as e:
         return f"memex8 remember failed: {e}"
     mid = result.get("id") if isinstance(result, dict) else None
-    return f"Stored memory (id={mid or '?'})." if mid else "Stored memory."
+    suffix = " (visibility=public)" if visibility == "public" else ""
+    return f"Stored memory (id={mid or '?'}){suffix}." if mid else f"Stored memory{suffix}."
 
 
 def _memex8_forget(argv) -> str:
