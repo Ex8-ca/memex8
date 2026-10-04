@@ -478,8 +478,20 @@ docker compose logs memex8
 
 **Unauthorized errors:**
 ```bash
-curl -H "Authorization: Bearer ***" http://localhost:8080/api/v1/health
+curl -H "Authorization: Bearer $MEMEX8_API_KEY" http://localhost:8080/api/v1/memories
 ```
+
+If you see `401 Unauthorized` and you *did* set `MEMEX8_API_KEY` in `.env.memex8`, recreate the container so the new env file takes effect:
+```bash
+docker compose up -d --force-recreate --no-deps memex8
+```
+
+**`~/.memex8` is owned by root on the host:**
+The shipped compose now runs the container as UID 1000 and bind-mounts `~/.memex8` to `/home/memex8/.memex8`, so newly-created files belong to you. If an earlier install already created `~/.memex8` as root, fix the existing ownership once:
+```bash
+sudo chown -R $USER ~/.memex8
+```
+Then `docker compose up -d --force-recreate --no-deps memex8`. If your host UID isn't 1000, override `user:` in a `docker-compose.override.yml` (e.g. `user: "501:20"` on macOS). See [#13](https://github.com/Ex8-ca/memex8/issues/13).
 
 **No memories showing up:**
 ```bash
