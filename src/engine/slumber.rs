@@ -1536,7 +1536,7 @@ impl SlumberEngine {
     async fn prune_flag(&self) -> anyhow::Result<usize> {
         let all = self.store.scroll_all_memories().await?;
         let now = chrono::Utc::now();
-        let auto_archive_days = self.config.slumber.auto_archive_days as i64;
+        let default_auto_archive_days = self.config.slumber.auto_archive_days as i64;
         let prune_threshold = self.config.slumber.prune_threshold;
         let mut flagged = 0;
 
@@ -1550,6 +1550,23 @@ impl SlumberEngine {
             let age_days = chrono::DateTime::parse_from_rfc3339(&mem.ingested_at)
                 .map(|dt| (now - dt.with_timezone(&chrono::Utc)).num_days())
                 .unwrap_or(0);
+
+            // Per-memory-type age cutoff (with fallback to the global
+            // default). The lookup uses the same `memory_type` fallback
+            // convention `recall` uses — empty / unknown types land on
+            // `general`.
+            let mem_type_for_age = if mem.memory_type.is_empty() {
+                "general"
+            } else {
+                mem.memory_type.as_str()
+            };
+            let auto_archive_days =
+                self.config
+                    .slumber
+                    .auto_archive_days_by_type
+                    .get(mem_type_for_age)
+                    .copied()
+                    .unwrap_or(default_auto_archive_days as u32) as i64;
 
             if age_days <= auto_archive_days {
                 continue;
@@ -1575,13 +1592,14 @@ impl SlumberEngine {
             // the same outcome for that case.
             if score < prune_threshold {
                 tracing::info!(
-                    "  Prune-archive: id={} age={}d score={:.4} importance={:.2} recency={:.3} type={} content={}",
+                    "  Prune-archive: id={} type={} age={}d auto_archive={}d score={:.4} importance={:.2} recency={:.3} content={}",
                     mem.id,
+                    mem_type,
                     age_days,
+                    auto_archive_days,
                     score,
                     mem.importance,
                     recency,
-                    mem_type,
                     mem.content.chars().take(80).collect::<String>()
                 );
                 // Actually act: drop importance to ~0 so this memory

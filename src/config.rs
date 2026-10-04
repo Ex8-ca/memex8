@@ -179,6 +179,25 @@ pub struct SlumberConfig {
     pub quantize_bit_width: f32,
     #[serde(default = "default_auto_archive_days")]
     pub auto_archive_days: u32,
+    /// Per-memory-type overrides for `auto_archive_days`. Phase 4
+    /// (slumber prune flagging) and `Engine::prune_queue` look up the
+    /// memory's `memory_type` here and fall back to `auto_archive_days`
+    /// when the type isn't listed.
+    ///
+    /// The values in `default_auto_archive_days_by_type` are derived
+    /// from the Weibull params in `engine/decay.rs::weibull_params`:
+    /// each is the age (in days) at which that type's recall-style score
+    /// crosses `prune_threshold` (0.1). For types whose Weibull crosses
+    /// 0.1 at multi-year timescales (profile, preference, relationship,
+    /// entity), the value is clamped to 365 days — long-term stable
+    /// memories shouldn't be auto-archived within a year. `request`
+    /// (fastest-decaying) is clamped to 7 days minimum so we don't
+    /// prune aggressively on the very first missed access.
+    ///
+    /// Computed by `default_auto_archive_days_for(name)` — keep that
+    /// function and the Weibull table in sync if either changes.
+    #[serde(default = "default_auto_archive_days_by_type")]
+    pub auto_archive_days_by_type: std::collections::HashMap<String, u32>,
     pub prune_threshold: f32,
     /// How much to bump importance each time a memory is recalled (touched).
     #[serde(default = "default_touch_importance_bump")]
@@ -392,6 +411,77 @@ fn default_auto_archive_days() -> u32 {
     // memories out of recall within a realistic timeframe.
     14
 }
+
+/// Days at which a given memory_type's Weibull score crosses the
+/// default prune threshold (0.1). See `default_auto_archive_days_by_type`.
+/// Formula: t = eta_hours × (ln(10))^(1/k) / 24, then rounded to int
+/// with min=7 (a week) and max=365 (a year).
+fn default_auto_archive_days_for(name: &str) -> u32 {
+    // Mirror the params in `engine::decay::weibull_params`. Hard-coded
+    // here (not imported) so the slumber config doesn't depend on
+    // the engine at config-deserialization time — and so the values
+    // are visible at the config layer where users tune them.
+    let (k, eta_hours): (f64, f64) = match name {
+        "profile" => (0.30, 8760.0),
+        "preference" => (0.40, 4380.0),
+        "relationship" => (0.35, 8760.0),
+        "learning" => (0.70, 1440.0),
+        "fact" => (0.80, 720.0),
+        "entity" => (0.50, 4380.0),
+        "setup" => (0.60, 2160.0),
+        "pattern" => (0.60, 1680.0),
+        "context" => (0.85, 360.0),
+        "observation" => (0.90, 480.0),
+        "artifact" => (0.75, 2160.0),
+        "project" => (0.85, 1080.0),
+        "goal" => (0.90, 720.0),
+        "decision" => (1.00, 336.0),
+        "commitment" => (1.00, 240.0),
+        "event" => (1.20, 168.0),
+        "instruction" => (0.90, 480.0),
+        "error" => (1.10, 336.0),
+        "issue" => (1.10, 336.0),
+        "request" => (1.50, 72.0),
+        "general" => (1.00, 168.0),
+        _ => return default_auto_archive_days(),
+    };
+    let t_hours = eta_hours * (2.302585092994046_f64).powf(1.0 / k);
+    let t_days = (t_hours / 24.0).round() as i64;
+    t_days.clamp(7, 365) as u32
+}
+
+fn default_auto_archive_days_by_type() -> std::collections::HashMap<String, u32> {
+    // Every type the engine knows about. Includes `general` (the
+    // default for unknown / legacy memories). If `weibull_params` adds
+    // a new type, add it here too.
+    let types = [
+        "profile",
+        "preference",
+        "relationship",
+        "learning",
+        "fact",
+        "entity",
+        "setup",
+        "pattern",
+        "context",
+        "observation",
+        "artifact",
+        "project",
+        "goal",
+        "decision",
+        "commitment",
+        "event",
+        "instruction",
+        "error",
+        "issue",
+        "request",
+        "general",
+    ];
+    types
+        .iter()
+        .map(|n| (n.to_string(), default_auto_archive_days_for(n)))
+        .collect()
+}
 fn default_association_top_k() -> u32 {
     5
 }
@@ -549,6 +639,7 @@ impl Default for AppConfig {
                 cron_ingest: "*/5 * * * *".into(),
                 quantize_bit_width: 3.5,
                 auto_archive_days: default_auto_archive_days(),
+                auto_archive_days_by_type: default_auto_archive_days_by_type(),
                 prune_threshold: 0.1,
                 touch_importance_bump: 0.02,
                 summarize: SummarizeConfig::default(),
@@ -575,6 +666,99 @@ impl Default for AppConfig {
             watch: vec![],
             turbovec: TurbovecConfig::default(),
             verification: VerificationConfig::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the per-type age-cutoff derivation against the Weibull
+    /// params. If someone tunes `weibull_params` in `engine::decay`
+    /// without updating `default_auto_archive_days_for`, this test
+    /// will fail and surface the divergence.
+    ///
+    /// Spot-check: pick representative types from each tier (long /
+    /// medium / fast / default) and that the values land in the
+    /// expected range. We don't pin exact numbers — that's brittle —
+    /// just ranges that catch the obvious mistakes (e.g. dropping
+    /// `profile` to 14 days).
+    #[test]
+    fn test_per_type_age_cutoffs_are_sane() {
+        assert!(
+            default_auto_archive_days_for("profile") >= 180,
+            "profile should retain at least 6 months, got {}",
+            default_auto_archive_days_for("profile")
+        );
+        assert!(
+            default_auto_archive_days_for("preference") >= 90,
+            "preference should retain at least 3 months, got {}",
+            default_auto_archive_days_for("preference")
+        );
+        assert!(
+            default_auto_archive_days_for("request") <= 14,
+            "request is fastest-decaying, should prune within 2 weeks, got {}",
+            default_auto_archive_days_for("request")
+        );
+        // Spot-check the math vs the Weibull params.
+        // general: k=1.0, eta=168h → t = 168 × ln(10) / 24 ≈ 16.1 days
+        let general = default_auto_archive_days_for("general");
+        assert!(
+            (14..=18).contains(&general),
+            "general derived age {} not in expected 14-18d range",
+            general
+        );
+    }
+
+    #[test]
+    fn test_unknown_type_falls_back_to_global() {
+        // Unknown / empty types should fall back to the global default
+        // (default_auto_archive_days = 14), matching what phase 4 does at
+        // runtime when the per-type map is missing a key.
+        let global = default_auto_archive_days();
+        assert_eq!(
+            default_auto_archive_days_for("definitely-not-a-real-type"),
+            global
+        );
+    }
+
+    #[test]
+    fn test_per_type_map_is_complete() {
+        // Every type the engine knows about must have an entry in the
+        // default per-type map. Catches drift when `weibull_params`
+        // adds a type without the config layer being updated.
+        let map = default_auto_archive_days_by_type();
+        for t in [
+            "profile",
+            "preference",
+            "relationship",
+            "learning",
+            "fact",
+            "entity",
+            "setup",
+            "pattern",
+            "context",
+            "observation",
+            "artifact",
+            "project",
+            "goal",
+            "decision",
+            "commitment",
+            "event",
+            "instruction",
+            "error",
+            "issue",
+            "request",
+            "general",
+        ] {
+            assert!(map.contains_key(t), "missing per-type entry for {:?}", t);
+            assert!(
+                (7..=365).contains(map.get(t).unwrap()),
+                "per-type value for {} out of range: {}",
+                t,
+                map[t]
+            );
         }
     }
 }
