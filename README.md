@@ -151,6 +151,12 @@ Nightly "sleep" pipeline (13 phases): deduplicate → **TurboQuant compression**
 
 - Docker & Docker Compose
 - OpenAI API key *(or Ollama for fully local embeddings)*
+- **Your user must be able to talk to the Docker daemon.** Either:
+  - Add yourself to the `docker` group: `sudo usermod -aG docker $USER`, then log
+    out and back in (or `newgrp docker` for the current shell), **or**
+  - Use [Docker rootless](https://docs.docker.com/engine/security/rootless/).
+  - Verify with `docker info` — if it errors on `/var/run/docker.sock`, the
+    install is broken before memex8 even starts.
 
 ### 1. Clone
 
