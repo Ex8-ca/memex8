@@ -31,21 +31,50 @@ pub async fn run_with_engine(
     // Inject the API key into the web UI at serve time
     crate::web::init(config.api_key());
 
+    // Fail-closed by default: the auth middleware itself rejects every
+    // request to `/api/v1` when MEMEX8_API_KEY is unset, so we always
+    // mount it. The previous behavior (skip the middleware entirely
+    // when no key was set) silently exposed every API endpoint to
+    // anyone who could reach the port — see issue #11.
+    //
+    // For local development where someone is intentionally probing
+    // without auth, the caller passes `allow_no_api_key=true` (CLI flag
+    // `--allow-no-api-key` on `memex8 serve`) and we fall back to the
+    // old "no middleware" behavior, with a louder warning.
+    let allow_no_api_key = state.config.server.allow_no_api_key;
     let has_key = config.api_key().is_some();
     if has_key {
         tracing::info!("🔐 API authentication enabled");
+    } else if allow_no_api_key {
+        tracing::warn!(
+            "⚠️  No MEMEX8_API_KEY set and --allow-no-api-key passed — API is PUBLICLY ACCESSIBLE"
+        );
+        tracing::warn!(
+            "⚠️  This is intended for local development only. Do NOT expose this port to a network."
+        );
     } else {
-        tracing::warn!("⚠️  No MEMEX8_API_KEY set — API is publicly accessible");
+        tracing::warn!(
+            "⚠️  No MEMEX8_API_KEY set — every /api/v1 request will return 401. Generate one with:"
+        );
+        tracing::warn!(
+            "⚠️    python3 -c \"import secrets; print(secrets.token_urlsafe(32))\""
+        );
+        tracing::warn!(
+            "⚠️  To intentionally disable auth (NOT recommended), pass --allow-no-api-key to `memex8 serve`."
+        );
     }
 
-    // Auth only on /api/v1 — web UI, health, and MCP are public
-    let api_router = if has_key {
+    // Auth is always wired in. The middleware is fail-closed: it returns
+    // 401 "API key not configured" when no key is set, which is what
+    // we want by default. `allow_no_api_key` strips the middleware for
+    // local dev only.
+    let api_router = if allow_no_api_key && !has_key {
+        api_routes()
+    } else {
         api_routes().layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::api::auth::auth_middleware,
         ))
-    } else {
-        api_routes()
     };
 
     // Health and root must be explicit; wildcard must come last

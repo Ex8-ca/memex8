@@ -146,6 +146,14 @@ enum Commands {
         /// Port to bind to
         #[arg(long)]
         port: Option<u16>,
+
+        /// Intentionally start the API with NO auth, even when
+        /// `MEMEX8_API_KEY` is unset. Required for some local
+        /// development flows. Off by default — without this flag, the
+        /// server refuses all `/api/v1` requests when no key is
+        /// configured (fail-closed, see #11).
+        #[arg(long)]
+        allow_no_api_key: bool,
     },
 
     /// Start MCP server
@@ -525,15 +533,28 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Serve { host, port } => {
-            let h = host.as_deref().unwrap_or(&config.server.host);
-            let p = port.unwrap_or(config.server.port);
+        Commands::Serve { host, port, allow_no_api_key } => {
+            // Clone the config so we can tweak `allow_no_api_key`
+            // for this command without mutating the shared `config`
+            // (which is used by other match arms above and below).
+            let mut serve_config = config.clone();
+            let h = host.as_deref().unwrap_or(&serve_config.server.host);
+            let p = port.unwrap_or(serve_config.server.port);
+
+            // CLI flag overrides the config-file default. Both paths
+            // land in `serve_config.server.allow_no_api_key` so the
+            // server itself has a single source of truth.
+            if allow_no_api_key {
+                serve_config.server.allow_no_api_key = true;
+            }
 
             // Build engine for the scheduler
-            let engine = std::sync::Arc::new(engine::Engine::new(config.clone()).await?);
+            let engine = std::sync::Arc::new(engine::Engine::new(serve_config.clone()).await?);
 
-            // Spawn the scheduler loop in the background (daemon functionality)
-            let scheduler_config = config.clone();
+            // Spawn the scheduler loop in the background (daemon functionality).
+            // Use the (possibly modified) serve_config so the
+            // --allow-no-api-key flag flows through.
+            let scheduler_config = serve_config.clone();
             let scheduler_engine = engine.clone();
             tokio::spawn(async move {
                 let scheduler =
@@ -558,7 +579,7 @@ async fn main() -> anyhow::Result<()> {
             };
 
             // Run API server (blocks until shutdown)
-            api::server::run_with_engine(config.clone(), engine, h, p).await?;
+            api::server::run_with_engine(serve_config.clone(), engine, h, p).await?;
 
             // Cancel watch handler on shutdown
             if let Some(handle) = watch_handle {

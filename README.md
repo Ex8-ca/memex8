@@ -206,8 +206,19 @@ docker compose up -d
 ### 4. Verify
 
 ```bash
-curl http://localhost:8080/api/v1/health
-# {"status":"healthy"}
+# Without an API key, every /api/v1 request returns 401 (fail-closed).
+# See issue #11.
+curl -i http://localhost:8080/api/v1/memories
+# HTTP/1.1 401 Unauthorized
+# Missing Authorization header
+
+# With the key you generated in step 2:
+curl -i -H "Authorization: Bearer $MEMEX8_API_KEY" http://localhost:8080/api/v1/memories
+# HTTP/1.1 200 OK
+
+# Health is always public (no key required)
+curl http://localhost:8080/health
+# OK
 ```
 
 ### 5. Open the Web UI
@@ -216,7 +227,11 @@ curl http://localhost:8080/api/v1/health
 http://localhost:8080
 ```
 
-The API key is auto-injected from `.env` — no login needed.
+> **Note:** `MEMEX8_API_KEY` is **required** when running `memex8 serve`.
+> The server refuses all `/api/v1` requests with `401 Unauthorized` when
+> the key is unset (fail-closed). For local development only, pass
+> `--allow-no-api-key` to start the server without it — the warning logs
+> will be loud on purpose. See [#11](../../issues/11) for context.
 
 **Web UI features:** Cards view, semantic search, interactive 3D graph, realm filtering, memory detail modal with delete.
 
