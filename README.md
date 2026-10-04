@@ -151,6 +151,12 @@ Nightly "sleep" pipeline (13 phases): deduplicate → **TurboQuant compression**
 
 - Docker & Docker Compose
 - OpenAI API key *(or Ollama for fully local embeddings)*
+- **Your user must be able to talk to the Docker daemon.** Either:
+  - Add yourself to the `docker` group: `sudo usermod -aG docker $USER`, then log
+    out and back in (or `newgrp docker` for the current shell), **or**
+  - Use [Docker rootless](https://docs.docker.com/engine/security/rootless/).
+  - Verify with `docker info` — if it errors on `/var/run/docker.sock`, the
+    install is broken before memex8 even starts.
 
 ### 1. Clone
 
@@ -161,15 +167,35 @@ cd memex8
 
 ### 2. Configure
 
-Add to `~/.hermes/.env`:
+Copy the template and fill in only the secrets memex8 actually needs.
+The narrow env file keeps every other Hermes secret (other model keys,
+A2A tokens, …) out of the container.
 
 ```bash
-MEMEX8_API_KEY=your-secret-key
-MEMEX8_BASE_URL=http://localhost:8080
-OPENAI_API_KEY=sk-...          # for OpenAI embeddings
-OPENAI_BASE_URL=https://...      # optional: OpenAI-compatible API (MiniMax, Together, Groq)
-# EMBEDDING_PROVIDER=ollama    # optional: use local embeddings
+cp .env.memex8.example .env.memex8
+chmod 600 .env.memex8
+$EDITOR .env.memex8
 ```
+
+Generate a strong `MEMEX8_API_KEY` with:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+The only required entries are:
+
+```bash
+MEMEX8_API_KEY=<output from the command above>
+OPENAI_API_KEY=sk-...        # or leave empty + set EMBEDDING_PROVIDER=ollama
+# OPENAI_BASE_URL=...        # optional: OpenAI-compatible API (MiniMax, Together, Groq)
+# EMBEDDING_PROVIDER=ollama  # optional: use local embeddings
+```
+
+> **Security:** previously the shipped `docker-compose.yml` mounted
+> `~/.hermes/.env` directly, which exposed *every* Hermes secret to the
+> memex8 container. The shipped compose now defaults to the project-local
+> `.env.memex8` instead. See [#10](../../issues/10) for details.
 
 ### 3. Run
 
@@ -180,8 +206,19 @@ docker compose up -d
 ### 4. Verify
 
 ```bash
-curl http://localhost:8080/api/v1/health
-# {"status":"healthy"}
+# Without an API key, every /api/v1 request returns 401 (fail-closed).
+# See issue #11.
+curl -i http://localhost:8080/api/v1/memories
+# HTTP/1.1 401 Unauthorized
+# Missing Authorization header
+
+# With the key you generated in step 2:
+curl -i -H "Authorization: Bearer $MEMEX8_API_KEY" http://localhost:8080/api/v1/memories
+# HTTP/1.1 200 OK
+
+# Health is always public (no key required)
+curl http://localhost:8080/health
+# OK
 ```
 
 ### 5. Open the Web UI
@@ -190,7 +227,11 @@ curl http://localhost:8080/api/v1/health
 http://localhost:8080
 ```
 
-The API key is auto-injected from `.env` — no login needed.
+> **Note:** `MEMEX8_API_KEY` is **required** when running `memex8 serve`.
+> The server refuses all `/api/v1` requests with `401 Unauthorized` when
+> the key is unset (fail-closed). For local development only, pass
+> `--allow-no-api-key` to start the server without it — the warning logs
+> will be loud on purpose. See [#11](../../issues/11) for context.
 
 **Web UI features:** Cards view, semantic search, interactive 3D graph, realm filtering, memory detail modal with delete.
 
@@ -437,14 +478,31 @@ docker compose logs memex8
 
 **Unauthorized errors:**
 ```bash
-curl -H "Authorization: Bearer ***" http://localhost:8080/api/v1/health
+curl -H "Authorization: Bearer $MEMEX8_API_KEY" http://localhost:8080/api/v1/memories
 ```
+
+If you see `401 Unauthorized` and you *did* set `MEMEX8_API_KEY` in `.env.memex8`, recreate the container so the new env file takes effect:
+```bash
+docker compose up -d --force-recreate --no-deps memex8
+```
+
+**`~/.memex8` is owned by root on the host:**
+The shipped compose now runs the container as UID 1000 and bind-mounts `~/.memex8` to `/home/memex8/.memex8`, so newly-created files belong to you. If an earlier install already created `~/.memex8` as root, fix the existing ownership once:
+```bash
+sudo chown -R $USER ~/.memex8
+```
+Then `docker compose up -d --force-recreate --no-deps memex8`. If your host UID isn't 1000, override `user:` in a `docker-compose.override.yml` (e.g. `user: "501:20"` on macOS). See [#13](https://github.com/Ex8-ca/memex8/issues/13).
 
 **No memories showing up:**
 ```bash
 memex8 stats
 memex8 search "test"
 ```
+
+**"Client version X is not compatible with server version Y" on boot:**
+Cosmetic only — the engine suppresses the warning via
+`skip_compatibility_check()`. The container continues normally; no
+action needed. See [#14](https://github.com/Ex8-ca/memex8/issues/14).
 
 ---
 

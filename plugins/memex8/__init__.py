@@ -188,9 +188,19 @@ def _load_config(hermes_home: str) -> dict:
         except Exception as e:
             logger.debug("Failed to load memex8.json: %s", e)
 
-    # Env vars always take final precedence
+    # Env vars always take final precedence.
+    # Accept both MEMEX8_BASE_URL (preferred) and MEMEX8_API_BASE
+    # (legacy — was used by the Ex8-ca/Hermes-A2A plugin's
+    # memex8_client.py). Prefer the new one; if only the old one is
+    # set, use it and log a deprecation hint. See issue #12.
     if os.environ.get("MEMEX8_BASE_URL"):
         config["base_url"] = os.environ["MEMEX8_BASE_URL"]
+    elif os.environ.get("MEMEX8_API_BASE"):
+        config["base_url"] = os.environ["MEMEX8_API_BASE"]
+        logger.warning(
+            "MEMEX8_API_BASE is deprecated, use MEMEX8_BASE_URL instead "
+            "(see https://github.com/Ex8-ca/memex8/issues/12)"
+        )
     if os.environ.get("MEMEX8_API_KEY"):
         config["api_key"] = os.environ["MEMEX8_API_KEY"]
 

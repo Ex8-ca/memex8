@@ -111,7 +111,8 @@ See [v1.1.0 Features](#v110-features) below for what each of these does.
 
 | Variable | Purpose |
 |----------|---------|
-| `MEMEX8_BASE_URL` | memex8 REST API URL (default: `http://localhost:8080`) |
+| `MEMEX8_BASE_URL` | memex8 REST API URL (default: `http://localhost:8080`). Preferred name. |
+| `MEMEX8_API_BASE` | Legacy alias for `MEMEX8_BASE_URL`. Logs a deprecation warning when used alone (see [#12](https://github.com/Ex8-ca/memex8/issues/12)). Will be removed in a future release. |
 | `MEMEX8_API_KEY` | Authentication token (required) |
 
 ### Config precedence

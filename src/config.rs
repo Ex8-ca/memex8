@@ -30,6 +30,12 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub mcp_port: u16,
+    /// When true, the server starts without auth even if no
+    /// `MEMEX8_API_KEY` is set. CLI flag: `--allow-no-api-key`. Off by
+    /// default; when off, requests to `/api/v1` with no key configured
+    /// return 401 (fail-closed). See issue #11.
+    #[serde(default)]
+    pub allow_no_api_key: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -503,6 +509,7 @@ impl Default for AppConfig {
                 host: "0.0.0.0".into(),
                 port: 8080,
                 mcp_port: 8081,
+                allow_no_api_key: false,
             },
             auth: AuthConfig {
                 api_key_env: "MEMEX8_API_KEY".into(),
