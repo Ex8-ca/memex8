@@ -30,8 +30,16 @@ services:
       - ./watch_dirs:/watch          # Mount directories to watch
       - memex8_data:/var/lib/memex8  # Internal state, cache
       - /home/marc/.memex8:/root/.memex8  # Digest log — persisted to host ~/.memex8/
+    # IMPORTANT: This file defaults to a narrow, project-local env file
+# (`.env.memex8`, copied from `.env.memex8.example`). Only the secrets
+# memex8 actually needs are visible to the container.
+#
+# If you previously mounted `~/.hermes/.env` directly, your container
+# had access to *every* Hermes secret (model provider keys, A2A bearer
+# tokens, …). Switch to `.env.memex8` per the Quick Start before
+# running memex8 in any environment that handles real credentials.
     env_file:
-      - /home/marc/.hermes/.env
+      - ./.env.memex8
     environment:
       - LOCAL_LLM_URL=${LOCAL_LLM_URL:-}
       - LOCAL_LLM_API_KEY=${LOCAL_LLM_API_KEY:-}

@@ -7,3 +7,9 @@ web/node_modules/
 web/dist/
 *.md
 LICENSE
+# Don't bake secrets into the image. `.env.memex8.example` is a
+# template (no real secrets) and is needed at the compose level only,
+# not inside the container's filesystem — keep both excluded from the
+# build context.
+.env*
+!.env.memex8.example

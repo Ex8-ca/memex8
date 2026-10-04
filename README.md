@@ -167,15 +167,35 @@ cd memex8
 
 ### 2. Configure
 
-Add to `~/.hermes/.env`:
+Copy the template and fill in only the secrets memex8 actually needs.
+The narrow env file keeps every other Hermes secret (other model keys,
+A2A tokens, …) out of the container.
 
 ```bash
-MEMEX8_API_KEY=your-secret-key
-MEMEX8_BASE_URL=http://localhost:8080
-OPENAI_API_KEY=sk-...          # for OpenAI embeddings
-OPENAI_BASE_URL=https://...      # optional: OpenAI-compatible API (MiniMax, Together, Groq)
-# EMBEDDING_PROVIDER=ollama    # optional: use local embeddings
+cp .env.memex8.example .env.memex8
+chmod 600 .env.memex8
+$EDITOR .env.memex8
 ```
+
+Generate a strong `MEMEX8_API_KEY` with:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+The only required entries are:
+
+```bash
+MEMEX8_API_KEY=<output from the command above>
+OPENAI_API_KEY=sk-...        # or leave empty + set EMBEDDING_PROVIDER=ollama
+# OPENAI_BASE_URL=...        # optional: OpenAI-compatible API (MiniMax, Together, Groq)
+# EMBEDDING_PROVIDER=ollama  # optional: use local embeddings
+```
+
+> **Security:** previously the shipped `docker-compose.yml` mounted
+> `~/.hermes/.env` directly, which exposed *every* Hermes secret to the
+> memex8 container. The shipped compose now defaults to the project-local
+> `.env.memex8` instead. See [#10](../../issues/10) for details.
 
 ### 3. Run
 
