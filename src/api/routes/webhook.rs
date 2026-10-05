@@ -41,6 +41,7 @@ pub async fn conversation_end(
             // share these with peers. Operators can mark individual
             // conversations public later via PATCH.
             Some("private"),
+            None, // memory_type: webhook ingestion uses the default "general"
         )
         .await?;
 
@@ -84,6 +85,7 @@ pub async fn skill_executed(
             Some("openclaw"),
             // Skill execution traces are operator-private by default.
             Some("private"),
+            None, // memory_type: skill traces use the default "general"
         )
         .await?;
 

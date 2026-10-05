@@ -1867,7 +1867,36 @@ impl SlumberEngine {
                 }
             }
 
-            // Store the consolidated summary with its own embedded vector
+            // Store the consolidated summary with its own embedded vector.
+            // Inherit memory_type from the source memories so the summary's
+            // Weibull decay matches the originals' (e.g. a summary of
+            // profile/preference memories won't decay after 7 days just
+            // because we hardcoded "general" for new memory_type).
+            // Type priority picks the most stable: profile > preference
+            // > relationship > entity > setup > pattern > fact > project.
+            let type_priority = |t: &str| -> u8 {
+                match t {
+                    "profile" => 9,
+                    "preference" => 8,
+                    "relationship" => 8,
+                    "entity" => 7,
+                    "setup" => 6,
+                    "pattern" => 5,
+                    "fact" => 4,
+                    "project" => 3,
+                    "observation" => 2,
+                    "learning" => 2,
+                    "instruction" => 2,
+                    "general" => 1,
+                    _ => 0,
+                }
+            };
+            let inherited_type = memories
+                .iter()
+                .map(|m| m.memory_type.as_str())
+                .max_by_key(|t| type_priority(t))
+                .unwrap_or("general");
+
             let id = uuid::Uuid::new_v4().to_string();
             if let Err(e) = self
                 .store
@@ -1878,7 +1907,8 @@ impl SlumberEngine {
                     None,
                     Some(realm_name),
                     1.0,
-                    None,
+                    None,                // source_file: consolidated summaries have no file origin
+                    Some(inherited_type), // inherit memory_type from sources for matching Weibull decay
                 )
                 .await
             {
