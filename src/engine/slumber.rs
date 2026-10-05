@@ -631,15 +631,16 @@ impl SlumberEngine {
     }
 
     /// Merge realms whose centroids are very similar.
-    /// Uses a lower threshold (0.6) for text embeddings where even
-    /// different topics can have moderate cosine similarity.
+    /// Threshold is read from `[realms] merge_threshold` in config.toml
+    /// (default 0.85; the value 0.35 hardcoded here previously broke
+    /// personal-knowledge isolation — fixed 2026-10-04 after the realm
+    /// merge at 0.47 similarity destroyed Marc's stored facts).
     async fn merge_similar_realms(&self) -> anyhow::Result<usize> {
         let realms = self.store.list_realms().await?;
         let mut merged = 0;
 
-        // Lower threshold for text embeddings: 0.35 instead of 0.85
-        // Text embeddings from different topics typically have 0.2-0.4 cosine similarity
-        let merge_threshold = 0.35f32;
+        // Use the config value so users can tune it. Default 0.85.
+        let merge_threshold = self.config.realms.merge_threshold;
 
         for i in 0..realms.len() {
             for j in (i + 1)..realms.len() {
@@ -1746,14 +1747,18 @@ impl SlumberEngine {
                 backend
             );
 
-            // Build the prompt (limit to top 10 memories by importance)
+            // Build the prompt (limit to top memories by importance)
+            // Use config max_cluster_size (default 20, lowered to 6 for
+            // finer-grained consolidation; the value 10 hardcoded here
+            // previously was a dead config — fixed 2026-10-04).
+            let max_cluster = self.config.slumber.summarize.max_cluster_size as usize;
             let mut sorted = memories.to_vec();
             sorted.sort_by(|a, b| {
                 b.importance
                     .partial_cmp(&a.importance)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            sorted.truncate(10);
+            sorted.truncate(max_cluster.max(2));
 
             let memory_texts: Vec<String> = sorted
                 .iter()
@@ -1842,9 +1847,20 @@ impl SlumberEngine {
                 .map_err(|e| anyhow::anyhow!("Failed to embed summary: {}", e))?;
 
             // Collect IDs to delete
-            let ids_to_delete: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
+            // Respect config preserve_originals (default true). When
+            // false, the original memories are deleted and replaced by
+            // the summary; when true, the originals are kept and the
+            // summary is added alongside. The value `false` hardcoded
+            // here previously made preserve_originals a dead config —
+            // fixed 2026-10-04.
+            let preserve_originals = self.config.slumber.summarize.preserve_originals;
+            let ids_to_delete: Vec<String> = if preserve_originals {
+                Vec::new()
+            } else {
+                memories.iter().map(|m| m.id.clone()).collect()
+            };
 
-            // Delete old fragmented memories
+            // Delete old fragmented memories (only when not preserving)
             for id in &ids_to_delete {
                 if let Err(e) = self.store.delete_memory(id).await {
                     tracing::warn!("  Failed to delete old memory {}: {}", id, e);
