@@ -42,6 +42,7 @@ services:
       # it does NOT chown pre-existing root-owned files. The named
       # volume `memex8_data` is unaffected.
       - /home/marc/.memex8:/home/memex8/.memex8  # Digest log — persisted to host ~/.memex8/
+      - ./config.toml:/config.toml:ro  # Embedding URL lives here (host.docker.internal)
     # IMPORTANT: This file defaults to a narrow, project-local env file
     # (`.env.memex8`, copied from `.env.memex8.example`). Only the
     # secrets memex8 actually needs are visible to the container.

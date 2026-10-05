@@ -686,6 +686,9 @@ impl QdrantStore {
     }
 
     /// Store a memory with a pre-computed vector (for consolidated summaries).
+    /// `memory_type` controls Weibull decay — pass the most-stable type of
+    /// the source memories so the summary doesn't decay after 7 days when
+    /// the originals are long-lived (profile/preference/entity/etc).
     pub async fn store_memory_with_vector(
         &self,
         id: &str,
@@ -695,6 +698,7 @@ impl QdrantStore {
         realm_name: Option<&str>,
         importance: f32,
         source_file: Option<&str>,
+        memory_type: Option<&str>,
     ) -> anyhow::Result<()> {
         let ingested_at = chrono::Utc::now().to_rfc3339();
 
@@ -714,7 +718,7 @@ impl QdrantStore {
             "association_strengths": Vec::<f32>::new(),
             "reaction_score": 0.0f32,
             "topic_clusters": Vec::<String>::new(),
-            "memory_type": "general",
+            "memory_type": memory_type.unwrap_or("general"),
             "visibility": "private",
         })
         .try_into()
