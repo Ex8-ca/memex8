@@ -1146,7 +1146,7 @@ impl Engine {
     pub async fn store_memory(
         &self,
         content: &str,
-        _tags: Option<Vec<String>>,
+        tags: Option<Vec<String>>,
         realm_hint: Option<&str>,
         source: Option<&str>,
         visibility: Option<&str>,
@@ -1181,7 +1181,7 @@ impl Engine {
             crate::storage::qdrant::normalize_visibility(visibility.unwrap_or("private"));
 
         self.store
-            .store_memory(
+            .store_memory_with_tags(
                 &id,
                 &vector,
                 content,
@@ -1194,6 +1194,7 @@ impl Engine {
                 "general",
                 reaction_score,
                 visibility_str,
+                tags.as_deref().unwrap_or(&[]),
             )
             .await?;
 

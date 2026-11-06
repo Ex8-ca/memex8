@@ -22,7 +22,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Cache dependencies
         uses: actions/cache@v4
@@ -90,6 +90,12 @@ jobs:
 
       - name: Run plugin path-confinement tests
         run: python3 tests/test_export_import_path.py
+
+      - name: Test shared memory bridge and Docker backup workflow
+        run: |
+          python3 integrations/shared-memory/test_bridge.py -v
+          python3 tests/test_docker_backup.py -v
+          python3 plugins/memex8/tests/test_visibility.py
 
       - name: Validate plugin.yaml
         run: |

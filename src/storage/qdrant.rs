@@ -560,6 +560,40 @@ impl QdrantStore {
         reaction_score: f32,
         visibility: &str,
     ) -> anyhow::Result<()> {
+        self.store_memory_with_tags(
+            id,
+            vector,
+            content,
+            heading,
+            source_file,
+            realm_id,
+            realm_name,
+            source_hash,
+            chunk_type,
+            memory_type,
+            reaction_score,
+            visibility,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn store_memory_with_tags(
+        &self,
+        id: &str,
+        vector: &[f32],
+        content: &str,
+        heading: Option<&str>,
+        source_file: Option<&str>,
+        realm_id: &str,
+        realm_name: &str,
+        source_hash: &str,
+        chunk_type: &str,
+        memory_type: &str,
+        reaction_score: f32,
+        visibility: &str,
+        tags: &[String],
+    ) -> anyhow::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let mem = MemoryPoint {
             id: id.to_string(),
@@ -570,7 +604,7 @@ impl QdrantStore {
             realm_name: realm_name.to_string(),
             importance: 1.0,
             upvotes: 0,
-            tags: vec![],
+            tags: tags.to_vec(),
             ingested_at: now.clone(),
             last_accessed: now,
             access_count: 0,
@@ -591,6 +625,19 @@ impl QdrantStore {
         let payload = memory_to_payload(&mem);
         let point = PointStruct::new(id.to_string(), vector.to_vec(), payload);
 
+        self.client
+            .upsert_points(UpsertPointsBuilder::new(MEMORIES, vec![point]).wait(true))
+            .await?;
+        Ok(())
+    }
+
+    /// Restore the serialized payload verbatim rather than resetting metadata.
+    pub async fn restore_memory(&self, memory: &MemoryWithVector) -> anyhow::Result<()> {
+        let point = PointStruct::new(
+            memory.memory.id.clone(),
+            memory.vector.clone(),
+            memory_to_payload(&memory.memory),
+        );
         self.client
             .upsert_points(UpsertPointsBuilder::new(MEMORIES, vec![point]).wait(true))
             .await?;
@@ -1706,17 +1753,17 @@ mod tests {
     }
 
     #[test]
-    fn memory_round_trip_preserves_visibility() {
+    fn memory_round_trip_preserves_visibility_tags_and_source() {
         let original = MemoryPoint {
             id: "test-1".into(),
             content: "hello".into(),
             summary: None,
-            source_file: None,
+            source_file: Some("codex:session-1".into()),
             realm_id: None,
             realm_name: "general".into(),
             importance: 1.0,
             upvotes: 0,
-            tags: vec![],
+            tags: vec!["project:Ex8-ca/memex8".into(), "agent:codex".into()],
             ingested_at: "2026-01-01T00:00:00Z".into(),
             last_accessed: "2026-01-01T00:00:00Z".into(),
             access_count: 0,
@@ -1748,6 +1795,8 @@ mod tests {
 
         let decoded = memory_from_payload("test-1", obj);
         assert_eq!(decoded.visibility, "public");
+        assert_eq!(decoded.tags, original.tags);
+        assert_eq!(decoded.source_file, original.source_file);
     }
 
     #[test]
