@@ -1727,6 +1727,11 @@ impl SlumberEngine {
             std::collections::HashMap::new();
 
         for mem in &all {
+            // Project records retain their scope and source attribution. The
+            // legacy realm summary writer does not preserve either yet.
+            if mem.tags.iter().any(|tag| tag.starts_with("project:")) {
+                continue;
+            }
             let realm = mem.realm_name.clone();
             by_realm.entry(realm).or_default().push(mem);
         }
@@ -2734,3 +2739,4 @@ fn kmeans_split_2(vectors: &[Vec<f32>], max_iter: usize) -> (Vec<f32>, Vec<f32>,
 
     (c1, c2, assignments)
 }
+

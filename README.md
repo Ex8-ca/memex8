@@ -22,6 +22,16 @@ A self-hosted memory system that models how **human memory actually works**: mem
 
 **[⭐ Star on GitHub](https://github.com/Ex8-ca/memex8) · [Report Issue](https://github.com/Ex8-ca/memex8/issues)**
 
+## Claude Code, Codex, and Obsidian
+
+Before upgrading an existing deployment, follow the [backup and recovery guide](docs/BACKUPS.md).
+
+The [shared-memory MCP bridge](integrations/shared-memory/README.md) gives Claude
+Code and Codex access to the same memex8 backend as Hermes, with project-scoped
+search, compact previews, and agent/session attribution. Optionally connect a
+local Obsidian vault for read-only note search and attach note references to
+memories. See the guide for the required server update and client configuration.
+
 ## Install as a Hermes Agent plugin
 
 memex8 ships a `plugins/memex8/` directory that turns it into a drop-in memory
@@ -515,4 +525,5 @@ MIT
 Personal project shared for reference. No guarantees, no SLA, no support. Fork it, adapt it, build on the ideas.
 
 See [TODO.md](TODO.md) and [PLAN.md](PLAN.md) for the roadmap.
+
 
