@@ -2739,4 +2739,3 @@ fn kmeans_split_2(vectors: &[Vec<f32>], max_iter: usize) -> (Vec<f32>, Vec<f32>,
 
     (c1, c2, assignments)
 }
-
