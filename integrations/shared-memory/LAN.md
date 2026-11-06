@@ -30,6 +30,32 @@ not harden those routes or make the whole service suitable for public exposure.
 
 ## Claude Code and Codex computers
 
+### Install both clients
+
+From a checkout of this repository, run:
+
+```sh
+python3 integrations/shared-memory/install.py \
+  --project Ex8-ca/memex8 --base-url http://192.168.1.3:8080 --allow-lan-http
+```
+
+The installer prompts for the server API key without echoing it (or reads
+`MEMEX8_API_KEY` from the environment). It checks authenticated read access before
+changing settings, copies the bridge and a private API key file to
+`~/.local/share/memex8`, backs up existing client settings there, and registers
+memex8 with Codex and Claude Code using their installed CLIs. Restart both clients
+after installation. Each computer needs its own installation. Python 3.10+ and
+both client CLIs must be on PATH; use `--clients codex` or `--clients claude` to
+install for only one client. `--check-only` checks access without installing.
+
+Add `--vault /absolute/path/to/ObsidianVault` to enable note lookup. Optionally use
+`--key-env-file /private/path/to/env-file` to read only `MEMEX8_API_KEY` from an
+existing dotenv file without executing it. Secrets and machine paths belong in
+local settings, never in GitHub. Existing memex8 registrations may need removal
+through the client CLI before rerunning setup; other MCP registrations are kept.
+
+### Manual configuration
+
 Copy `bridge.py` to each computer (or keep a checkout of this repository). Install
 Python 3.10 or later. No Python packages or local Qdrant server are required.
 
