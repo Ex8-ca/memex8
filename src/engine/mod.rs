@@ -1554,4 +1554,3 @@ mod tests {
         assert!(stale > contradicted);
     }
 }
-
