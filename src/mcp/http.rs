@@ -204,7 +204,13 @@ async fn handle_tool_call(
 
             let source = arguments.get("source").and_then(|v| v.as_str());
             let id = engine
-                .store_memory(content, tags, realm_hint, source.or(Some("mcp")), visibility)
+                .store_memory(
+                    content,
+                    tags,
+                    realm_hint,
+                    source.or(Some("mcp")),
+                    visibility,
+                )
                 .await?;
             Ok(json!({ "id": id, "status": "stored" }))
         }
