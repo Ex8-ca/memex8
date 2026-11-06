@@ -1811,4 +1811,3 @@ mod tests {
         assert_eq!(decoded.visibility, "private");
     }
 }
-
