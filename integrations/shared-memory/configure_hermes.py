@@ -28,6 +28,7 @@ def main():
     parser.add_argument('--api-key-file', type=Path, default=Path.home()/'.local/share/memex8/api-key')
     parser.add_argument('--hermes-home', type=Path, default=Path(os.environ.get('HERMES_HOME', Path.home()/'.hermes')))
     parser.add_argument('--check-only', action='store_true')
+    parser.add_argument('--activate-provider', action='store_true', help='Select memex8 as the Hermes memory provider (requires PyYAML)')
     args = parser.parse_args()
     os.umask(0o077)
     home = args.hermes_home.expanduser().resolve()
@@ -46,6 +47,18 @@ def main():
     config.update(base_url=args.base_url.rstrip('/'), api_key=key)
     values = {'MEMEX8_BASE_URL': config['base_url'], 'MEMEX8_API_KEY': key}
     changes = {settings: json.dumps(config, indent=2)+'\n'}
+    if args.activate_provider:
+        try:
+            import yaml
+        except ImportError:
+            raise ValueError('Provider activation requires PyYAML; run with the Hermes Python environment') from None
+        path = home/'config.yaml'
+        cfg = yaml.safe_load(path.read_text()) if path.exists() else {}
+        cfg = cfg or {}
+        if not isinstance(cfg, dict) or not isinstance(cfg.get('memory', {}), dict):
+            raise ValueError('Unexpected Hermes memory configuration; select the provider with hermes memory setup')
+        cfg.setdefault('memory', {})['provider'] = 'memex8'
+        changes[path] = yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)
     env = home/'.env'
     changes[env] = update_env(env.read_text() if env.exists() else '', values)
     keyfile = home/'memex8_api.key'
