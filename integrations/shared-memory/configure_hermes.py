@@ -29,6 +29,7 @@ def main():
     parser.add_argument('--hermes-home', type=Path, default=Path(os.environ.get('HERMES_HOME', Path.home()/'.hermes')))
     parser.add_argument('--check-only', action='store_true')
     parser.add_argument('--activate-provider', action='store_true', help='Select memex8 as the Hermes memory provider (requires PyYAML)')
+    parser.add_argument('--install-provider', action='store_true', help='Install the bundled plugin into the Hermes user plugin discovery directory')
     args = parser.parse_args()
     os.umask(0o077)
     home = args.hermes_home.expanduser().resolve()
@@ -42,6 +43,17 @@ def main():
     print(bridge.check())
     if args.check_only:
         return
+    plugin = home/'plugins/memex8'
+    source = Path(__file__).resolve().parents[2]/'plugins/memex8'
+    if args.install_provider:
+        if not (source/'__init__.py').is_file():
+            raise ValueError('Run this helper from a full memex8 repository checkout')
+        if plugin.is_symlink() or (home/'plugins').is_symlink():
+            raise ValueError('Refusing a symlink plugin directory')
+        if plugin.exists():
+            raise ValueError('User plugin already exists; omit --install-provider to preserve it')
+    elif args.activate_provider and not (plugin/'__init__.py').is_file():
+        raise ValueError('User memex8 plugin not found. Include --install-provider to install it before activation')
     settings = home/'memex8.json'
     config = json.loads(settings.read_text()) if settings.exists() else {}
     config.update(base_url=args.base_url.rstrip('/'), api_key=key)
@@ -76,6 +88,10 @@ def main():
     for path in changes:
         if path.exists():
             shutil.copyfile(path, backup/path.name)
+    if args.install_provider:
+        plugin.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, plugin, ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.git'))
+        print('Installed memex8 provider in', plugin)
     for path, text in changes.items():
         fd, temporary = tempfile.mkstemp(dir=home, prefix='.memex8-update-')
         try:
