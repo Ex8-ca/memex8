@@ -176,9 +176,13 @@ def main():
             directory = backup(compose, args.output)
             print("Verified backup:", directory, flush=True)
             if args.action == "upgrade":
+                saved = verify(directory)
                 override = directory / "upgrade.override.json"
                 override.write_text(json.dumps({"services": {"memex8": {
                     "image": args.image,
+                    # Preserve the actual container settings, even if Compose
+                    # files have since drifted or disagree with each other.
+                    "environment": saved["services"]["memex8"]["config"].get("Env", []),
                     "healthcheck": {"test": ["CMD", "curl", "-fsS", "http://localhost:8080/health"], "interval": "5s", "timeout": "3s", "retries": 12}
                 }}}))
                 # Only replace the app. Never upgrade Qdrant or remove volumes.

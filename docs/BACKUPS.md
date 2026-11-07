@@ -76,6 +76,12 @@ python3 scripts/docker_backup.py upgrade -f docker-compose.yml \
   --image memex8:CHOSEN_COMMIT
 ```
 
+The upgrade override preserves the running app container's environment, including
+its embedding provider, model, dimensions, and credentials. This prevents stale
+or conflicting Compose files from changing the embedding model during upgrade.
+Keep the same embedding model and dimensions as the existing database; using a
+different model requires a deliberate migration of the stored vectors.
+
 Substitute a real commit/tag for `CHOSEN_COMMIT`. This makes a fresh verified
 backup, then starts that image with the existing service configuration and waits
 for its `/health` endpoint. Qdrant is not upgraded; volumes are never removed.

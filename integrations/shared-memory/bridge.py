@@ -260,6 +260,8 @@ def main():
     parser.add_argument("--project", required=True)
     parser.add_argument("--vault", default=os.environ.get("MEMEX8_OBSIDIAN_VAULT"))
     parser.add_argument("--session", default=os.environ.get("MEMEX8_SESSION_ID"))
+    parser.add_argument("--api-key-file", type=Path,
+                        help="Read the API key from a private local text file")
     parser.add_argument("--base-url", default=os.environ.get("MEMEX8_BASE_URL", "http://127.0.0.1:8080"))
     parser.add_argument("--allow-lan-http", action="store_true",
                         help="Allow unencrypted HTTP to a private LAN IP (API key and memories travel in plaintext)")
@@ -269,12 +271,13 @@ def main():
                         help="Check authenticated API read access and exit without writing memories")
     args = parser.parse_args()
     try:
-        bridge = Bridge(args.base_url, os.environ.get("MEMEX8_API_KEY"), args.agent,
+        api_key = args.api_key_file.expanduser().read_text().strip() if args.api_key_file else os.environ.get("MEMEX8_API_KEY")
+        bridge = Bridge(args.base_url, api_key, args.agent,
                         args.project, args.vault, args.session, args.allow_lan_http, args.device)
         if args.check:
             print(json.dumps(bridge.check()))
             return
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         parser.error(str(exc))
     for line in sys.stdin:
         try:

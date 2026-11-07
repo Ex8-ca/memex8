@@ -115,6 +115,24 @@ class DockerBackupTests(unittest.TestCase):
             self.assertEqual(backup.main(), 1)
         self.assertFalse(any("up" in call.args[0] for call in run.call_args_list))
 
+    def test_upgrade_preserves_running_embedding_configuration(self):
+        directory = self.make_backup()
+        manifest_path = directory / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        original = ["EMBEDDING_PROVIDER=openai", "EMBEDDING_MODEL=text-embedding-3-small",
+                    "EMBEDDING_DIMENSIONS=1536", "OPENAI_API_KEY=test-only"]
+        manifest["services"]["memex8"]["config"]["Env"] = original
+        manifest_path.write_text(json.dumps(manifest))
+        checks_path = directory / "checksums.json"
+        checks = json.loads(checks_path.read_text())
+        checks["manifest.json"] = backup.digest(manifest_path)
+        checks_path.write_text(json.dumps(checks))
+        with patch.object(backup, "backup", return_value=directory), patch.object(backup, "run") as run, patch("sys.argv", ["backup", "upgrade", "-f", "compose.yml", "--output", str(self.root), "--image", "memex8:new"]):
+            self.assertEqual(backup.main(), 0)
+        override = json.loads((directory / "upgrade.override.json").read_text())
+        self.assertEqual(override["services"]["memex8"]["environment"], original)
+        self.assertTrue(any("up" in call.args[0] for call in run.call_args_list))
+
 
 if __name__ == "__main__":
     unittest.main()
