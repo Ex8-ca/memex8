@@ -106,6 +106,24 @@ which of your other computers can recall a memory.
 
 ## Hermes computers
 
+If Hermes already has the native memex8 plugin, configure it with the same key
+file created by the client installer:
+
+```sh
+python3 integrations/shared-memory/configure_hermes.py \
+  --base-url http://192.168.1.3:8080 --allow-lan-http
+```
+
+The helper verifies authenticated access before writing, backs up existing
+settings, and updates `memex8.json` and `.env` in the Hermes home directory. It
+also updates existing `memex8_api.key` and `memex8_env.sh` files. Other settings
+are preserved. Use `--api-key-file PATH` for another private key file,
+`--hermes-home PATH` for another profile, or `--check-only` for a read-only
+connection check. Restart Hermes from a fresh terminal afterward; inherited
+`MEMEX8_BASE_URL` and `MEMEX8_API_KEY` variables override file settings.
+This configures an existing plugin; it does not install or activate the provider.
+
+
 Keep the existing memex8 memory provider enabled. Set these values in that Hermes
 installation's `.env` (normally `~/.hermes/.env`):
 

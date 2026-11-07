@@ -22,15 +22,29 @@ A self-hosted memory system that models how **human memory actually works**: mem
 
 **[⭐ Star on GitHub](https://github.com/Ex8-ca/memex8) · [Report Issue](https://github.com/Ex8-ca/memex8/issues)**
 
-## Claude Code, Codex, and Obsidian
+## Shared memory for Hermes, Claude Code, and Codex
 
-Before upgrading an existing deployment, follow the [backup and recovery guide](docs/BACKUPS.md).
+Use one memex8 server from **Hermes Agent, Claude Code, and Codex**, on the same
+computer or across computers on your **local network**. All clients connect to
+the same authenticated REST API and share the same memory database.
 
-The [shared-memory MCP bridge](integrations/shared-memory/README.md) gives Claude
-Code and Codex access to the same memex8 backend as Hermes, with project-scoped
-search, compact previews, and agent/session attribution. Optionally connect a
-local Obsidian vault for read-only note search and attach note references to
-memories. See the guide for the required server update and client configuration.
+- **Hermes Agent:** native memory provider with automatic recall, conversation
+  capture, and memory-write mirroring.
+- **Claude Code and Codex:** a local stdio MCP bridge provides project-scoped
+  memory search, explicit memory saving, and agent/session/device attribution.
+  The bridge provides tools; it does not automatically archive whole conversations.
+- **Obsidian:** optional read-only vault search and note references let agents
+  consult the current Markdown source alongside stored memories.
+
+For example, run memex8 once at `http://192.168.1.3:8080`, then connect Hermes
+on your desktop, Claude Code on a laptop, and Codex on another computer using
+the same API key. Use matching project IDs across bridge clients. Each computer
+needs its own bridge installation; Obsidian lookup needs a local or mounted
+vault maintained by your existing sync process.
+
+See the [LAN setup guide](integrations/shared-memory/LAN.md) for all three clients,
+the [MCP bridge guide](integrations/shared-memory/README.md) for its tools, and
+the [backup and recovery guide](docs/BACKUPS.md) before upgrading an existing server.
 
 ## Install as a Hermes Agent plugin
 
