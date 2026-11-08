@@ -1,5 +1,26 @@
 # memex8 Implementation Status
 
+## 2026-11-08 — Duplicate detection (roadmap A)
+
+- Added read-only `memex8 slumber inspect-duplicates` with original-vector cosine
+  checks, deterministic winners, certified/type/realm/visibility protection, and
+  bounded pair comparisons. Phase 1 now reports candidates separately from actual
+  deletions; removal remains disabled pending durable archives and recovery.
+- Equal file hashes require equal nonempty content for exact-match candidates.
+- Consolidation records direct source IDs, excludes existing summaries and certified
+  input, and skips already summarized source sets. Replacement storage precedes
+  deletion, and only selected sources can be removed. Full archival recovery and
+  certification lifecycle protection remain packages B–D.
+- Config: `slumber.dedup_threshold` (0.95), `dedup_dry_run` (true), and
+  `dedup_max_comparisons_per_realm` (1000000).
+- Validation: `cargo build`, `cargo fmt --check`, and
+  `cargo test -- --skip test_kmeans_simple` passed (62 unit tests in each Rust
+  target, plus 38 core integration tests). The explicitly skipped k-means test
+  remains outside this change. Existing unused-import/mutability warnings remain.
+  `python3 tests/test_dedup_inspection.py` passed against disposable Qdrant,
+  confirming the four-point fixture yields two candidates with unchanged vectors,
+  payloads, and collection list. No live-data maintenance or deployment performed.
+
 > Last updated: 2026-04-13
 
 ## Build Status

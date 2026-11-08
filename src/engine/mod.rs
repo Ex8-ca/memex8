@@ -2,6 +2,7 @@ pub mod associations;
 pub mod backup;
 pub mod chunker;
 pub mod decay;
+pub mod dedup;
 pub mod doctor;
 pub mod embedder;
 pub mod graph;

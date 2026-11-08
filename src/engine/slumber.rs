@@ -42,6 +42,15 @@ impl SlumberEngine {
 pub struct SlumberReport {
     pub memories_scanned: usize,
     pub deduplicated: usize,
+    /// Proposed losers; separate from actual deletions for dry-run reporting.
+    #[serde(default)]
+    pub dedup_candidates: usize,
+    #[serde(default)]
+    pub dedup_dry_run: bool,
+    #[serde(default)]
+    pub dedup_protected: usize,
+    #[serde(default)]
+    pub dedup_truncated_realms: Vec<String>,
     pub quantized: usize,
     pub realms_updated: usize,
     pub realms_renamed: usize,
@@ -87,9 +96,13 @@ impl SlumberEngine {
 
         // Phase 1: Deduplicate near-identical memories
         tracing::info!("💤 Slumber phase 1: Deduplication");
-        let all = self.store.scroll_all_memories().await?;
-        report.memories_scanned = all.len();
-        report.deduplicated = self.deduplicate().await?;
+        let dedup = self.inspect_duplicates().await?;
+        report.memories_scanned = dedup.memories_scanned;
+        report.deduplicated = dedup.deduplicated;
+        report.dedup_candidates = dedup.candidates.len();
+        report.dedup_dry_run = dedup.dry_run;
+        report.dedup_protected = dedup.protected_duplicates;
+        report.dedup_truncated_realms = dedup.truncated_realms;
 
         // Phase 2: ScalarQuant compression
         tracing::info!("💤 Slumber phase 2: ScalarQuant compression");
@@ -215,44 +228,33 @@ impl SlumberEngine {
 
     // ─── Phase 1: Deduplication ──────────────────────────────────────────────
 
-    /// Find and remove near-duplicate memories (cosine similarity > 0.95).
-    /// Keeps the one with higher importance (upvotes + recency).
-    async fn deduplicate(&self) -> anyhow::Result<usize> {
-        let all = self.store.scroll_all_memories().await?;
-        let mut removed = 0;
-        let _dedup_threshold = 0.95f32;
-
-        // Group by source_hash first (exact duplicates)
-        let mut by_hash: std::collections::HashMap<String, Vec<&MemoryPoint>> =
-            std::collections::HashMap::new();
-        for mem in &all {
-            if !mem.source_hash.is_empty() {
-                by_hash
-                    .entry(mem.source_hash.clone())
-                    .or_default()
-                    .push(mem);
-            }
+    /// Read-only duplicate inspection. This entry point does not initialize
+    /// collections, run other maintenance phases, or mutate any payload/index.
+    pub async fn inspect_duplicates(&self) -> anyhow::Result<super::dedup::DedupReport> {
+        self.config.slumber.validate_dedup()?;
+        if !self.config.slumber.dedup_dry_run {
+            tracing::warn!("Duplicate removal is unavailable until archival support is installed; forcing dry run");
         }
-
-        // Remove exact duplicates (same source_hash) — keep highest importance
-        for (_hash, group) in &by_hash {
-            if group.len() > 1 {
-                let mut sorted = group.to_vec();
-                sorted.sort_by(|a, b| {
-                    b.importance
-                        .partial_cmp(&a.importance)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                // Keep the first (highest importance), delete the rest
-                for mem in sorted.iter().skip(1) {
-                    self.store.delete_memory(&mem.id).await?;
-                    removed += 1;
-                }
-            }
+        let all = self.store.scroll_memories_internal(true).await?;
+        let report = super::dedup::plan_duplicates(&all, &self.config.slumber)?;
+        for candidate in &report.candidates {
+            tracing::info!(
+                winner_id = %candidate.winner_id,
+                loser_id = %candidate.loser_id,
+                cosine = ?candidate.cosine,
+                reason = %candidate.reason,
+                "Duplicate candidate (dry run; no deletion)"
+            );
         }
-
-        tracing::info!("  Deduplicated {} exact duplicates", removed);
-        Ok(removed)
+        tracing::info!(
+            candidates = report.candidates.len(),
+            protected = report.protected_duplicates,
+            invalid_vectors = report.invalid_vectors,
+            comparisons = report.comparisons,
+            truncated_realms = report.truncated_realms.len(),
+            "Duplicate inspection complete (dry run; no writes)"
+        );
+        Ok(report)
     }
 
     // ─── Phase 2: TurboVec Compression ────────────────────────────────────────
@@ -1724,17 +1726,21 @@ impl SlumberEngine {
 
         // Group memories by realm
         let all = self.store.scroll_all_memories().await?;
-        let mut by_realm: std::collections::HashMap<String, Vec<&MemoryPoint>> =
-            std::collections::HashMap::new();
-
+        let mut by_realm: std::collections::BTreeMap<_, Vec<&MemoryPoint>> =
+            std::collections::BTreeMap::new();
         for mem in &all {
-            let realm = mem.realm_name.clone();
-            by_realm.entry(realm).or_default().push(mem);
+            let key = (
+                mem.realm_id.clone(),
+                mem.realm_name.clone(),
+                crate::storage::qdrant::normalize_visibility(&mem.visibility),
+            );
+            by_realm.entry(key).or_default().push(mem);
         }
 
         let mut consolidated = 0;
 
-        for (realm_name, memories) in &by_realm {
+        for ((realm_id, realm_name, visibility), members) in &by_realm {
+            let memories = super::dedup::consolidation_inputs(members);
             // Only consolidate realms with 2+ memories
             if memories.len() < 2 {
                 continue;
@@ -1759,6 +1765,11 @@ impl SlumberEngine {
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             sorted.truncate(max_cluster.max(2));
+            if super::dedup::already_consolidated(&sorted, members) {
+                tracing::debug!("Skipping consolidation: source set already summarized");
+                continue;
+            }
+            let source_ids: Vec<String> = sorted.iter().map(|m| m.id.clone()).collect();
 
             let memory_texts: Vec<String> = sorted
                 .iter()
@@ -1857,15 +1868,8 @@ impl SlumberEngine {
             let ids_to_delete: Vec<String> = if preserve_originals {
                 Vec::new()
             } else {
-                memories.iter().map(|m| m.id.clone()).collect()
+                source_ids.clone()
             };
-
-            // Delete old fragmented memories (only when not preserving)
-            for id in &ids_to_delete {
-                if let Err(e) = self.store.delete_memory(id).await {
-                    tracing::warn!("  Failed to delete old memory {}: {}", id, e);
-                }
-            }
 
             // Store the consolidated summary with its own embedded vector.
             // Inherit memory_type from the source memories so the summary's
@@ -1891,7 +1895,7 @@ impl SlumberEngine {
                     _ => 0,
                 }
             };
-            let inherited_type = memories
+            let inherited_type = sorted
                 .iter()
                 .map(|m| m.memory_type.as_str())
                 .max_by_key(|t| type_priority(t))
@@ -1904,11 +1908,16 @@ impl SlumberEngine {
                     &id,
                     &summary,
                     &summary_vector,
-                    None,
+                    realm_id.as_deref(),
                     Some(realm_name),
                     1.0,
-                    None,                // source_file: consolidated summaries have no file origin
+                    None, // source_file: consolidated summaries have no file origin
                     Some(inherited_type), // inherit memory_type from sources for matching Weibull decay
+                    &crate::storage::qdrant::ConsolidationMetadata {
+                        source_ids: source_ids.clone(),
+                        source_fingerprint: super::dedup::source_fingerprint(&sorted),
+                        visibility: visibility.to_string(),
+                    },
                 )
                 .await
             {
@@ -1920,9 +1929,14 @@ impl SlumberEngine {
                 continue;
             }
 
+            // Never delete sources before the replacement was durably stored.
+            for id in &ids_to_delete {
+                self.store.delete_memory(id).await?;
+            }
+
             tracing::info!(
                 "  Consolidated {} memories → 1 summary in '{}'",
-                memories.len(),
+                sorted.len(),
                 realm_name
             );
             consolidated += 1;

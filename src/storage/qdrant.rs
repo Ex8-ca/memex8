@@ -28,6 +28,9 @@ pub struct MemoryPoint {
     pub chunk_type: String,
     pub heading: Option<String>,
     pub source_hash: String,
+    /// Direct sources of a consolidated summary. Empty for legacy points.
+    #[serde(default)]
+    pub consolidated_from: Vec<String>,
     /// IDs of semantically associated memories.
     #[serde(default)]
     pub related_memory_ids: Vec<String>,
@@ -78,6 +81,13 @@ pub struct MemoryWithVector {
     #[serde(flatten)]
     pub memory: MemoryPoint,
     pub vector: Vec<f32>,
+}
+
+/// Typed provenance options prevent accidental overwrites of core payload fields.
+pub struct ConsolidationMetadata {
+    pub source_ids: Vec<String>,
+    pub source_fingerprint: String,
+    pub visibility: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,6 +309,7 @@ fn memory_to_payload(mem: &MemoryPoint) -> Payload {
         "chunk_type": mem.chunk_type,
         "heading": mem.heading,
         "source_hash": mem.source_hash,
+        "consolidated_from": mem.consolidated_from,
         "related_memory_ids": mem.related_memory_ids,
         "association_strengths": mem.association_strengths,
         "reaction_score": mem.reaction_score,
@@ -341,6 +352,7 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
         chunk_type: map_str(map, "chunk_type").unwrap_or_default(),
         heading: map_str(map, "heading"),
         source_hash: map_str(map, "source_hash").unwrap_or_default(),
+        consolidated_from: map_str_vec(map, "consolidated_from"),
         related_memory_ids: map_str_vec(map, "related_memory_ids"),
         association_strengths: map_f32_vec(map, "association_strengths"),
         reaction_score: map_f32(map, "reaction_score"),
@@ -577,6 +589,7 @@ impl QdrantStore {
             chunk_type: chunk_type.to_string(),
             heading: heading.map(|s| s.to_string()),
             source_hash: source_hash.to_string(),
+            consolidated_from: Vec::new(),
             related_memory_ids: vec![],
             association_strengths: vec![],
             reaction_score,
@@ -699,6 +712,7 @@ impl QdrantStore {
         importance: f32,
         source_file: Option<&str>,
         memory_type: Option<&str>,
+        metadata: &ConsolidationMetadata,
     ) -> anyhow::Result<()> {
         let ingested_at = chrono::Utc::now().to_rfc3339();
 
@@ -712,14 +726,15 @@ impl QdrantStore {
             "ingested_at": ingested_at,
             "last_accessed": ingested_at,
             "source_file": source_file.unwrap_or(""),
-            "source_hash": "",
+            "source_hash": metadata.source_fingerprint,
             "chunk_type": "consolidated",
+            "consolidated_from": metadata.source_ids,
             "related_memory_ids": Vec::<String>::new(),
             "association_strengths": Vec::<f32>::new(),
             "reaction_score": 0.0f32,
             "topic_clusters": Vec::<String>::new(),
             "memory_type": memory_type.unwrap_or("general"),
-            "visibility": "private",
+            "visibility": normalize_visibility(&metadata.visibility),
         })
         .try_into()
         .unwrap_or_default();
@@ -945,7 +960,7 @@ impl QdrantStore {
             .collect())
     }
 
-    async fn scroll_memories_internal(
+    pub(crate) async fn scroll_memories_internal(
         &self,
         with_vectors: bool,
     ) -> anyhow::Result<Vec<MemoryPointWithVector>> {
@@ -1727,6 +1742,7 @@ mod tests {
             chunk_type: "manual".into(),
             heading: None,
             source_hash: "".into(),
+            consolidated_from: vec!["source-a".into(), "source-b".into()],
             related_memory_ids: vec![],
             association_strengths: vec![],
             reaction_score: 0.0,
@@ -1752,6 +1768,7 @@ mod tests {
 
         let decoded = memory_from_payload("test-1", obj);
         assert_eq!(decoded.visibility, "public");
+        assert_eq!(decoded.consolidated_from, original.consolidated_from);
     }
 
     #[test]
@@ -1763,6 +1780,7 @@ mod tests {
         map.insert("content".into(), json!("legacy"));
         map.insert("realm_name".into(), json!("general"));
         let decoded = memory_from_payload("legacy-1", &map);
+        assert!(decoded.consolidated_from.is_empty());
         assert_eq!(decoded.visibility, "private");
     }
 }

@@ -354,6 +354,7 @@ memex8 watch add .   # Persistent file watcher
 memex8 search "query" # Semantic search
 memex8 recall        # Wakeup context (top memories)
 memex8 slumber status # Slumber status
+memex8 slumber inspect-duplicates # Read-only candidate report; skips all other phases
 memex8 slumber trigger # Run maintenance now
 memex8 doctor        # Diagnose issues
 memex8 serve         # Start REST API server
