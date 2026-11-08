@@ -14,7 +14,11 @@ pub async fn backup(engine: &Engine, output_path: Option<&str>) -> anyhow::Resul
     let backup_dir = expand_path(output_path.unwrap_or(DEFAULT_BACKUP_DIR));
     fs::create_dir_all(&backup_dir)?;
 
-    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let timestamp = format!(
+        "{}_{}",
+        chrono::Utc::now().format("%Y%m%d_%H%M%S"),
+        uuid::Uuid::new_v4()
+    );
     let filename = format!("memex8_backup_{}.tar.gz", timestamp);
     let backup_path = backup_dir.join(&filename);
 
@@ -38,7 +42,9 @@ pub async fn backup(engine: &Engine, output_path: Option<&str>) -> anyhow::Resul
 
     // Create tarball
     tracing::info!("Creating tarball...");
-    create_tarball(&temp_dir, &backup_path)?;
+    let partial_path = backup_path.with_extension("partial");
+    create_tarball(&temp_dir, &partial_path)?;
+    fs::rename(&partial_path, &backup_path)?;
 
     // Clean up temp directory
     let _ = fs::remove_dir_all(&temp_dir);
@@ -82,12 +88,19 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
     }
 
     // Extract tarball to temp directory
-    let temp_dir = std::env::temp_dir().join("memex8_restore");
-    let _ = fs::remove_dir_all(&temp_dir);
+    let temp_dir = std::env::temp_dir().join(format!("memex8_restore_{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&temp_dir)?;
 
     tracing::info!("Extracting backup...");
     extract_tarball(&path, &temp_dir)?;
+
+    // Validate all required exports before the first database write.
+    let _: Vec<crate::storage::qdrant::MemoryWithVector> =
+        serde_json::from_str(&fs::read_to_string(temp_dir.join("memories.json"))?)?;
+    let _: Vec<crate::storage::qdrant::RealmPoint> =
+        serde_json::from_str(&fs::read_to_string(temp_dir.join("realms.json"))?)?;
+    let _: Vec<crate::storage::qdrant::GraphEdge> =
+        serde_json::from_str(&fs::read_to_string(temp_dir.join("graph_edges.json"))?)?;
 
     let mut restored = 0;
 
@@ -99,32 +112,7 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
             serde_json::from_str(&content)?;
 
         for m in &memories {
-            let realm_id = m.memory.realm_id.as_deref().unwrap_or("");
-            let reaction_score = crate::engine::reactions::infer_reaction(&m.memory.content);
-            engine
-                .store()
-                .store_memory(
-                    &m.memory.id,
-                    &m.vector,
-                    &m.memory.content,
-                    m.memory.heading.as_deref(),
-                    m.memory.source_file.as_deref(),
-                    realm_id,
-                    &m.memory.realm_name,
-                    &m.memory.source_hash,
-                    &m.memory.chunk_type,
-                    &m.memory.memory_type,
-                    reaction_score,
-                    // Backup restore preserves the original visibility
-                    // when serialized correctly; fall back to "private"
-                    // for legacy backups that pre-date this field.
-                    if m.memory.visibility.is_empty() {
-                        "private"
-                    } else {
-                        &m.memory.visibility
-                    },
-                )
-                .await?;
+            engine.store().restore_memory(m).await?;
             restored += 1;
         }
         tracing::info!("Restored {} memories", memories.len());
@@ -261,7 +249,8 @@ fn create_tarball(source_dir: &Path, output: &Path) -> anyhow::Result<()> {
     let encoder = GzEncoder::new(file, Compression::default());
     let mut tar = Builder::new(encoder);
     tar.append_dir_all(".", source_dir)?;
-    tar.finish()?;
+    let encoder = tar.into_inner()?;
+    encoder.finish()?.sync_all()?;
     Ok(())
 }
 
@@ -301,5 +290,25 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     } else {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_finishes_gzip_and_round_trips_contents() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let restored = root.path().join("restored");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&restored).unwrap();
+        let original = br#"[{"id":"example","tags":["project:demo"],"importance":0.42}]"#;
+        fs::write(source.join("memories.json"), original).unwrap();
+        let archive = root.path().join("backup.tar.gz");
+        create_tarball(&source, &archive).unwrap();
+        extract_tarball(&archive, &restored).unwrap();
+        assert_eq!(fs::read(restored.join("memories.json")).unwrap(), original);
     }
 }

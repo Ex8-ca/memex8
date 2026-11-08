@@ -203,13 +203,13 @@ async fn handle_tool_call(
             let visibility = arguments.get("visibility").and_then(|v| v.as_str());
 
             let memory_type = arguments.get("memory_type").and_then(|v| v.as_str());
-
+            let source = arguments.get("source").and_then(|v| v.as_str());
             let id = engine
                 .store_memory(
                     content,
                     tags,
                     realm_hint,
-                    Some("mcp"),
+                    source.or(Some("mcp")),
                     visibility,
                     memory_type,
                 )

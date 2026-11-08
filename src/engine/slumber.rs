@@ -1729,6 +1729,10 @@ impl SlumberEngine {
         let mut by_realm: std::collections::BTreeMap<_, Vec<&MemoryPoint>> =
             std::collections::BTreeMap::new();
         for mem in &all {
+            // Keep project scope/source protections from the shared-memory work.
+            if mem.tags.iter().any(|tag| tag.starts_with("project:")) {
+                continue;
+            }
             let key = (
                 mem.realm_id.clone(),
                 mem.realm_name.clone(),

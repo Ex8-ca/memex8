@@ -15,3 +15,6 @@ __pycache__/
 
 # Local secret env files (replaces ~/.hermes/.env mount path; see #10)
 .env.memex8
+
+# Private local memex8 environment files
+.env.memex8*

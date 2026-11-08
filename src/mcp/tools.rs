@@ -26,7 +26,8 @@ pub fn list_tools() -> Vec<serde_json::Value> {
                     "content": { "type": "string", "description": "Memory content (markdown)" },
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "realm_hint": { "type": "string" },
-                    "source": { "type": "string" }
+                    "source": { "type": "string" },
+                    "visibility": { "type": "string", "enum": ["private", "public"], "default": "private" }
                 },
                 "required": ["content"]
             }),
