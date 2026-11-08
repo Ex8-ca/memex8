@@ -5,12 +5,14 @@ pub fn list_tools() -> Vec<serde_json::Value> {
     vec![
         tool(
             "memex8_search",
-            "Semantic search across memories. Use compact=true, then memex8_get(ids=[...]) for the ones that matter.",
+            "Semantic search across memories with a retrieval-strength coverage heuristic. Use compact=true, then memex8_get(ids=[...]) for the ones that matter.",
             json!({
                 "type": "object",
                 "properties": {
                     "compact": { "type": "boolean", "default": false },
                     "query": { "type": "string", "description": "Search query" },
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Require all tags"},
+                    "visibility": {"type": "string", "enum": ["private", "public"]},
                     "limit": { "type": "number", "description": "Max results (default 10)" },
                     "realm": { "type": "string", "description": "Filter to realm name" },
                     "min_score": { "type": "number", "description": "Minimum similarity (0-1, default 0.3)" }
@@ -203,6 +205,21 @@ pub fn boolean_argument(arguments: &serde_json::Value, name: &str) -> anyhow::Re
         })
         .transpose()
         .map(|value| value.unwrap_or(false))
+}
+
+/// Preserve structured results while supplying standard MCP text content.
+pub fn with_coverage(
+    mut result: serde_json::Value,
+    coverage: &crate::engine::coverage::SearchCoverage,
+) -> anyhow::Result<serde_json::Value> {
+    result["coverage"] = serde_json::to_value(coverage)?;
+    let text = format!(
+        "{}\n{}",
+        coverage.first_line(),
+        serde_json::to_string(&result)?
+    );
+    result["content"] = json!([{"type": "text", "text": text}]);
+    Ok(result)
 }
 
 /// Shared dispatch and validation for both MCP transports.

@@ -524,10 +524,50 @@ Full payloads include source, visibility, certification, and provenance metadata
 The routes use the existing API authentication; batch retrieval has the same access
 as authenticated single-memory retrieval.
 
-The disposable long-body fixture measured 12,230 bytes for full search versus
-1,406 bytes for compact search (11.5%) at the same result count. This measures
+The disposable long-body fixture measured 12,399 bytes for full search versus
+1,575 bytes for compact search (12.7%) at the same result count. This measures
 serialized UTF-8 JSON bytes, not tokens; savings depend on body and summary lengths.
 No configuration changes or data migration are required.
+
+### Search coverage
+
+Every REST search response includes `coverage`, for full and compact rows, including
+empty result sets and offset pages:
+
+```json
+{"coverage":{"level":"none","best_score":0.31,"results_above_min":0,"suggested_realms":["Projects"],"hint":"No strong retrieval match. Try broader terms, a suggested realm, or your configured digest."},"results":[],"total":0,"limit":10,"offset":0}
+```
+
+Coverage is a retrieval-strength heuristic; it does not establish whether the
+sources can answer the query. `best_score` is the best raw cosine score among up
+to 100 eligible Qdrant candidates, before `min_score`, ranking boosts and
+pagination. It is null if there are no eligible candidates. `results_above_min`
+counts matches meeting `min_score` in that bounded set, rather than a
+collection-wide total or the size of the returned page. A high-coverage query can
+therefore return an empty offset page or no rows under a stricter `min_score`.
+
+Configure `[search.coverage] high = 0.55` and `partial = 0.40`; values must satisfy
+`0 <= partial < high <= 1`. Missing sections/keys receive these defaults. Scores
+at or above high give `high`, at or above partial give `partial`, otherwise `none`.
+These are initial thresholds calibrated on deterministic known-hit/miss fixtures;
+production embeddings and workloads may need different thresholds.
+
+The same query embedding drives results, a payload-free raw Qdrant probe, and
+realm-centroid scoring. Coverage uses that probe even when returned results use
+TurboVec, so compressed ranking scores and verification/upvote/recency boosts do
+not change its meaning. This adds a Qdrant search to the compressed retrieval path.
+Realm suggestions rank valid centroids by cosine, return at most three names, and
+check live members against realm, all requested tags, and visibility. Missing,
+zero, incompatible, or orphan centroids are skipped; unavailable realm data omits
+hints while retaining search results and coverage. Cached centroids can lag recent
+writes until maintenance recomputes them.
+
+REST search now applies combined realm/tag/visibility filters before Qdrant
+candidate selection, and checks realm/visibility on TurboVec payloads. Rust MCP
+and Hermes search expose the same optional tags and visibility filters. They print
+`coverage=... best=... results_above_min=... try realms: ...` before result text and
+retain the structured coverage metadata. Hermes can still use older servers
+without coverage; automatic prefetch and injected context remain unchanged.
 
 ### Archived duplicate removal
 

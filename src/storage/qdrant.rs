@@ -969,6 +969,99 @@ impl QdrantStore {
         Ok(())
     }
 
+    fn retrieval_filter(
+        realm: Option<&str>,
+        tags: Option<&[String]>,
+        visibility: Option<&str>,
+    ) -> Filter {
+        let mut conditions = Vec::new();
+        if let Some(realm) = realm {
+            conditions.push(Condition::matches("realm_name", realm.to_string()));
+        }
+        for tag in tags.unwrap_or_default() {
+            conditions.push(Condition::matches("tags", tag.clone()));
+        }
+        if let Some(visibility) = visibility {
+            conditions.push(Condition::matches(
+                "visibility",
+                normalize_visibility(visibility).to_string(),
+            ));
+        }
+        Filter::must(conditions)
+    }
+
+    pub async fn coverage_scores(
+        &self,
+        vector: &[f32],
+        limit: usize,
+        realm: Option<&str>,
+        tags: Option<&[String]>,
+        visibility: Option<&str>,
+    ) -> anyhow::Result<Vec<f32>> {
+        let result = self
+            .client
+            .search_points(
+                SearchPointsBuilder::new(MEMORIES, vector, limit as u64)
+                    .filter(Self::retrieval_filter(realm, tags, visibility))
+                    .with_payload(false)
+                    .with_vectors(false),
+            )
+            .await?;
+        Ok(result.result.into_iter().map(|r| r.score).collect())
+    }
+
+    pub async fn has_matching_memory(
+        &self,
+        realm: &str,
+        tags: Option<&[String]>,
+        visibility: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let result = self
+            .client
+            .scroll(
+                ScrollPointsBuilder::new(MEMORIES)
+                    .limit(1)
+                    .filter(Self::retrieval_filter(Some(realm), tags, visibility))
+                    .with_payload(false)
+                    .with_vectors(false),
+            )
+            .await?;
+        Ok(!result.result.is_empty())
+    }
+
+    pub async fn search_filtered(
+        &self,
+        vector: &[f32],
+        limit: usize,
+        min_score: f32,
+        realm: Option<&str>,
+        tags: Option<&[String]>,
+        visibility: Option<&str>,
+    ) -> anyhow::Result<Vec<SearchResult>> {
+        let result = self
+            .client
+            .search_points(
+                SearchPointsBuilder::new(MEMORIES, vector, limit as u64)
+                    .filter(Self::retrieval_filter(realm, tags, visibility))
+                    .with_payload(true)
+                    .with_vectors(false),
+            )
+            .await?;
+        Ok(result
+            .result
+            .into_iter()
+            .filter(|r| r.score >= min_score)
+            .map(|r| {
+                let id = point_id_to_string(r.id.as_ref());
+                SearchResult {
+                    payload: memory_from_payload(&id, &map_to_json(&r.payload)),
+                    id,
+                    score: r.score,
+                }
+            })
+            .collect())
+    }
+
     pub async fn search(
         &self,
         query_vector: &[f32],

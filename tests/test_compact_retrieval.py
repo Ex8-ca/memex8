@@ -50,7 +50,7 @@ class CompactRetrievalTests(unittest.TestCase):
             self.assertEqual(len(full["results"]), 3)
             self.assertEqual({r["id"] for r in compact["results"]}, set(ids))
             self.assertTrue(all(set(r) == FULL_KEYS for r in full["results"]))
-            self.assertEqual(set(full), {"results", "total", "limit", "offset"})
+            self.assertEqual(set(full), {"results", "total", "limit", "offset", "coverage"})
             for row in compact["results"]:
                 self.assertEqual(set(row), COMPACT_KEYS)
                 self.assertEqual(row["snippet"], snippets[ids.index(row["id"])])

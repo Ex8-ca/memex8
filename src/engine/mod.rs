@@ -2,6 +2,7 @@ pub mod associations;
 pub mod backup;
 pub mod chunker;
 pub mod consolidation;
+pub mod coverage;
 pub mod decay;
 pub mod dedup;
 pub mod dedup_removal;
@@ -597,70 +598,69 @@ impl Engine {
         offset: usize,
         min_score: f32,
     ) -> anyhow::Result<Vec<MemoryResult>> {
-        let embedder = self.make_embedder()?;
-        let query_vector = embedder.embed(query).await?;
+        let query_vector = self.make_embedder()?.embed(query).await?;
+        self.search_embedded(
+            query,
+            realm,
+            tags,
+            limit,
+            offset,
+            min_score,
+            None,
+            &query_vector,
+        )
+        .await
+    }
 
-        // Try TurboVec search first (fast, compressed) when available and no tag filters
-        let results = if tags.is_none() || tags.as_ref().map_or(true, |t| t.is_empty()) {
-            let tv_guard = self.turbovec_index.read().await;
-            if let Some(ref tv) = *tv_guard {
-                // TurboVec path: search compressed index, fetch payloads from Qdrant
-                let fetch_limit = (limit + offset) * 4; // Over-fetch to account for filtering
-                let (scores, indices) = tv.search(&query_vector, fetch_limit);
-                let ids = tv.resolve_ids(&indices);
-
-                // Fetch full payloads from Qdrant by ID
-                let mut fetched: Vec<_> = Vec::new();
-                for (i, &id) in ids.iter().enumerate() {
-                    if i >= scores.len() {
-                        break;
-                    }
-                    if let Ok(Some(point)) = self.store.get_memory(id).await {
-                        let score = scores[i];
-                        if score >= min_score {
-                            if realm.map_or(true, |re| point.realm_name == re) {
-                                fetched.push((score, point));
-                            }
-                        }
+    async fn search_embedded(
+        &self,
+        query: &str,
+        realm: Option<&str>,
+        tags: Option<&[String]>,
+        limit: usize,
+        offset: usize,
+        min_score: f32,
+        visibility: Option<&str>,
+        query_vector: &[f32],
+    ) -> anyhow::Result<Vec<MemoryResult>> {
+        let tv_guard = self.turbovec_index.read().await;
+        let results = if let Some(tv) = tv_guard
+            .as_ref()
+            .filter(|_| tags.is_none_or(|t| t.is_empty()))
+        {
+            let fetch_limit = (limit + offset) * 4;
+            let (scores, indices) = tv.search(query_vector, fetch_limit);
+            let ids = tv.resolve_ids(&indices);
+            let mut fetched = Vec::new();
+            for (id, score) in ids.iter().zip(scores) {
+                if let Some(point) = self.store.get_memory(id).await? {
+                    if score >= min_score
+                        && realm.is_none_or(|r| point.realm_name == r)
+                        && visibility.is_none_or(|v| {
+                            point.visibility == crate::storage::qdrant::normalize_visibility(v)
+                        })
+                    {
+                        fetched.push((score, point));
                     }
                 }
-                fetched.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                fetched
-            } else {
-                // TurboVec not loaded — fall back to Qdrant
-                let qr = if let Some(tags) = tags {
-                    if tags.is_empty() {
-                        self.store
-                            .search(&query_vector, limit + offset, min_score, realm)
-                            .await?
-                    } else {
-                        self.store
-                            .search_by_tags(&query_vector, tags, limit + offset)
-                            .await?
-                            .into_iter()
-                            .filter(|r| r.score >= min_score)
-                            .filter(|r| realm.map_or(true, |re| r.payload.realm_name == re))
-                            .collect()
-                    }
-                } else {
-                    self.store
-                        .search(&query_vector, limit + offset, min_score, realm)
-                        .await?
-                };
-                qr.into_iter().map(|r| (r.score, r.payload)).collect()
             }
+            fetched
         } else {
-            // Tag filters active — must use Qdrant (TurboVec has no tag support)
-            let qr = self
-                .store
-                .search_by_tags(&query_vector, tags.as_ref().unwrap(), limit + offset)
+            self.store
+                .search_filtered(
+                    query_vector,
+                    limit + offset,
+                    min_score,
+                    realm,
+                    tags,
+                    visibility,
+                )
                 .await?
                 .into_iter()
-                .filter(|r| r.score >= min_score)
-                .filter(|r| realm.map_or(true, |re| r.payload.realm_name == re))
-                .collect::<Vec<_>>();
-            qr.into_iter().map(|r| (r.score, r.payload)).collect()
+                .map(|r| (r.score, r.payload))
+                .collect()
         };
+        drop(tv_guard);
 
         // Phase A.2: soft down-weight by verification status. Applies to ALL
         // retrieval paths above (TurboVec, Qdrant fallback, tag-filter).
