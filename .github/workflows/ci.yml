@@ -65,6 +65,7 @@ jobs:
           python3 tests/test_certification.py
           python3 tests/test_consolidation.py
           python3 tests/test_dedup_removal.py
+          python3 tests/test_compact_retrieval.py
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
@@ -109,6 +110,7 @@ jobs:
           python3 plugins/memex8/tests/test_certification.py
           python3 plugins/memex8/tests/test_consolidation.py
           python3 plugins/memex8/tests/test_dedup_removal.py
+          python3 plugins/memex8/tests/test_compact_retrieval.py
 
       - name: Validate plugin.yaml
         run: |

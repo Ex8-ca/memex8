@@ -1,5 +1,25 @@
 # memex8 Implementation Status
 
+## 2026-11-08 — Compact retrieval and batch get (roadmap E)
+
+- Added opt-in `compact=false` search/recall parameters to REST, both Rust MCP
+  transports, and Hermes. A shared projection emits seven metadata fields with
+  Unicode-safe snippets capped at 160 characters, preferring nonblank summaries.
+  Full response shapes, ranking, pagination, and access tracking are preserved.
+- Added GET query search alongside existing POST JSON search and authenticated
+  ordered REST batch get. MCP/Hermes `memex8_get` accepts one of `memory_id`,
+  legacy `id`, or `ids` (1–50), rejects ambiguous arguments, preserves repeated
+  found IDs and lists unavailable IDs in `not_found`. Batch reads full payloads
+  with one Qdrant request. No new config keys or payload migrations.
+- Tool descriptions teach compact search followed by selective full retrieval.
+  Hermes auto-prefetch and `_build_context_block` remain unchanged.
+- Validation: formatting/build and Rust suites passed (74 lib, 74 binary, 38 core
+  integration; existing kmeans skip). Disposable-Qdrant tests passed for REST,
+  stdio MCP, Qdrant/tag-filter/TurboVec paths, Unicode snippets, full payloads,
+  batch ordering/repetitions/missing IDs/limits, auth, and default compatibility.
+  Long-body fixture: full 12,230 vs compact 1,406 serialized UTF-8 JSON bytes (11.5%).
+  Hermes transport/schema/dispatch tests passed. No deployment or live-data changes.
+
 ## 2026-11-08 — Safe duplicate removal (roadmap D)
 
 - Full slumber supports archived removal when `dedup_dry_run=false`; the shipped

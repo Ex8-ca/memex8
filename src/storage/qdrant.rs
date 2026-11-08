@@ -781,6 +781,56 @@ impl QdrantStore {
         Ok(None)
     }
 
+    /// Fetch one Qdrant batch, then restore caller order (including repeated IDs).
+    /// Malformed UUIDs are unavailable rather than turning a whole batch into an error.
+    pub async fn get_memories(
+        &self,
+        ids: &[String],
+    ) -> anyhow::Result<crate::engine::retrieval::BatchGetResult> {
+        use crate::engine::retrieval::{validate_batch_ids, BatchGetResult};
+        validate_batch_ids(ids).map_err(anyhow::Error::msg)?;
+        let normalized: Vec<_> = ids
+            .iter()
+            .map(|id| uuid::Uuid::parse_str(id).ok().map(|id| id.to_string()))
+            .collect();
+        let unique: std::collections::BTreeSet<_> = normalized.iter().flatten().cloned().collect();
+        let mut found = std::collections::HashMap::new();
+        if !unique.is_empty() {
+            let response = self
+                .client
+                .get_points(
+                    GetPointsBuilder::new(
+                        MEMORIES,
+                        unique
+                            .into_iter()
+                            .map(Into::into)
+                            .collect::<Vec<qdrant_client::qdrant::PointId>>(),
+                    )
+                    .with_payload(true)
+                    .with_vectors(false),
+                )
+                .await?;
+            for point in response.result {
+                let id = point_id_to_string(point.id.as_ref());
+                found.insert(
+                    id.clone(),
+                    memory_from_payload(&id, &map_to_json(&point.payload)),
+                );
+            }
+        }
+        let mut result = BatchGetResult {
+            memories: Vec::new(),
+            not_found: Vec::new(),
+        };
+        for (requested, normalized) in ids.iter().zip(normalized) {
+            match normalized.and_then(|id| found.get(&id)) {
+                Some(memory) => result.memories.push(memory.clone()),
+                None => result.not_found.push(requested.clone()),
+            }
+        }
+        Ok(result)
+    }
+
     /// Shared guard for local maintenance/content replacement.
     pub async fn maintenance_guard(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
         self.certification_gate.write().await
