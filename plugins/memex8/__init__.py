@@ -268,14 +268,18 @@ class _Client:
             raise RuntimeError(f"memex8 {method} {path} failed ({resp.status_code}): {msg or payload}")
         return payload
 
-    def search(self, query: str, top_k: int = 8, realm: str = None, min_score: float = 0.3) -> dict:
+    def search(self, query: str, top_k: int = 8, realm: str = None, min_score: float = 0.3, compact: bool = False) -> dict:
         body = {"query": query, "limit": top_k, "min_score": min_score}
+        if compact:
+            body["compact"] = True
         if realm:
             body["realm"] = realm
         return self.request("POST", "/api/v1/memories/search", json_body=body, timeout=_DEFAULT_SEARCH_TIMEOUT)
 
-    def recall(self, top_k: int = 8, realm: str = None) -> dict:
+    def recall(self, top_k: int = 8, realm: str = None, compact: bool = False) -> dict:
         params = {"limit": top_k}
+        if compact:
+            params["compact"] = "true"
         if realm:
             params["realm"] = realm
         return self.request("GET", "/api/v1/memories/recall", params=params)
@@ -315,6 +319,9 @@ class _Client:
             # garbage here is safe.
             body["visibility"] = visibility
         return self.request("POST", "/api/v1/memories", json_body=body)
+
+    def batch_get(self, ids: list) -> dict:
+        return self.request("POST", "/api/v1/memories/batch-get", json_body={"ids": ids})
 
     def restore_duplicate(self, operation_id: str) -> dict:
         return self.request("POST", f"/api/v1/dedup/{operation_id}/restore")
@@ -414,11 +421,13 @@ SEARCH_SCHEMA = {
     "description": (
         "Search your long-term memory by meaning. Finds relevant facts, "
         "project context, and user preferences stored across all past sessions. "
-        "Use this before making decisions to check existing knowledge."
+        "Use this before making decisions to check existing knowledge. "
+        "Use compact=true, then memex8_get(ids=[...]) for the ones that matter."
     ),
     "parameters": {
         "type": "object",
         "properties": {
+            "compact": {"type": "boolean", "default": False},
             "query": {"type": "string", "description": "What to search for."},
             "top_k": {"type": "integer", "description": "Max results (default: 8, max: 20)."},
             "realm": {"type": "string", "description": "Filter to a specific realm (optional)."},
@@ -433,11 +442,13 @@ RECALL_SCHEMA = {
     "description": (
         "Get high-importance memories — a summary of what matters most. "
         "Good for session startup context or when you need a refresher on "
-        "the user's preferences and environment."
+        "the user's preferences and environment. "
+        "Use compact=true, then memex8_get(ids=[...]) for the ones that matter."
     ),
     "parameters": {
         "type": "object",
         "properties": {
+            "compact": {"type": "boolean", "default": False},
             "top_k": {"type": "integer", "description": "Max results (default: 8, max: 20)."},
             "realm": {"type": "string", "description": "Filter to a specific realm (optional)."},
         },
@@ -548,13 +559,15 @@ REALMS_SCHEMA = {
 
 GET_SCHEMA = {
     "name": "memex8_get",
-    "description": "Retrieve a specific memory by its ID.",
+    "description": "Fetch full memories selected from compact search/recall. Pass memory_id (legacy id also accepted) or ids (1–50). Batch results preserve order and report unavailable IDs in not_found.",
     "parameters": {
         "type": "object",
         "properties": {
-            "memory_id": {"type": "string", "description": "Memory UUID to retrieve."},
+            "memory_id": {"type": "string", "minLength": 1},
+            "id": {"type": "string", "minLength": 1, "description": "Alias for memory_id."},
+            "ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 50},
         },
-        "required": ["memory_id"],
+        "oneOf": [{"required": ["memory_id"]}, {"required": ["id"]}, {"required": ["ids"]}],
     },
 }
 
@@ -1532,6 +1545,9 @@ class Memex8MemoryProvider(MemoryProvider):
 
     def _dispatch(self, client: _Client, tool_name: str, args: dict) -> Any:
         if tool_name == "memex8_search":
+            compact = args.get("compact", False)
+            if not isinstance(compact, bool):
+                return {"error": "compact must be a boolean"}
             query = args.get("query", "")
             if not query:
                 return {"error": "query is required"}
@@ -1540,13 +1556,18 @@ class Memex8MemoryProvider(MemoryProvider):
                 top_k=min(int(args.get("top_k", _DEFAULT_SEARCH_TOP_K)), 20),
                 realm=args.get("realm"),
                 min_score=float(args.get("min_score", _DEFAULT_RECALL_MIN_SCORE)),
+                **({"compact": True} if compact else {}),
             )
             return results.get("results", results) if isinstance(results, dict) else results
 
         if tool_name == "memex8_recall":
+            compact = args.get("compact", False)
+            if not isinstance(compact, bool):
+                return {"error": "compact must be a boolean"}
             results = client.recall(
                 top_k=min(int(args.get("top_k", _DEFAULT_RECALL_TOP_K)), 20),
                 realm=args.get("realm"),
+                **({"compact": True} if compact else {}),
             )
             return results.get("results", results) if isinstance(results, dict) else results
 
@@ -1595,9 +1616,16 @@ class Memex8MemoryProvider(MemoryProvider):
             return client.realms()
 
         if tool_name == "memex8_get":
-            memory_id = args.get("memory_id", "")
-            if not memory_id:
-                return {"error": "memory_id is required"}
+            if sum(key in args for key in ("memory_id", "id", "ids")) != 1:
+                return {"error": "Pass exactly one of memory_id, id, or ids"}
+            if "ids" in args:
+                ids = args["ids"]
+                if not isinstance(ids, list) or not 1 <= len(ids) <= 50 or not all(isinstance(id_, str) for id_ in ids):
+                    return {"error": "ids must contain between 1 and 50 string memory IDs"}
+                return client.batch_get(ids)
+            memory_id = args.get("memory_id", args.get("id"))
+            if not isinstance(memory_id, str) or not memory_id:
+                return {"error": "memory_id must be a nonempty string"}
             return client.get_memory(memory_id)
 
         return {"error": f"Unknown tool: {tool_name}"}

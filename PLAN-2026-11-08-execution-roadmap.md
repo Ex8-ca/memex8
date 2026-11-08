@@ -1,7 +1,7 @@
 # memex8 improvement execution plan
 
 Date: 2026-11-08  
-Status: A merged; B validated in PR #26; C validated in PR #27; D locally validated; E–H pending
+Status: A–D merged; E locally validated; F–H pending
 Source: `PLAN-2026-11-08-trending-improvements.md` (original brief, preserved)
 
 ## Outcomes
@@ -156,16 +156,16 @@ protected points survive. Production deletion remains a separate rollout step.
 Branch: `feat/compact-search-batch-get`  
 Dependencies: baseline only; may be scheduled after A if retrieval is more urgent
 
-- [ ] Add `compact = false` to search and recall on all supported interfaces.
-- [ ] Share one compact representation:
+- [x] Add `compact = false` to search and recall on all supported interfaces.
+- [x] Share one compact representation:
   `{id, snippet, realm_name, score, ingested_at, memory_type, verification_status}`.
-- [ ] Use summary when available, otherwise content, with a consistent maximum of
+- [x] Use summary when available, otherwise content, with a consistent maximum of
   about 160 Unicode characters for either source. Cover emoji and multibyte text.
-- [ ] Add ordered REST batch get and `memex8_get(ids=[...])`, maximum 50 IDs, while
+- [x] Add ordered REST batch get and `memex8_get(ids=[...])`, maximum 50 IDs, while
   preserving `memory_id`. Reject simultaneous single/batch arguments. Preserve
   requested order including repeated found IDs; list unavailable IDs in `not_found`
   without disclosing inaccessible records.
-- [ ] Document the compact-search-then-fetch pattern in both tool descriptions.
+- [x] Document the compact-search-then-fetch pattern in both tool descriptions.
   Leave Hermes `_build_context_block` and automatic prefetch unchanged.
 
 Done when: existing clients retain their default response; batch get returns three
@@ -339,6 +339,18 @@ Draft PR: https://github.com/Ex8-ca/memex8/pull/27 (all three CI checks passed).
   recovery scenarios, and certification/inspection/plugin/backup/path/bridge
   regressions passed.
 - Future live rollout still requires candidate review and explicit removal enablement.
+
+### 2026-11-08 — Package E
+
+- Merged B, C and D in dependency order after required checks passed. Created
+  `feat/compact-search-batch-get` from updated main.
+- Added compact REST/MCP/Hermes search and recall, shared Unicode-safe snippets,
+  ordered full batch get (1–50 IDs), legacy single-ID aliases and validation.
+  Existing responses/prefetch remain compatible; no config keys or migrations.
+- Rust/format/build and disposable-Qdrant REST/stdio/index-path tests passed;
+  Hermes contracts passed. Representative UTF-8 JSON bytes measured 12,230 full
+  versus 1,406 compact (11.5%). No deployment or live-data changes.
+- Next package: F, query coverage and realm suggestions.
 
 ## First work session
 

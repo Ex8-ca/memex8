@@ -167,6 +167,7 @@ async fn handle_tool_call(
 
     match name {
         "memex8_search" => {
+            let compact = super::tools::boolean_argument(&arguments, "compact")?;
             let query = arguments
                 .get("query")
                 .and_then(|v| v.as_str())
@@ -184,7 +185,7 @@ async fn handle_tool_call(
             let results = engine
                 .search(query, realm, None, limit, 0, min_score)
                 .await?;
-            Ok(format_results(results))
+            Ok(format_results(results, compact))
         }
         "memex8_store" | "memex8_remember" => {
             let content = arguments
@@ -250,22 +251,16 @@ async fn handle_tool_call(
             Ok(json!({"content": [{"type": "text", "text": serde_json::to_string(&memory)?}]}))
         }
         "memex8_recall" => {
+            let compact = super::tools::boolean_argument(&arguments, "compact")?;
             let limit = arguments
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(10) as usize;
             let realm = arguments.get("realm").and_then(|v| v.as_str());
             let results = engine.recall(limit, realm).await?;
-            Ok(format_results(results))
+            Ok(format_results(results, compact))
         }
-        "memex8_get" => {
-            let id = arguments
-                .get("id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Missing 'id' parameter"))?;
-            let memory = engine.get_memory(id).await?;
-            Ok(json!({ "memory": memory }))
-        }
+        "memex8_get" => super::tools::get_memories(engine, &arguments).await,
         "memex8_ingest" => {
             let path = arguments
                 .get("path")
@@ -323,7 +318,11 @@ async fn handle_tool_call(
     }
 }
 
-fn format_results(results: Vec<crate::engine::MemoryResult>) -> serde_json::Value {
+fn format_results(results: Vec<crate::engine::MemoryResult>, compact: bool) -> serde_json::Value {
+    if compact {
+        let count = results.len();
+        return json!({"results": crate::engine::retrieval::RetrievalResults::new(results, true), "count": count});
+    }
     json!({
         "results": results
             .iter()

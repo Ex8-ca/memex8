@@ -15,6 +15,7 @@ pub mod quantizer;
 pub mod query_intent;
 pub mod reactions;
 pub mod realms;
+pub mod retrieval;
 pub mod scheduler;
 pub mod session;
 pub mod slumber;
@@ -31,6 +32,15 @@ use tokio::sync::RwLock;
 pub struct MemoryResult {
     pub id: String,
     pub content: String,
+    // Projection metadata stays internal so legacy full responses keep their shape.
+    #[serde(skip)]
+    pub(crate) summary: Option<String>,
+    #[serde(skip)]
+    pub(crate) ingested_at: String,
+    #[serde(skip)]
+    pub(crate) memory_type: String,
+    #[serde(skip)]
+    pub(crate) verification_status: String,
     pub heading: Option<String>,
     pub realm_name: String,
     pub importance: f32,
@@ -737,6 +747,10 @@ impl Engine {
             .map(|(score, p)| MemoryResult {
                 id: p.id,
                 content: p.content,
+                summary: p.summary,
+                ingested_at: p.ingested_at,
+                memory_type: p.memory_type,
+                verification_status: p.verification_status,
                 heading: p.heading,
                 realm_name: p.realm_name,
                 importance: p.importance,
@@ -830,6 +844,10 @@ impl Engine {
             .map(|(m, score)| MemoryResult {
                 id: m.id,
                 content: m.content,
+                summary: m.summary,
+                ingested_at: m.ingested_at,
+                memory_type: m.memory_type,
+                verification_status: m.verification_status,
                 heading: m.heading,
                 realm_name: m.realm_name,
                 importance: m.importance,

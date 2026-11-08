@@ -132,7 +132,12 @@ fn api_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/memories/search",
-            axum::routing::post(crate::api::routes::memories::search),
+            axum::routing::post(crate::api::routes::memories::search)
+                .get(crate::api::routes::memories::search_get),
+        )
+        .route(
+            "/memories/batch-get",
+            axum::routing::post(crate::api::routes::memories::batch_get),
         )
         .route(
             "/memories/recall",

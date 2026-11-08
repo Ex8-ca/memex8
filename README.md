@@ -398,11 +398,12 @@ memex8 stats         # System statistics
 |--------|----------|-------------|
 | `GET`  | `/api/v1/memories` | List all memories (sort: `ingested_at`, `importance`, `last_accessed`, `access_count`) |
 | `POST` | `/api/v1/memories` | Store a new memory |
-| `POST` | `/api/v1/memories/search` | Semantic search |
+| `GET`, `POST` | `/api/v1/memories/search` | Semantic search |
 | `GET`  | `/api/v1/memories/recall` | Top memories |
 | `GET`  | `/api/v1/memories/verification-summary` | Count memories by verification status (certified/verified/stale/contradicted/unverified) |
 | `POST` | `/api/v1/memories/{id}/certify` | Certify a memory; optional body `{ "by": "marc", "note": "Confirmed" }` |
 | `DELETE` | `/api/v1/memories/{id}/certify` | Revoke certification and resume normal lifecycle |
+| `POST` | `/api/v1/memories/batch-get` | Get 1–50 full memories in requested order; report unavailable IDs |
 | `POST` | `/api/v1/dedup/{operation_id}/restore` | Restore a removed duplicate from its journal |
 | `POST` | `/api/v1/memories/{id}/unconsolidate` | Restore consolidation sources, then remove the summary; safe to retry |
 | `GET`  | `/api/v1/memories/{id}` | Get memory by ID, including provenance |
@@ -491,6 +492,42 @@ coordinate within one process. Run maintenance/recovery through a single writer;
 independent processes sharing Qdrant require external serialization. Qdrant filters
 also recheck content, type, visibility, and certification immediately at deletion.
 No new configuration keys are required.
+
+### Compact retrieval
+
+Use `memex8_search(query="...", compact=true)` or `memex8_recall(compact=true)`
+for a small index, then `memex8_get(ids=["...", "..."])` to fetch the full memories
+that matter. This pattern is available in both MCP transports and the Hermes tools.
+The existing single-ID forms (`memory_id`, or legacy MCP `id`) still work; pass
+exactly one of `memory_id`, `id`, or `ids`.
+
+REST supports `compact: true` in the existing `POST /api/v1/memories/search` JSON
+body, `compact=true` in `GET /api/v1/memories/search?query=...`, and
+`GET /api/v1/memories/recall?compact=true`. The default is false, preserving full
+result shapes and the existing pagination envelope. Compact rows contain only:
+
+```json
+{"id":"...","snippet":"...","realm_name":"...","score":0.8,"ingested_at":"...","memory_type":"fact","verification_status":"verified"}
+```
+
+Snippets use a nonblank summary when available, otherwise content, capped at 160
+Unicode characters for either source. Search ranking, filters, pagination and access
+tracking run through the same engine paths for full and compact results. This
+reduces returned context; it does not avoid server-side payload retrieval or embedding.
+Hermes automatic prefetch and injected context remain unchanged.
+
+`POST /api/v1/memories/batch-get` accepts `{"ids":["...","..."]}` and returns
+`{"memories":[...],"not_found":[...]}`. It makes one Qdrant batch request, preserves
+the order and repetitions of found IDs, and reports missing/malformed UUIDs in
+`not_found` in requested order. Empty batches and batches over 50 IDs are rejected.
+Full payloads include source, visibility, certification, and provenance metadata.
+The routes use the existing API authentication; batch retrieval has the same access
+as authenticated single-memory retrieval.
+
+The disposable long-body fixture measured 12,230 bytes for full search versus
+1,406 bytes for compact search (11.5%) at the same result count. This measures
+serialized UTF-8 JSON bytes, not tokens; savings depend on body and summary lengths.
+No configuration changes or data migration are required.
 
 ### Archived duplicate removal
 

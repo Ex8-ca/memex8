@@ -1,5 +1,6 @@
 use crate::api::error::ApiError;
 use crate::api::server::AppState;
+use crate::engine::retrieval::{validate_batch_ids, BatchGetResult, RetrievalResults};
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,8 @@ pub struct SearchRequest {
     pub realm: Option<String>,
     pub tags: Option<Vec<String>>,
     pub min_score: Option<f32>,
+    #[serde(default)]
+    pub compact: bool,
     /// Optional visibility filter ("private" | "public").
     pub visibility: Option<String>,
 }
@@ -140,7 +143,7 @@ pub async fn search(
         .await?;
     let total = results.len();
     Ok(Json(SearchResponse {
-        results,
+        results: RetrievalResults::new(results, req.compact),
         total,
         limit,
         offset,
@@ -149,10 +152,31 @@ pub async fn search(
 
 #[derive(Serialize)]
 pub struct SearchResponse {
-    pub results: Vec<crate::engine::MemoryResult>,
+    pub results: RetrievalResults,
     pub total: usize,
     pub limit: usize,
     pub offset: usize,
+}
+
+/// GET query form complements the existing POST JSON search.
+pub async fn search_get(
+    state: State<Arc<AppState>>,
+    Query(req): Query<SearchRequest>,
+) -> Result<Json<SearchResponse>, ApiError> {
+    search(state, Json(req)).await
+}
+
+#[derive(Deserialize)]
+pub struct BatchGetRequest {
+    pub ids: Vec<String>,
+}
+
+pub async fn batch_get(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BatchGetRequest>,
+) -> Result<Json<BatchGetResult>, ApiError> {
+    validate_batch_ids(&req.ids).map_err(|message| ApiError::BadRequest(message.into()))?;
+    Ok(Json(state.engine.batch_get(&req.ids).await?))
 }
 
 pub async fn get(
@@ -189,7 +213,7 @@ pub async fn recall(
     let total = all_results.len();
     let results: Vec<_> = all_results.into_iter().skip(offset).take(limit).collect();
     Ok(Json(RecallResponse {
-        results,
+        results: RetrievalResults::new(results, params.compact),
         total,
         limit,
         offset,
@@ -198,7 +222,7 @@ pub async fn recall(
 
 #[derive(Serialize)]
 pub struct RecallResponse {
-    pub results: Vec<crate::engine::MemoryResult>,
+    pub results: RetrievalResults,
     pub total: usize,
     pub limit: usize,
     pub offset: usize,
@@ -231,6 +255,8 @@ pub struct TagSuggestion {
 
 #[derive(Deserialize)]
 pub struct RecallParams {
+    #[serde(default)]
+    pub compact: bool,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub realm: Option<String>,

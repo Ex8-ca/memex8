@@ -5,10 +5,11 @@ pub fn list_tools() -> Vec<serde_json::Value> {
     vec![
         tool(
             "memex8_search",
-            "Semantic search across memories",
+            "Semantic search across memories. Use compact=true, then memex8_get(ids=[...]) for the ones that matter.",
             json!({
                 "type": "object",
                 "properties": {
+                    "compact": { "type": "boolean", "default": false },
                     "query": { "type": "string", "description": "Search query" },
                     "limit": { "type": "number", "description": "Max results (default 10)" },
                     "realm": { "type": "string", "description": "Filter to realm name" },
@@ -49,10 +50,11 @@ pub fn list_tools() -> Vec<serde_json::Value> {
         ),
         tool(
             "memex8_recall",
-            "Get high-importance memories",
+            "Get high-importance memories. Use compact=true, then memex8_get(ids=[...]) for the ones that matter.",
             json!({
                 "type": "object",
                 "properties": {
+                    "compact": { "type": "boolean", "default": false },
                     "limit": { "type": "number", "description": "Max memories (default 10)" },
                     "realm": { "type": "string" }
                 }
@@ -60,11 +62,15 @@ pub fn list_tools() -> Vec<serde_json::Value> {
         ),
         tool(
             "memex8_get",
-            "Get memory by ID",
+            "Fetch full memories selected from compact search/recall. Pass memory_id (legacy id also accepted) or ids (1–50). Batch results preserve requested order and report unavailable IDs in not_found.",
             json!({
                 "type": "object",
-                "properties": { "id": { "type": "string" } },
-                "required": ["id"]
+                "properties": {
+                    "memory_id": { "type": "string", "minLength": 1 },
+                    "id": { "type": "string", "minLength": 1, "description": "Legacy alias for memory_id" },
+                    "ids": { "type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 50 }
+                },
+                "oneOf": [{"required": ["memory_id"]}, {"required": ["id"]}, {"required": ["ids"]}]
             }),
         ),
         tool(
@@ -199,9 +205,79 @@ pub fn boolean_argument(arguments: &serde_json::Value, name: &str) -> anyhow::Re
         .map(|value| value.unwrap_or(false))
 }
 
+/// Shared dispatch and validation for both MCP transports.
+pub async fn get_memories(
+    engine: &crate::engine::Engine,
+    args: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    match get_selection(args)? {
+        GetSelection::Single(id) => Ok(json!({"memory": engine.get_memory(&id).await?})),
+        GetSelection::Batch(ids) => Ok(serde_json::to_value(engine.batch_get(&ids).await?)?),
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum GetSelection {
+    Single(String),
+    Batch(Vec<String>),
+}
+
+pub fn get_selection(args: &serde_json::Value) -> anyhow::Result<GetSelection> {
+    let names = ["memory_id", "id", "ids"];
+    anyhow::ensure!(
+        names
+            .iter()
+            .filter(|name| args.get(**name).is_some())
+            .count()
+            == 1,
+        "Pass exactly one of memory_id, id, or ids"
+    );
+    if let Some(ids) = args.get("ids") {
+        let ids: Vec<String> = serde_json::from_value(ids.clone())?;
+        crate::engine::retrieval::validate_batch_ids(&ids).map_err(anyhow::Error::msg)?;
+        Ok(GetSelection::Batch(ids))
+    } else {
+        let id = args
+            .get("memory_id")
+            .or_else(|| args.get("id"))
+            .and_then(|id| id.as_str())
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("memory_id must be a nonempty string"))?;
+        Ok(GetSelection::Single(id.into()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn get_requires_one_selection_and_valid_batch_size() {
+        assert_eq!(
+            get_selection(&json!({"id": "a"})).unwrap(),
+            GetSelection::Single("a".into())
+        );
+        assert_eq!(
+            get_selection(&json!({"memory_id": "a"})).unwrap(),
+            GetSelection::Single("a".into())
+        );
+        assert_eq!(
+            get_selection(&json!({"ids": ["b", "a", "b"]})).unwrap(),
+            GetSelection::Batch(vec!["b".into(), "a".into(), "b".into()])
+        );
+        for args in [
+            json!({}),
+            json!({"id": "a", "ids": ["b"]}),
+            json!({"id": "a", "memory_id": "a"}),
+            json!({"memory_id": null}),
+            json!({"ids": []}),
+            json!({"ids": [1]}),
+            json!({"ids": vec!["a"; 51]}),
+        ] {
+            assert!(get_selection(&args).is_err(), "{args}");
+        }
+        assert!(get_selection(&json!({"ids": vec!["a"; 50]})).is_ok());
+    }
 
     #[test]
     fn certification_flags_require_actual_booleans() {
