@@ -8,6 +8,7 @@ pub enum ApiError {
     NotFound(String),
     Unauthorized,
     BadRequest(String),
+    Conflict(String),
     Internal(anyhow::Error),
 }
 
@@ -17,6 +18,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound(id) => (StatusCode::NOT_FOUND, format!("Not found: {}", id)),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized".into()),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
             ApiError::Internal(e) => {
                 tracing::error!("Internal error: {:?}", e);
                 (
@@ -32,6 +34,9 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
+        if e.is::<crate::storage::qdrant::CertifiedMemoryError>() {
+            return Self::Conflict(e.to_string());
+        }
         ApiError::Internal(e)
     }
 }

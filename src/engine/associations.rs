@@ -1185,6 +1185,9 @@ mod tests {
             last_verified: None,
             verification_confidence: None,
             verification_status: "unverified".into(),
+            certified_at: None,
+            certified_by: None,
+            certification_note: None,
             memory_type: "general".into(),
             visibility: "private".into(),
         };
@@ -1214,6 +1217,9 @@ mod tests {
             last_verified: None,
             verification_confidence: None,
             verification_status: "unverified".into(),
+            certified_at: None,
+            certified_by: None,
+            certification_note: None,
             memory_type: "general".into(),
             visibility: "private".into(),
         };

@@ -1,7 +1,7 @@
 # memex8 improvement execution plan
 
 Date: 2026-11-08  
-Status: package A implemented and validated in an isolated worktree; B–H pending  
+Status: package A merged; package B implemented and validated; C–H pending
 Source: `PLAN-2026-11-08-trending-improvements.md` (original brief, preserved)
 
 ## Outcomes
@@ -17,7 +17,7 @@ It does not authorize deployment, production maintenance, or deletion of live da
 ## Current baseline and corrections to the brief
 
 - Actual checkout: `/home/marc/nvme-data/Documents/myprojs/memex8`.
-  The session workspace `/home/marc/myprojs/memex8` is empty.
+  The session workspace `/home/marc/myprojs/memex8` is now the isolated implementation worktree.
 - Branch: `fix/slumber-respect-config-thresholds`, with existing tracked changes in
   seven files, plus untracked plans, configuration backups, and other files.
   Preserve everything; do not commit unrelated files or secret-bearing backups.
@@ -88,17 +88,17 @@ Validate a detection-only run against an isolated copy of representative data.
 Branch: `feat/certified-memories`  
 Dependencies: A
 
-- [ ] Add `certified` status, `certified_at`, and `certified_by`, with default-safe
+- [x] Add `certified` status, `certified_at`, and `certified_by`, with default-safe
   payload handling and a keyword index where needed. Decide and document storage
   of the optional certification note; do not silently discard it.
-- [ ] Add REST certify/revoke endpoints and `memex8_certify` to both tool surfaces.
-- [ ] Add `certified: false` by default to remember/store. Certification requires
+- [x] Add REST certify/revoke endpoints and `memex8_certify` to both tool surfaces.
+- [x] Add `certified: false` by default to remember/store. Certification requires
   explicit user intent; ordinary memory capture must not imply human confirmation.
-- [ ] Centralize protection checks and audit dedup, consolidation, pruning,
+- [x] Centralize protection checks and audit dedup, consolidation, pruning,
   auto-archive, decay, verification, realm split/merge, and indirect deletion paths.
   Realm movement is allowed; automatic content rewriting/deletion is excluded.
-- [ ] Give certified search results the specified 1.05 verification multiplier.
-- [ ] Define revocation as clearing certification metadata and returning the point
+- [x] Give certified search results the specified 1.05 verification multiplier.
+- [x] Define revocation as clearing certification metadata and returning the point
   to `unverified`, retaining any separate audit history.
 
 Done when: after certification and two isolated slumber cycles, the point's content
@@ -265,6 +265,8 @@ undo deleted/merged data; recovery uses the archives.
 
 ### 2026-11-08 — Package A
 
+Merged: https://github.com/Ex8-ca/memex8/pull/25 (`6c32f3b`).
+
 - Created clean worktree `/home/marc/myprojs/memex8` on
   `fix/slumber-near-dup-detection`, based on committed `21304c7` from the existing
   threshold branch. Original uncommitted changes remain in their checkout.
@@ -280,6 +282,21 @@ undo deleted/merged data; recovery uses the archives.
   against an ephemeral Qdrant instance. Existing compiler warnings remain.
 - Representative production-scale measurements and live candidate review remain
   rollout work; no live slumber or deployment was performed.
+
+### 2026-11-08 — Package B
+
+- Implemented certification from merged main on `feat/certified-memories`.
+- Added certify/revoke to REST, both Rust MCP dispatchers, and Hermes; ordinary
+  capture stays uncertified and explicit remember certification is atomic.
+- Audited lifecycle phases and guarded background payload updates/deletes at Qdrant.
+  Added local coordination between certification, maintenance, and content replacement.
+- Added full snapshot import preservation and refused replacement of certified IDs
+  until revocation. Added the verification-status index to existing collections.
+- Added disposable-Qdrant lifecycle/concurrency/MCP/import checks and Hermes tests;
+  integrated the suites into CI. No live service or data was changed.
+- Validation passed: build, formatting, 66 tests in each Rust unit-test target,
+  38 core integration tests, both disposable-Qdrant suites, and Hermes contracts.
+  The existing k-means skip and compiler warnings remain.
 
 ## First work session
 

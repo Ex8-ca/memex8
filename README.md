@@ -109,6 +109,7 @@ The result: an AI agent that remembers what matters, forgets what doesn't, answe
 | **Per-type Weibull decay** | Untouched memories fade on a memory-type-specific curve. `preference` (k=0.4, scale=6mo), `fact` (k=0.8, ~1mo), `event` (k=1.2, ~1wk), `request` (k=1.5, ~3 days). Floor at 0.05 — nothing is ever fully deleted. Ported from Mnemosyne's WEIBULL_PARAMS table. | `src/engine/decay.rs` |
 | **Query intent classification** | Search queries are classified into one of {temporal, factual, preference, procedural, entity, general}. Each intent re-weights the result scoring: "what happened last week" boosts recency, "what does marc prefer" boosts importance, "how do I deploy" boosts vector similarity. Regex-based, no LLM call on the search path. | `src/engine/query_intent.rs` |
 | **Memory verification** | Nightly sweep samples memories and rates confidence they're still true. Stale/contradicted memories rank lower in recall but never disappear. | Slumber phase 13 |
+| **Certified memories** | User-confirmed memories retain their content and importance through automatic maintenance. Certification skips consolidation, pruning, decay, session reweighting, and verification. | REST, MCP, Hermes |
 | **Semantic associations** | During nightly slumber, each memory links to its 5 nearest neighbors by vector similarity. | Slumber phase 9 |
 | **Spreading activation** | Recalling a memory bumps its associated memories too. Like how "Tesla" primes "Skar speakers". | `Engine::recall()` |
 | **Consolidation** | Raw conversation fragments merge into dense summaries. 98 scattered snippets → 5 clean summaries. | Slumber phase 7 |
@@ -398,7 +399,9 @@ memex8 stats         # System statistics
 | `POST` | `/api/v1/memories` | Store a new memory |
 | `POST` | `/api/v1/memories/search` | Semantic search |
 | `GET`  | `/api/v1/memories/recall` | Top memories |
-| `GET`  | `/api/v1/memories/verification-summary` | Count memories by verification status (verified/stale/contradicted/unverified) |
+| `GET`  | `/api/v1/memories/verification-summary` | Count memories by verification status (certified/verified/stale/contradicted/unverified) |
+| `POST` | `/api/v1/memories/{id}/certify` | Certify a memory; optional body `{ "by": "marc", "note": "Confirmed" }` |
+| `DELETE` | `/api/v1/memories/{id}/certify` | Revoke certification and resume normal lifecycle |
 | `GET`  | `/api/v1/memories/{id}` | Get memory by ID |
 | `PATCH` | `/api/v1/memories/{id}` | Partial payload update — accepts `{memory_type, importance}`. Used by the retroactive classifier script |
 | `DELETE` | `/api/v1/memories/{id}` | Delete memory |
@@ -421,6 +424,25 @@ memex8 stats         # System statistics
 || `POST` | `/api/v1/inference/suggest` | Get gap suggestions for a topic |
 || `POST` | `/api/v1/inference/gaps/{id}/resolve` | Mark a gap as resolved |
 || `POST` | `/api/v1/inference/gaps/{id}/dismiss` | Dismiss a gap |
+
+### Certified memories
+
+Store with `{"content": "Confirmed fact", "certified": true}` when the user explicitly
+asks to remember or confirm it. Omitted `certified` defaults to false. MCP and Hermes
+expose `memex8_remember(..., certified=true)` and
+`memex8_certify(memory_id, revoke=false, by="marc", note="Confirmed")`.
+The existing Rust `memex8_store` tool supports the same flag.
+
+Certification records `certified_at`, optional caller-provided `certified_by`, and
+`certification_note`. Revocation clears these fields and resets verification to
+`unverified`. Revoke before editing content or importing over an existing certified
+point. Imports under new IDs preserve certification and provenance. Explicit user
+deletion remains available. Realm movement, access tracking, and association/index
+metadata can still update during normal operation.
+
+Certification waits for active maintenance in the same process to finish. Automatic
+importance and verification writes also check the current certification at Qdrant.
+No extra configuration is required.
 
 All endpoints (except `/health`) require `Authorization: Bearer *api_key*`.
 

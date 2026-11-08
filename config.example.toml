@@ -39,6 +39,7 @@ split_threshold = 100
 merge_threshold = 0.3
 
 [slumber]
+# Certified memories are protected automatically; certification has no config toggle.
 idle_timeout = "10m"
 cron_ingest = "*/5 * * * *"
 quantize_bit_width = 3.5

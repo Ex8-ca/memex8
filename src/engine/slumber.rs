@@ -92,6 +92,7 @@ impl SlumberEngine {
         &self,
         force_consolidation: bool,
     ) -> anyhow::Result<SlumberReport> {
+        let _certification_guard = self.store.maintenance_guard().await;
         let mut report = SlumberReport::default();
 
         // Phase 1: Deduplicate near-identical memories
@@ -1545,7 +1546,7 @@ impl SlumberEngine {
 
         for mem in &all {
             // Skip protected memories
-            if mem.upvotes > 0 || mem.access_count > 5 {
+            if mem.is_certified() || mem.upvotes > 0 || mem.access_count > 5 {
                 continue;
             }
 
@@ -1609,7 +1610,14 @@ impl SlumberEngine {
                 // stops crowding recall. Mirrors `Engine::archive_memory`
                 // (engine/mod.rs): set importance via the store's
                 // update_upvotes primitive.
-                if let Err(e) = self.store.update_upvotes(&mem.id, 0, 0.01).await {
+                if let Err(e) = self
+                    .store
+                    .update_unprotected_payload(
+                        &mem.id,
+                        serde_json::json!({"upvotes": 0, "importance": 0.01}).try_into()?,
+                    )
+                    .await
+                {
                     tracing::warn!("  Prune-archive failed for id={}: {}", mem.id, e);
                     // Continue — don't abort the whole phase on one
                     // transient failure.
@@ -1905,6 +1913,22 @@ impl SlumberEngine {
                 .max_by_key(|t| type_priority(t))
                 .unwrap_or("general");
 
+            let mut protected_source = false;
+            for source_id in &source_ids {
+                if self
+                    .store
+                    .get_memory(source_id)
+                    .await?
+                    .is_none_or(|m| m.is_certified())
+                {
+                    protected_source = true;
+                    break;
+                }
+            }
+            if protected_source {
+                continue;
+            }
+
             let id = uuid::Uuid::new_v4().to_string();
             if let Err(e) = self
                 .store
@@ -1935,7 +1959,7 @@ impl SlumberEngine {
 
             // Never delete sources before the replacement was durably stored.
             for id in &ids_to_delete {
-                self.store.delete_memory(id).await?;
+                self.store.delete_unprotected_memory(id).await?;
             }
 
             tracing::info!(
@@ -2115,6 +2139,9 @@ impl SlumberEngine {
         let mut updates: Vec<(&str, qdrant_client::Payload)> = Vec::new();
 
         for mem in &all {
+            if mem.is_certified() {
+                continue;
+            }
             let last_accessed = chrono::DateTime::parse_from_rfc3339(&mem.last_accessed)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| now);
@@ -2150,7 +2177,7 @@ impl SlumberEngine {
             // Batch update in chunks to avoid overwhelming Qdrant
             const BATCH_SIZE: usize = 100;
             for chunk in updates.chunks(BATCH_SIZE) {
-                if let Err(e) = self.store.batch_update_payload(chunk).await {
+                if let Err(e) = self.store.batch_update_unprotected_payload(chunk).await {
                     tracing::warn!("  Batch decay update failed: {}", e);
                 }
             }
@@ -2363,7 +2390,7 @@ impl SlumberEngine {
         // Find session summary memories (chunk_type = "session_summary")
         let session_summaries: Vec<_> = all
             .iter()
-            .filter(|m| m.chunk_type == "session_summary")
+            .filter(|m| m.chunk_type == "session_summary" && !m.is_certified())
             .collect();
 
         if session_summaries.is_empty() {
@@ -2408,7 +2435,10 @@ impl SlumberEngine {
 
             if (new_importance - current_importance).abs() > 0.01 {
                 self.store
-                    .set_memory_importance(&mem.id, new_importance)
+                    .update_unprotected_payload(
+                        &mem.id,
+                        serde_json::json!({"importance": new_importance}).try_into()?,
+                    )
                     .await?;
                 tracing::debug!(
                     "  Session {} importance: {:.2} → {:.2}",
@@ -2464,7 +2494,7 @@ impl SlumberEngine {
         let eligible: Vec<&MemoryPoint> = all
             .iter()
             .filter(|m| {
-                if m.content.trim().is_empty() {
+                if m.is_certified() || m.content.trim().is_empty() {
                     return false;
                 }
                 match &m.last_verified {
@@ -2672,7 +2702,7 @@ impl SlumberEngine {
 
         const BATCH_SIZE: usize = 100;
         for chunk in updates.chunks(BATCH_SIZE) {
-            if let Err(e) = self.store.batch_update_payload(chunk).await {
+            if let Err(e) = self.store.batch_update_unprotected_payload(chunk).await {
                 tracing::warn!("  Batch verification update failed: {}", e);
             }
         }
@@ -2683,6 +2713,7 @@ impl SlumberEngine {
             stale: n_stale as u64,
             contradicted: n_contra as u64,
             unverified: 0,
+            certified: 0,
         };
         tracing::info!(
             "  Verification sweep: {} rated — {} verified, {} stale, {} contradicted",

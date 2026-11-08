@@ -1,5 +1,31 @@
 # memex8 Implementation Status
 
+## 2026-11-08 — Certified memories (roadmap B)
+
+- Added default-safe certification timestamp, attribution, and note fields; the
+  verification summary now counts certified memories separately. Existing Qdrant
+  collections receive the verification-status keyword index on startup.
+- REST certify/revoke endpoints, both Rust MCP transports, and Hermes support
+  `memex8_certify`. Remember accepts `certified=false` by default and stores explicit
+  certification in the initial point write. Rust also exposes `memex8_remember` as
+  an alias of its existing `memex8_store` tool.
+- Certified memories skip consolidation, prune/auto-archive, importance decay,
+  session reweighting, and verification; recall/search apply no Weibull decay and a
+  1.05 verification multiplier. Realm movements retain their payloads. Qdrant-side
+  filters protect automatic updates/deletes against certification changes from
+  another client. Local maintenance and certification use a shared coordination lock.
+- Edit/import preserve complete metadata and require revocation before replacing
+  an existing certified point. Certification flags reject string/number substitutes.
+  Optional `by` is a caller-provided label, not authenticated identity.
+- Added disposable-Qdrant lifecycle tests (two full slumber runs, revocation,
+  concurrent verification protection, REST/MCP contracts, and import preservation),
+  Hermes contract tests, and CI execution for both disposable-Qdrant suites.
+- Validation: build, formatting, and Rust tests passed (66 tests in each unit-test
+  target plus 38 core integration tests, with the existing k-means skip). Both
+  disposable-Qdrant suites and Hermes certification/visibility contracts passed.
+  Existing export/import, shared-memory bridge, and backup tests also passed.
+  No new configuration keys, live-data maintenance, or deployment.
+
 ## 2026-11-08 — Duplicate detection (roadmap A)
 
 - Added read-only `memex8 slumber inspect-duplicates` with original-vector cosine

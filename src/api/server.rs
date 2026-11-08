@@ -110,6 +110,11 @@ pub async fn run_with_engine(
 fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
+            "/memories/{id}/certify",
+            axum::routing::post(crate::api::routes::memories::certify)
+                .delete(crate::api::routes::memories::revoke_certification),
+        )
+        .route(
             "/memories",
             axum::routing::get(crate::api::routes::memories::list),
         )

@@ -8,6 +8,8 @@ use qdrant_client::qdrant::{
 use qdrant_client::Payload;
 use qdrant_client::Qdrant;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 // ─── Data types ───────────────────────────────────────────────────────────────
 
@@ -53,9 +55,16 @@ pub struct MemoryPoint {
     /// Verifier's confidence the claim is still true, 0.0–1.0. None = unverified.
     #[serde(default)]
     pub verification_confidence: Option<f32>,
-    /// "unverified" | "verified" | "stale" | "contradicted"
+    /// "unverified" | "verified" | "stale" | "contradicted" | "certified"
     #[serde(default)]
     pub verification_status: String,
+    #[serde(default)]
+    pub certified_at: Option<String>,
+    /// Caller-supplied attribution, not an authenticated user identity.
+    #[serde(default)]
+    pub certified_by: Option<String>,
+    #[serde(default)]
+    pub certification_note: Option<String>,
     /// Semantic memory type for per-type Weibull decay (preference, fact, event, etc.).
     /// Empty string = legacy memory, treated as "general" in decay.
     #[serde(default)]
@@ -67,6 +76,25 @@ pub struct MemoryPoint {
     #[serde(default)]
     pub visibility: String,
 }
+
+impl MemoryPoint {
+    pub fn is_certified(&self) -> bool {
+        self.verification_status == "certified"
+    }
+}
+
+#[derive(Debug)]
+pub struct CertifiedMemoryError;
+
+impl std::fmt::Display for CertifiedMemoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Memory is certified; revoke certification before replacing its content"
+        )
+    }
+}
+impl std::error::Error for CertifiedMemoryError {}
 
 /// Memory with its embedding vector (internal use only, not serialized).
 #[derive(Debug, Clone)]
@@ -112,6 +140,8 @@ pub struct SearchResult {
 /// slumber report.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VerificationStatusCounts {
+    #[serde(default)]
+    pub certified: u64,
     pub verified: u64,
     pub stale: u64,
     pub contradicted: u64,
@@ -154,6 +184,8 @@ pub struct GraphEdge {
 #[derive(Clone)]
 pub struct QdrantStore {
     client: Qdrant,
+    /// Serialize certification with content replacement and local maintenance.
+    certification_gate: Arc<RwLock<()>>,
 }
 
 const MEMORIES: &str = "memories";
@@ -314,9 +346,13 @@ fn memory_to_payload(mem: &MemoryPoint) -> Payload {
         "association_strengths": mem.association_strengths,
         "reaction_score": mem.reaction_score,
         "topic_clusters": mem.topic_clusters,
+        "quantized_bit_width": mem.quantized_bit_width,
         "last_verified": mem.last_verified,
         "verification_confidence": mem.verification_confidence,
         "verification_status": mem.verification_status,
+        "certified_at": mem.certified_at,
+        "certified_by": mem.certified_by,
+        "certification_note": mem.certification_note,
         "memory_type": mem.memory_type,
         "visibility": mem.visibility,
     });
@@ -365,6 +401,9 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
             .map(|v| v as f32),
         verification_status: map_str(map, "verification_status")
             .unwrap_or_else(|| "unverified".to_string()),
+        certified_at: map_str(map, "certified_at"),
+        certified_by: map_str(map, "certified_by"),
+        certification_note: map_str(map, "certification_note"),
         memory_type: map_str(map, "memory_type").unwrap_or_default(),
         // Empty/missing visibility defaults to "private" so legacy
         // memories never accidentally become shareable on upgrade.
@@ -438,7 +477,10 @@ impl QdrantStore {
         // which moves independently of the Rust client crate.
         // See issue #14.
         let client = Qdrant::from_url(url).skip_compatibility_check().build()?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            certification_gate: Arc::new(RwLock::new(())),
+        })
     }
 
     pub async fn ensure_collections(&self, dimensions: u32) -> anyhow::Result<()> {
@@ -479,6 +521,18 @@ impl QdrantStore {
         // legacy memory that doesn't have the field. Safe to call on
         // every startup; no-op once the migration has run.
         self.backfill_visibility().await?;
+
+        // Also install the index for existing collections; creation is idempotent.
+        self.client
+            .create_field_index(
+                CreateFieldIndexCollectionBuilder::new(
+                    MEMORIES,
+                    "verification_status",
+                    FieldType::Keyword,
+                )
+                .wait(true),
+            )
+            .await?;
 
         // ── realms ──
         if !self.client.collection_exists(REALMS).await? {
@@ -586,6 +640,7 @@ impl QdrantStore {
             reaction_score,
             visibility,
             &[],
+            false,
         )
         .await
     }
@@ -605,6 +660,7 @@ impl QdrantStore {
         reaction_score: f32,
         visibility: &str,
         tags: &[String],
+        certified: bool,
     ) -> anyhow::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let mem = MemoryPoint {
@@ -618,7 +674,7 @@ impl QdrantStore {
             upvotes: 0,
             tags: tags.to_vec(),
             ingested_at: now.clone(),
-            last_accessed: now,
+            last_accessed: now.clone(),
             access_count: 0,
             chunk_type: chunk_type.to_string(),
             heading: heading.map(|s| s.to_string()),
@@ -631,7 +687,10 @@ impl QdrantStore {
             quantized_bit_width: 0.0,
             last_verified: None,
             verification_confidence: None,
-            verification_status: "unverified".to_string(),
+            verification_status: if certified { "certified" } else { "unverified" }.to_string(),
+            certified_at: certified.then_some(now),
+            certified_by: None,
+            certification_note: None,
             memory_type: memory_type.to_string(),
             visibility: normalize_visibility(visibility).to_string(),
         };
@@ -675,7 +734,125 @@ impl QdrantStore {
         Ok(None)
     }
 
-    /// Set the importance score for a memory.
+    /// Shared guard for local maintenance/content replacement.
+    pub async fn maintenance_guard(&self) -> tokio::sync::RwLockReadGuard<'_, ()> {
+        self.certification_gate.read().await
+    }
+
+    pub async fn set_certification(
+        &self,
+        id: &str,
+        revoke: bool,
+        by: Option<&str>,
+        note: Option<&str>,
+    ) -> anyhow::Result<Option<MemoryPoint>> {
+        let _guard = self.certification_gate.write().await;
+        let Some(mut memory) = self.get_memory(id).await? else {
+            return Ok(None);
+        };
+        if revoke {
+            // Repeated revocation must not reset an ordinary verification rating.
+            if !memory.is_certified() {
+                return Ok(Some(memory));
+            }
+            memory.verification_status = "unverified".into();
+            memory.certified_at = None;
+            memory.certified_by = None;
+            memory.certification_note = None;
+            memory.last_verified = None;
+            memory.verification_confidence = None;
+        } else {
+            if !memory.is_certified() || memory.certified_at.is_none() {
+                memory.certified_at = Some(chrono::Utc::now().to_rfc3339());
+            }
+            memory.verification_status = "certified".into();
+            if let Some(by) = by {
+                memory.certified_by = Some(by.to_string());
+            }
+            if let Some(note) = note {
+                memory.certification_note = Some(note.to_string());
+            }
+        }
+        let payload = serde_json::json!({
+            "verification_status": memory.verification_status,
+            "certified_at": memory.certified_at,
+            "certified_by": memory.certified_by,
+            "certification_note": memory.certification_note,
+            "last_verified": memory.last_verified,
+            "verification_confidence": memory.verification_confidence,
+        })
+        .try_into()?;
+        self.update_memory_payload(id, payload).await?;
+        Ok(Some(memory))
+    }
+
+    /// Automatic mutations recheck certification atomically at Qdrant, even if
+    /// another client certified the memory after this maintenance pass read it.
+    pub async fn update_unprotected_payload(
+        &self,
+        id: &str,
+        payload: Payload,
+    ) -> anyhow::Result<()> {
+        let filter = Filter {
+            must: vec![Condition::has_id([id.to_string()])],
+            must_not: vec![Condition::matches(
+                "verification_status",
+                "certified".to_string(),
+            )],
+            ..Default::default()
+        };
+        self.client
+            .set_payload(
+                SetPayloadPointsBuilder::new(MEMORIES, payload)
+                    .points_selector(PointsSelectorOneOf::Filter(filter))
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_unprotected_memory(&self, id: &str) -> anyhow::Result<()> {
+        let filter = Filter {
+            must: vec![Condition::has_id([id.to_string()])],
+            must_not: vec![Condition::matches(
+                "verification_status",
+                "certified".to_string(),
+            )],
+            ..Default::default()
+        };
+        self.client
+            .delete_points(
+                DeletePointsBuilder::new(MEMORIES)
+                    .points(PointsSelectorOneOf::Filter(filter))
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Import/edit a complete snapshot without discarding certification or provenance.
+    /// Existing certified content requires explicit revocation before replacement.
+    pub async fn replace_memory(&self, memory: &MemoryPoint, vector: &[f32]) -> anyhow::Result<()> {
+        if self
+            .get_memory(&memory.id)
+            .await?
+            .is_some_and(|m| m.is_certified())
+        {
+            return Err(CertifiedMemoryError.into());
+        }
+        let mut memory = memory.clone();
+        memory.visibility = normalize_visibility(&memory.visibility).to_string();
+        let point = PointStruct::new(
+            memory.id.clone(),
+            vector.to_vec(),
+            memory_to_payload(&memory),
+        );
+        self.client
+            .upsert_points(UpsertPointsBuilder::new(MEMORIES, vec![point]).wait(true))
+            .await?;
+        Ok(())
+    }
+
     pub async fn set_memory_importance(&self, id: &str, importance: f32) -> anyhow::Result<()> {
         let payload: qdrant_client::Payload = serde_json::json!({
             "importance": importance,
@@ -1063,6 +1240,7 @@ impl QdrantStore {
         let mut counts = VerificationStatusCounts::default();
         for mem in &all {
             match mem.verification_status.as_str() {
+                "certified" => counts.certified += 1,
                 "verified" => counts.verified += 1,
                 "stale" => counts.stale += 1,
                 "contradicted" => counts.contradicted += 1,
@@ -1450,6 +1628,16 @@ impl QdrantStore {
         Ok(())
     }
 
+    pub async fn batch_update_unprotected_payload(
+        &self,
+        ids_and_payloads: &[(&str, Payload)],
+    ) -> anyhow::Result<()> {
+        for (id, payload) in ids_and_payloads {
+            self.update_unprotected_payload(id, payload.clone()).await?;
+        }
+        Ok(())
+    }
+
     /// Find top-K nearest neighbors for a given memory by vector similarity.
     /// Returns vec of (memory_id, cosine_similarity).
     /// The memory_id itself is excluded from results.
@@ -1797,7 +1985,10 @@ mod tests {
             quantized_bit_width: 0.0,
             last_verified: None,
             verification_confidence: None,
-            verification_status: "unverified".into(),
+            verification_status: "certified".into(),
+            certified_at: Some("2026-11-08T00:00:00Z".into()),
+            certified_by: Some("marc".into()),
+            certification_note: Some("Confirmed".into()),
             memory_type: "general".into(),
             visibility: "public".into(),
         };
@@ -1816,6 +2007,10 @@ mod tests {
         let decoded = memory_from_payload("test-1", obj);
         assert_eq!(decoded.visibility, "public");
         assert_eq!(decoded.consolidated_from, original.consolidated_from);
+        assert!(decoded.is_certified());
+        assert_eq!(decoded.certified_at, original.certified_at);
+        assert_eq!(decoded.certified_by, original.certified_by);
+        assert_eq!(decoded.certification_note, original.certification_note);
         assert_eq!(decoded.tags, original.tags);
         assert_eq!(decoded.source_file, original.source_file);
     }
@@ -1830,6 +2025,10 @@ mod tests {
         map.insert("realm_name".into(), json!("general"));
         let decoded = memory_from_payload("legacy-1", &map);
         assert!(decoded.consolidated_from.is_empty());
+        assert!(!decoded.is_certified());
+        assert!(decoded.certified_at.is_none());
+        assert!(decoded.certified_by.is_none());
+        assert!(decoded.certification_note.is_none());
         assert_eq!(decoded.visibility, "private");
     }
 }
