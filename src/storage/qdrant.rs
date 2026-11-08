@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+#[path = "consolidation.rs"]
+mod consolidation;
+pub use consolidation::{content_hash, ConsolidationOperation, RecoveryError, UnconsolidateResult};
+
 // ─── Data types ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +37,15 @@ pub struct MemoryPoint {
     /// Direct sources of a consolidated summary. Empty for legacy points.
     #[serde(default)]
     pub consolidated_from: Vec<String>,
+    #[serde(default)]
+    pub derived_by: String,
+    #[serde(default)]
+    pub consolidated_at: Option<String>,
+    #[serde(default)]
+    pub no_consolidate_until: Option<String>,
+    /// Content fingerprints of underlying evidence, retained after sources disappear.
+    #[serde(default)]
+    pub consolidated_evidence: Vec<String>,
     /// IDs of semantically associated memories.
     #[serde(default)]
     pub related_memory_ids: Vec<String>,
@@ -116,6 +129,7 @@ pub struct ConsolidationMetadata {
     pub source_ids: Vec<String>,
     pub source_fingerprint: String,
     pub visibility: String,
+    pub evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,6 +356,10 @@ fn memory_to_payload(mem: &MemoryPoint) -> Payload {
         "heading": mem.heading,
         "source_hash": mem.source_hash,
         "consolidated_from": mem.consolidated_from,
+        "derived_by": mem.derived_by,
+        "consolidated_at": mem.consolidated_at,
+        "no_consolidate_until": mem.no_consolidate_until,
+        "consolidated_evidence": mem.consolidated_evidence,
         "related_memory_ids": mem.related_memory_ids,
         "association_strengths": mem.association_strengths,
         "reaction_score": mem.reaction_score,
@@ -389,6 +407,10 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
         heading: map_str(map, "heading"),
         source_hash: map_str(map, "source_hash").unwrap_or_default(),
         consolidated_from: map_str_vec(map, "consolidated_from"),
+        derived_by: map_str(map, "derived_by").unwrap_or_default(),
+        consolidated_at: map_str(map, "consolidated_at"),
+        no_consolidate_until: map_str(map, "no_consolidate_until"),
+        consolidated_evidence: map_str_vec(map, "consolidated_evidence"),
         related_memory_ids: map_str_vec(map, "related_memory_ids"),
         association_strengths: map_f32_vec(map, "association_strengths"),
         reaction_score: map_f32(map, "reaction_score"),
@@ -533,6 +555,8 @@ impl QdrantStore {
                 .wait(true),
             )
             .await?;
+
+        self.ensure_consolidation_archive().await?;
 
         // ── realms ──
         if !self.client.collection_exists(REALMS).await? {
@@ -680,6 +704,10 @@ impl QdrantStore {
             heading: heading.map(|s| s.to_string()),
             source_hash: source_hash.to_string(),
             consolidated_from: Vec::new(),
+            derived_by: String::new(),
+            consolidated_at: None,
+            no_consolidate_until: None,
+            consolidated_evidence: Vec::new(),
             related_memory_ids: vec![],
             association_strengths: vec![],
             reaction_score,
@@ -735,8 +763,8 @@ impl QdrantStore {
     }
 
     /// Shared guard for local maintenance/content replacement.
-    pub async fn maintenance_guard(&self) -> tokio::sync::RwLockReadGuard<'_, ()> {
-        self.certification_gate.read().await
+    pub async fn maintenance_guard(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+        self.certification_gate.write().await
     }
 
     pub async fn set_certification(
@@ -953,6 +981,9 @@ impl QdrantStore {
             "source_hash": metadata.source_fingerprint,
             "chunk_type": "consolidated",
             "consolidated_from": metadata.source_ids,
+            "derived_by": "consolidation",
+            "consolidated_at": ingested_at,
+            "consolidated_evidence": metadata.evidence,
             "related_memory_ids": Vec::<String>::new(),
             "association_strengths": Vec::<f32>::new(),
             "reaction_score": 0.0f32,
@@ -1978,6 +2009,10 @@ mod tests {
             heading: None,
             source_hash: "".into(),
             consolidated_from: vec!["source-a".into(), "source-b".into()],
+            derived_by: "consolidation".into(),
+            consolidated_at: Some("2026-11-08T00:00:00Z".into()),
+            no_consolidate_until: Some("2026-12-08T00:00:00Z".into()),
+            consolidated_evidence: vec!["evidence-fingerprint".into()],
             related_memory_ids: vec![],
             association_strengths: vec![],
             reaction_score: 0.0,
@@ -2007,6 +2042,13 @@ mod tests {
         let decoded = memory_from_payload("test-1", obj);
         assert_eq!(decoded.visibility, "public");
         assert_eq!(decoded.consolidated_from, original.consolidated_from);
+        assert_eq!(decoded.derived_by, original.derived_by);
+        assert_eq!(decoded.consolidated_at, original.consolidated_at);
+        assert_eq!(decoded.no_consolidate_until, original.no_consolidate_until);
+        assert_eq!(
+            decoded.consolidated_evidence,
+            original.consolidated_evidence
+        );
         assert!(decoded.is_certified());
         assert_eq!(decoded.certified_at, original.certified_at);
         assert_eq!(decoded.certified_by, original.certified_by);
@@ -2025,6 +2067,10 @@ mod tests {
         map.insert("realm_name".into(), json!("general"));
         let decoded = memory_from_payload("legacy-1", &map);
         assert!(decoded.consolidated_from.is_empty());
+        assert!(decoded.derived_by.is_empty());
+        assert!(decoded.consolidated_at.is_none());
+        assert!(decoded.no_consolidate_until.is_none());
+        assert!(decoded.consolidated_evidence.is_empty());
         assert!(!decoded.is_certified());
         assert!(decoded.certified_at.is_none());
         assert!(decoded.certified_by.is_none());

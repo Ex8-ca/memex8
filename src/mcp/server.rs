@@ -181,6 +181,14 @@ async fn handle_tool_call(
                 .await?;
             Ok(json!({ "id": id, "status": "stored" }))
         }
+        "memex8_unconsolidate" => {
+            let memory_id = arguments
+                .get("memory_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("memory_id is required"))?;
+            let result = engine.unconsolidate(memory_id).await?;
+            Ok(json!({"content": [{"type": "text", "text": serde_json::to_string(&result)?}]}))
+        }
         "memex8_certify" => {
             let memory_id = arguments
                 .get("memory_id")

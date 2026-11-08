@@ -3,8 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+  # Also validate dependent PRs before their parent feature branch lands.
   pull_request:
-    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -56,13 +56,14 @@ jobs:
       - name: Run tests
         run: cargo test -- --skip test_kmeans_simple
 
-      - name: Test duplicate inspection and certification with disposable Qdrant
+      - name: Test lifecycle recovery with disposable Qdrant
         env:
           MEMEX8_TEST_BINARY: ${{ github.workspace }}/target/release/memex8
         run: |
           docker pull qdrant/qdrant:latest
           python3 tests/test_dedup_inspection.py
           python3 tests/test_certification.py
+          python3 tests/test_consolidation.py
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
@@ -105,6 +106,7 @@ jobs:
           python3 tests/test_docker_backup.py -v
           python3 plugins/memex8/tests/test_visibility.py
           python3 plugins/memex8/tests/test_certification.py
+          python3 plugins/memex8/tests/test_consolidation.py
 
       - name: Validate plugin.yaml
         run: |

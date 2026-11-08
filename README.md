@@ -109,6 +109,7 @@ The result: an AI agent that remembers what matters, forgets what doesn't, answe
 | **Per-type Weibull decay** | Untouched memories fade on a memory-type-specific curve. `preference` (k=0.4, scale=6mo), `fact` (k=0.8, ~1mo), `event` (k=1.2, ~1wk), `request` (k=1.5, ~3 days). Floor at 0.05 — nothing is ever fully deleted. Ported from Mnemosyne's WEIBULL_PARAMS table. | `src/engine/decay.rs` |
 | **Query intent classification** | Search queries are classified into one of {temporal, factual, preference, procedural, entity, general}. Each intent re-weights the result scoring: "what happened last week" boosts recency, "what does marc prefer" boosts importance, "how do I deploy" boosts vector similarity. Regex-based, no LLM call on the search path. | `src/engine/query_intent.rs` |
 | **Memory verification** | Nightly sweep samples memories and rates confidence they're still true. Stale/contradicted memories rank lower in recall but never disappear. | Slumber phase 13 |
+| **Recoverable consolidation** | Summaries record provenance; durable source archives support undo with original IDs and metadata. | REST, MCP, Hermes |
 | **Certified memories** | User-confirmed memories retain their content and importance through automatic maintenance. Certification skips consolidation, pruning, decay, session reweighting, and verification. | REST, MCP, Hermes |
 | **Semantic associations** | During nightly slumber, each memory links to its 5 nearest neighbors by vector similarity. | Slumber phase 9 |
 | **Spreading activation** | Recalling a memory bumps its associated memories too. Like how "Tesla" primes "Skar speakers". | `Engine::recall()` |
@@ -402,7 +403,8 @@ memex8 stats         # System statistics
 | `GET`  | `/api/v1/memories/verification-summary` | Count memories by verification status (certified/verified/stale/contradicted/unverified) |
 | `POST` | `/api/v1/memories/{id}/certify` | Certify a memory; optional body `{ "by": "marc", "note": "Confirmed" }` |
 | `DELETE` | `/api/v1/memories/{id}/certify` | Revoke certification and resume normal lifecycle |
-| `GET`  | `/api/v1/memories/{id}` | Get memory by ID |
+| `POST` | `/api/v1/memories/{id}/unconsolidate` | Restore consolidation sources, then remove the summary; safe to retry |
+| `GET`  | `/api/v1/memories/{id}` | Get memory by ID, including provenance |
 | `PATCH` | `/api/v1/memories/{id}` | Partial payload update — accepts `{memory_type, importance}`. Used by the retroactive classifier script |
 | `DELETE` | `/api/v1/memories/{id}` | Delete memory |
 | `GET`  | `/api/v1/realms` | List realms |
@@ -443,6 +445,52 @@ metadata can still update during normal operation.
 Certification waits for active maintenance in the same process to finish. Automatic
 importance and verification writes also check the current certification at Qdrant.
 No extra configuration is required.
+
+### Consolidation provenance and undo
+
+Full memory retrieval includes `consolidated_from` (direct source IDs), `derived_by`,
+`consolidated_at`, and `no_consolidate_until`. Content fingerprints in
+`consolidated_evidence` let maintenance recognize already summarized evidence across
+ancestry and overlapping groups, while changed content counts as new evidence.
+Derived summaries and certified memories remain excluded from consolidation inputs.
+
+Every consolidation saves complete typed source payloads and original vectors in the
+Qdrant `consolidation_archive` collection, including when `preserve_originals=true`.
+The journal records the embedding configuration at capture and vector dimensions.
+Archive writes and summary writes are read back before any source deletion. The
+journal ID is the summary ID and is logged when the archive becomes durable.
+
+Call `POST /api/v1/memories/{id}/unconsolidate` or
+`memex8_unconsolidate(memory_id)` in MCP/Hermes to undo a consolidation. Missing
+sources are re-embedded with the current model and restored under their original
+IDs with their archived metadata. Existing sources retain their current content and
+metadata. All sources receive a consolidation cooldown of at least 30 days; longer
+existing cooldowns are retained. The summary is removed only after every source and
+its cooldown can be read back. A summary with edited content or certification returns HTTP 409;
+revoke certification before undoing a certified summary. Missing summaries/journals
+return 404. Older summaries can be undone when all their sources still exist;
+lost sources without an archive produce a clear 409 error.
+
+Journal states are `prepared`, `complete`, `restoring`, and `restored`. After an
+interruption, retry with the same summary/journal ID, even when the summary is
+missing. Partial restores keep the summary and journal. A completed retry returns
+`already_restored=true` and does not recreate sources deliberately deleted afterward.
+Undo invalidates the serving process's TurboVec cache and its persisted index files;
+search uses Qdrant until a fresh index is built.
+
+Archives remain in the data volume after undo and retain source content even after
+normal memory deletion; there is no automatic archive cleanup in this release.
+CLI backups now include `consolidations.json`, and restore accepts older backups
+without that file. Restore refuses to overwrite a journal with different state;
+use an isolated instance for an older backup. Docker volume backups include the
+archive collection automatically.
+
+Maintenance, certification, edit/import, payload changes, deletion, backup, and undo
+coordinate within one process. Run maintenance/recovery through a single writer;
+independent processes sharing Qdrant require external serialization. Qdrant filters
+also recheck content, type, visibility, and certification immediately at deletion.
+No new configuration keys are required. Near-duplicate deletion remains disabled
+until the separate safe-removal work lands.
 
 All endpoints (except `/health`) require `Authorization: Bearer *api_key*`.
 

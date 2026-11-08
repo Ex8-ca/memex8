@@ -1,6 +1,7 @@
 pub mod associations;
 pub mod backup;
 pub mod chunker;
+pub mod consolidation;
 pub mod decay;
 pub mod dedup;
 pub mod doctor;
@@ -997,6 +998,7 @@ impl Engine {
         id: &str,
         payload: qdrant_client::Payload,
     ) -> anyhow::Result<()> {
+        let _guard = self.store.maintenance_guard().await;
         self.store.update_memory_payload(id, payload).await
     }
 
@@ -1040,6 +1042,7 @@ impl Engine {
     }
 
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
+        let _guard = self.store.maintenance_guard().await;
         self.store.delete_memory(id).await
     }
 

@@ -17,6 +17,13 @@ pub fn list_tools() -> Vec<serde_json::Value> {
                 "required": ["query"]
             }),
         ),
+        tool(
+            "memex8_unconsolidate",
+            "Undo a consolidated summary using its durable source archive. Restores missing sources, retains newer source edits, then deletes the summary. Restored sources receive a 30-day consolidation cooldown. Safe to retry after a partial failure.",
+            json!({"type": "object", "properties": {
+                "memory_id": {"type": "string", "description": "Summary ID (also the consolidation journal ID)"}
+            }, "required": ["memory_id"]}),
+        ),
         store_tool("memex8_store"),
         store_tool("memex8_remember"),
         tool(
