@@ -70,6 +70,8 @@ model = "gpt-4o-mini"    # OpenAI model name
 [slumber.summarize]
 enabled = true
 max_cluster_size = 20
+# Both settings archive full sources in Qdrant before any consolidation deletion.
+# Undo uses the current embedding provider and applies a fixed 30-day cooldown.
 preserve_originals = true
 confidence_threshold = 0.8
 

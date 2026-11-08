@@ -1771,10 +1771,18 @@ impl SlumberEngine {
             // previously was a dead config — fixed 2026-10-04).
             let max_cluster = self.config.slumber.summarize.max_cluster_size as usize;
             let mut sorted = memories.to_vec();
+            let covered: std::collections::HashSet<_> = members
+                .iter()
+                .flat_map(|m| m.consolidated_evidence.iter())
+                .collect();
             sorted.sort_by(|a, b| {
-                b.importance
-                    .partial_cmp(&a.importance)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                let a_covered = covered.contains(&super::dedup::source_fingerprint(&[a]));
+                let b_covered = covered.contains(&super::dedup::source_fingerprint(&[b]));
+                a_covered.cmp(&b_covered).then_with(|| {
+                    b.importance
+                        .partial_cmp(&a.importance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
             });
             sorted.truncate(max_cluster.max(2));
             if super::dedup::already_consolidated(&sorted, members) {
@@ -1913,23 +1921,56 @@ impl SlumberEngine {
                 .max_by_key(|t| type_priority(t))
                 .unwrap_or("general");
 
-            let mut protected_source = false;
+            // Re-read complete sources and original vectors immediately before
+            // archiving. Never delete data from a stale prompt snapshot.
+            let mut sources = Vec::new();
             for source_id in &source_ids {
-                if self
-                    .store
-                    .get_memory(source_id)
-                    .await?
-                    .is_none_or(|m| m.is_certified())
+                let Some(snapshot) = self.store.get_memory_snapshot(source_id).await? else {
+                    break;
+                };
+                if snapshot.memory.is_certified()
+                    || super::dedup::consolidation_on_cooldown(&snapshot.memory)
                 {
-                    protected_source = true;
                     break;
                 }
+                sources.push(snapshot);
             }
-            if protected_source {
+            let current: Vec<_> = sources.iter().map(|s| &s.memory).collect();
+            if sources.len() != source_ids.len()
+                || current.iter().any(|m| {
+                    crate::storage::qdrant::normalize_visibility(&m.visibility) != *visibility
+                        || m.realm_id != *realm_id
+                        || m.realm_name != *realm_name
+                })
+                || super::dedup::source_fingerprint(&current)
+                    != super::dedup::source_fingerprint(&sorted)
+            {
                 continue;
             }
-
             let id = uuid::Uuid::new_v4().to_string();
+            let provider = std::env::var("EMBEDDING_PROVIDER")
+                .unwrap_or_else(|_| self.config.embedding.provider.clone());
+            let model = if provider == "openai" || provider == "openai-compatible" {
+                self.config.embedding.openai.model.clone()
+            } else {
+                std::env::var("EMBEDDING_MODEL")
+                    .unwrap_or_else(|_| self.config.embedding.model.clone())
+            };
+            let mut operation = crate::storage::qdrant::ConsolidationOperation {
+                version: 1,
+                summary_id: id.clone(),
+                summary_hash: crate::storage::qdrant::content_hash(&summary),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                state: "prepared".into(),
+                preserve_originals,
+                embedding_provider: provider,
+                embedding_model: model,
+                embedding_dimensions: sources[0].vector.len(),
+                sources,
+                cooldown_until: None,
+            };
+            self.store.archive_consolidation(&operation).await?;
+            tracing::info!(summary_id = %id, sources = source_ids.len(), "Consolidation sources archived");
             if let Err(e) = self
                 .store
                 .store_memory_with_vector(
@@ -1945,6 +1986,7 @@ impl SlumberEngine {
                         source_ids: source_ids.clone(),
                         source_fingerprint: super::dedup::source_fingerprint(&sorted),
                         visibility: visibility.to_string(),
+                        evidence: super::dedup::evidence_fingerprints(&sorted),
                     },
                 )
                 .await
@@ -1958,9 +2000,25 @@ impl SlumberEngine {
             }
 
             // Never delete sources before the replacement was durably stored.
-            for id in &ids_to_delete {
-                self.store.delete_unprotected_memory(id).await?;
+            let stored = self
+                .store
+                .get_memory(&id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Consolidated summary failed read-back"))?;
+            anyhow::ensure!(
+                stored.content == summary && stored.consolidated_from == source_ids,
+                "Consolidated summary read-back mismatch"
+            );
+            for source in &operation.sources {
+                if ids_to_delete.contains(&source.memory.id) {
+                    self.store
+                        .delete_consolidation_snapshot(&source.memory)
+                        .await?;
+                }
             }
+            self.store
+                .update_consolidation_state(&mut operation, "complete")
+                .await?;
 
             tracing::info!(
                 "  Consolidated {} memories → 1 summary in '{}'",

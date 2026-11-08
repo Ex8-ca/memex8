@@ -174,14 +174,47 @@ pub fn consolidation_inputs<'a>(members: &[&'a MemoryPoint]) -> Vec<&'a MemoryPo
         .iter()
         .copied()
         .filter(|m| {
-            m.chunk_type != "consolidated" && m.consolidated_from.is_empty() && !certified(m)
+            m.chunk_type != "consolidated"
+                && m.consolidated_from.is_empty()
+                && !certified(m)
+                && !consolidation_on_cooldown(m)
         })
         .collect()
 }
 
+/// Malformed cooldowns fail closed until an operator repairs the timestamp.
+pub fn consolidation_on_cooldown(memory: &MemoryPoint) -> bool {
+    memory.no_consolidate_until.as_deref().is_some_and(|until| {
+        chrono::DateTime::parse_from_rfc3339(until).map_or(true, |time| time > chrono::Utc::now())
+    })
+}
+
+pub fn evidence_fingerprints(sources: &[&MemoryPoint]) -> Vec<String> {
+    let mut evidence: Vec<_> = sources
+        .iter()
+        .flat_map(|source| {
+            if source.consolidated_evidence.is_empty() {
+                vec![source_fingerprint(&[source])]
+            } else {
+                source.consolidated_evidence.clone()
+            }
+        })
+        .collect();
+    evidence.sort();
+    evidence.dedup();
+    evidence
+}
+
 pub fn already_consolidated(sources: &[&MemoryPoint], existing: &[&MemoryPoint]) -> bool {
     let fingerprint = source_fingerprint(sources);
+    let covered: std::collections::HashSet<_> = existing
+        .iter()
+        .flat_map(|m| m.consolidated_evidence.iter())
+        .collect();
     sources.len() < 2
+        || evidence_fingerprints(sources)
+            .iter()
+            .all(|item| covered.contains(item))
         || existing.iter().any(|summary| {
             !summary.consolidated_from.is_empty()
                 && summary.source_hash == fingerprint
@@ -401,5 +434,40 @@ mod tests {
             ["source"]
         );
         assert!(consolidation_inputs(&[&summary.memory]).is_empty());
+    }
+    #[test]
+    fn evidence_coverage_handles_overlapping_and_ancestral_summaries() {
+        let a = point("a", &[1.0]);
+        let b = point("b", &[1.0]);
+        let c = point("c", &[1.0]);
+        let mut first = point("first", &[1.0]);
+        first.memory.consolidated_evidence = evidence_fingerprints(&[&a.memory, &b.memory]);
+        let mut second = point("second", &[1.0]);
+        second.memory.consolidated_evidence = evidence_fingerprints(&[&first.memory, &c.memory]);
+        assert!(already_consolidated(
+            &[&a.memory, &b.memory],
+            &[&second.memory]
+        ));
+        assert!(!already_consolidated(
+            &[&b.memory, &c.memory],
+            &[&first.memory]
+        ));
+        assert!(already_consolidated(
+            &[&a.memory, &c.memory],
+            &[&first.memory, &second.memory]
+        ));
+    }
+
+    #[test]
+    fn cooldown_blocks_consolidation_and_expires_by_timestamp() {
+        let mut memory = point("source", &[1.0]).memory;
+        memory.no_consolidate_until =
+            Some((chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339());
+        assert!(consolidation_inputs(&[&memory]).is_empty());
+        memory.no_consolidate_until =
+            Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339());
+        assert_eq!(consolidation_inputs(&[&memory]).len(), 1);
+        memory.no_consolidate_until = Some("invalid".into());
+        assert!(consolidation_inputs(&[&memory]).is_empty());
     }
 }

@@ -8,9 +8,10 @@ const DEFAULT_BACKUP_DIR: &str = "~/memex8-backups";
 /// Maximum number of backups to keep (rotation).
 const MAX_BACKUPS: usize = 7;
 
-/// Backup all memories, realms, and graph edges to a timestamped tarball.
+/// Backup memories, realms, graph edges, and consolidation journals to a timestamped tarball.
 /// Returns the path to the created backup file.
 pub async fn backup(engine: &Engine, output_path: Option<&str>) -> anyhow::Result<String> {
+    let _guard = engine.store().maintenance_guard().await;
     let backup_dir = expand_path(output_path.unwrap_or(DEFAULT_BACKUP_DIR));
     fs::create_dir_all(&backup_dir)?;
 
@@ -35,6 +36,12 @@ pub async fn backup(engine: &Engine, output_path: Option<&str>) -> anyhow::Resul
 
     tracing::info!("Exporting graph edges...");
     export_graph_edges(engine, &temp_dir).await?;
+
+    let journals = engine.store().list_consolidations().await?;
+    fs::write(
+        temp_dir.join("consolidations.json"),
+        serde_json::to_vec_pretty(&journals)?,
+    )?;
 
     // Export config
     let config_json = serde_json::to_string_pretty(&engine.config())?;
@@ -102,6 +109,43 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
     let _: Vec<crate::storage::qdrant::GraphEdge> =
         serde_json::from_str(&fs::read_to_string(temp_dir.join("graph_edges.json"))?)?;
 
+    let _guard = engine.store().maintenance_guard().await;
+    // Optional for backward compatibility with backups made before journals existed.
+    let journals_path = temp_dir.join("consolidations.json");
+    let journals: Vec<crate::storage::qdrant::ConsolidationOperation> = if journals_path.exists() {
+        serde_json::from_slice(&fs::read(&journals_path)?)?
+    } else {
+        Vec::new()
+    };
+    // Preflight every journal before the first database write. Never downgrade a
+    // progressed operation by restoring an older backup over it.
+    for operation in &journals {
+        anyhow::ensure!(
+            operation.version == 1,
+            "Unsupported consolidation journal version"
+        );
+        if let Some(existing) = engine
+            .store()
+            .get_consolidation(&operation.summary_id)
+            .await?
+        {
+            anyhow::ensure!(
+                serde_json::to_value(&existing)? == serde_json::to_value(operation)?,
+                "Consolidation journal {} differs from backup; restore to an isolated instance",
+                operation.summary_id
+            );
+        }
+    }
+    for operation in &journals {
+        if engine
+            .store()
+            .get_consolidation(&operation.summary_id)
+            .await?
+            .is_none()
+        {
+            engine.store().archive_consolidation(operation).await?;
+        }
+    }
     let mut restored = 0;
 
     // Import memories

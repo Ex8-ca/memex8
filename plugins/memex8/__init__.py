@@ -316,6 +316,9 @@ class _Client:
             body["visibility"] = visibility
         return self.request("POST", "/api/v1/memories", json_body=body)
 
+    def unconsolidate(self, memory_id: str) -> dict:
+        return self.request("POST", f"/api/v1/memories/{memory_id}/unconsolidate")
+
     def certify(self, memory_id: str, revoke: bool = False, by: str = None, note: str = None) -> dict:
         if not isinstance(revoke, bool):
             raise ValueError("revoke must be a boolean")
@@ -477,6 +480,16 @@ REMEMBER_SCHEMA = {
             },
         },
         "required": ["content"],
+    },
+}
+
+UNCONSOLIDATE_SCHEMA = {
+    "name": "memex8_unconsolidate",
+    "description": "Undo a consolidated summary from its durable archive. Restores missing originals, retains newer edits, and deletes the summary after restoration. Sources get a 30-day consolidation cooldown. Safe to retry a partial failure.",
+    "parameters": {
+        "type": "object",
+        "properties": {"memory_id": {"type": "string", "description": "Summary/journal ID"}},
+        "required": ["memory_id"],
     },
 }
 
@@ -1485,7 +1498,7 @@ class Memex8MemoryProvider(MemoryProvider):
     # -- Tools --
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [SEARCH_SCHEMA, RECALL_SCHEMA, REMEMBER_SCHEMA, CERTIFY_SCHEMA, FORGET_SCHEMA, REALMS_SCHEMA, GET_SCHEMA]
+        return [SEARCH_SCHEMA, RECALL_SCHEMA, REMEMBER_SCHEMA, CERTIFY_SCHEMA, UNCONSOLIDATE_SCHEMA, FORGET_SCHEMA, REALMS_SCHEMA, GET_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._is_breaker_open():
@@ -1542,6 +1555,12 @@ class Memex8MemoryProvider(MemoryProvider):
                 # enum constraint is the only gate.
                 visibility=args.get("visibility"),
             )
+
+        if tool_name == "memex8_unconsolidate":
+            memory_id = args.get("memory_id", "")
+            if not memory_id:
+                return {"error": "memory_id is required"}
+            return client.unconsolidate(memory_id)
 
         if tool_name == "memex8_certify":
             memory_id = args.get("memory_id", "")

@@ -1,5 +1,36 @@
 # memex8 Implementation Status
 
+## 2026-11-08 — Provenance and recoverable consolidation (roadmap C)
+
+- Added default-safe derivation timestamps, consolidation cooldowns, and evidence
+  fingerprints alongside direct source IDs. Full GET/import/export retain them.
+  Typed consolidation options carry provenance without arbitrary payload overrides.
+- Added durable `consolidation_archive` journals with complete typed source payloads,
+  original vectors, capture-time embedding configuration, and operation state.
+  Archives and replacement summaries are read back before source deletion; deletion
+  rechecks content/type/visibility and certification in Qdrant.
+- REST, both Rust MCP transports, and Hermes expose unconsolidate. Missing sources
+  are re-embedded with the current model; existing source edits/certification survive.
+  All restored/retained sources receive at least a 30-day consolidation cooldown.
+  Sources and cooldowns are read back before deleting the summary. Retrying partial
+  work is safe; completed retries do not resurrect later deliberate deletions.
+- Undo rejects edited/certified summaries, handles preserved/legacy sources, and
+  invalidates local TurboVec memory/disk caches. Existing memory GET now returns
+  404 for missing IDs. Maintenance, edit/import, payload changes, explicit deletion,
+  certification, backup, and undo coordinate through an exclusive local gate.
+- CLI backups include journals; restore accepts older backups without journals and
+  refuses to downgrade existing journal state. Archives are retained without cleanup.
+  Independent writer processes require external serialization.
+- Added failure/retry/cooldown/search/backup recovery integration coverage against
+  disposable Qdrant and local mock models, plus Rust and Hermes contract tests.
+- Validation passed: `cargo build`, `cargo fmt --check`, and Rust tests (68 per
+  unit-test target plus 38 core integration tests, with the existing k-means skip).
+  Five disposable-Qdrant recovery scenarios, certification and read-only duplicate
+  suites, Hermes consolidation/certification/visibility contracts, existing backup,
+  export/import path, and shared-memory bridge tests passed. CI includes the new
+  suites and runs for dependent PRs. Existing compiler warnings remain.
+  No new config keys, deployment, or live-data changes.
+
 ## 2026-11-08 — Certified memories (roadmap B)
 
 - Added default-safe certification timestamp, attribution, and note fields; the

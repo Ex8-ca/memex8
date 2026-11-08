@@ -1,7 +1,7 @@
 # memex8 improvement execution plan
 
 Date: 2026-11-08  
-Status: package A merged; package B implemented and validated; C–H pending
+Status: A merged; B validated in PR #26; C implemented and validated; D–H pending
 Source: `PLAN-2026-11-08-trending-improvements.md` (original brief, preserved)
 
 ## Outcomes
@@ -110,22 +110,22 @@ normal lifecycle behavior. Two certified duplicates both survive automatic dedup
 Branch: `feat/consolidation-provenance`  
 Dependencies: B
 
-- [ ] Add `consolidated_from`, `derived_by`, `consolidated_at`, and
+- [x] Add `consolidated_from`, `derived_by`, `consolidated_at`, and
   `no_consolidate_until` with defaults. Expose provenance in full retrieval.
-- [ ] Prefer a typed write-options structure over more positional arguments or
+- [x] Prefer a typed write-options structure over more positional arguments or
   unrestricted extra payload that could override protected fields.
-- [ ] Record direct source IDs and resolve ancestry for recurrence checks. Skip
+- [x] Record direct source IDs and resolve ancestry for recurrence checks. Skip
   single-summary groups and groups that add no new underlying evidence; partial
   ancestry overlap alone must not suppress genuinely new information.
-- [ ] Use a dedicated durable Qdrant archive collection for removed originals.
+- [x] Use a dedicated durable Qdrant archive collection for removed originals.
   Archive complete payloads and vectors, not only four fields: restore must retain
   tags, visibility, realm, certification, dates, scores, and identity. Record the
   embedding model/dimension so vectors can be reused safely or re-embedded.
-- [ ] Verify archive writes and summary persistence before deleting any source.
+- [x] Verify archive writes and summary persistence before deleting any source.
   Track operation state so partial failures and retries are recoverable.
-- [ ] Implement REST unconsolidate with authorization and conflict handling.
+- [x] Implement REST unconsolidate with authorization and conflict handling.
   Restore all sources durably before deleting the summary; retries must be safe.
-- [ ] Apply a 30-day consolidation cooldown to restored points and retain it across
+- [x] Apply a 30-day consolidation cooldown to restored points and retain it across
   updates. With preserved originals, use existing source points without overwriting
   newer edits. If an old summary has no recoverable sources, return a clear error.
 
@@ -285,6 +285,8 @@ Merged: https://github.com/Ex8-ca/memex8/pull/25 (`6c32f3b`).
 
 ### 2026-11-08 — Package B
 
+Draft PR: https://github.com/Ex8-ca/memex8/pull/26 (all three CI checks passed).
+
 - Implemented certification from merged main on `feat/certified-memories`.
 - Added certify/revoke to REST, both Rust MCP dispatchers, and Hermes; ordinary
   capture stays uncertified and explicit remember certification is atomic.
@@ -297,6 +299,26 @@ Merged: https://github.com/Ex8-ca/memex8/pull/25 (`6c32f3b`).
 - Validation passed: build, formatting, 66 tests in each Rust unit-test target,
   38 core integration tests, both disposable-Qdrant suites, and Hermes contracts.
   The existing k-means skip and compiler warnings remain.
+
+### 2026-11-08 — Package C
+
+- Built on `feat/certified-memories` in a separate dependent branch,
+  `feat/consolidation-provenance`; B remains a separate PR.
+- Added durable full-source/vector journals, provenance and underlying evidence
+  fingerprints, typed summary metadata, checked archive/summary persistence, and
+  conditional source deletion. Near-duplicate removal remains package D.
+- Added REST/MCP/Hermes undo, source/cooldown read-back, preserved-source edit
+  handling, legacy recovery errors, retry states, and local index invalidation.
+- Serialized local maintenance/content mutations/recovery and added journals to
+  existing CLI backup/restore. Docker volume backups already include all collections.
+- Integration tests cover archive write failure, interrupted deletion, partial
+  restore failure/retry, metadata preservation, cooldown, immediate search visibility,
+  and backup restoration to an isolated instance. All five scenarios passed.
+- Build, formatting, 68 tests in each Rust unit-test target, 38 core integration
+  tests, and the existing certification/duplicate-inspection/plugin/backup/bridge
+  regressions passed. The existing k-means skip and compiler warnings remain.
+- No deployment or live-data changes. Archives are retained; independent writer
+  processes need external serialization.
 
 ## First work session
 

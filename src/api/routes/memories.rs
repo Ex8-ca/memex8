@@ -72,6 +72,13 @@ pub async fn store(
     }))
 }
 
+pub async fn unconsolidate(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::storage::qdrant::UnconsolidateResult>, ApiError> {
+    Ok(Json(state.engine.unconsolidate(&id).await?))
+}
+
 #[derive(Default, Deserialize)]
 pub struct CertifyRequest {
     pub by: Option<String>,
@@ -145,7 +152,12 @@ pub async fn get(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::storage::qdrant::MemoryPoint>, crate::api::error::ApiError> {
-    let memory = state.engine.get_memory(&id).await?;
+    let memory = state
+        .engine
+        .store()
+        .get_memory(&id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(id))?;
     Ok(Json(memory))
 }
 

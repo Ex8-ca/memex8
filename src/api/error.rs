@@ -34,6 +34,16 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
+        if let Some(error) = e.downcast_ref::<crate::storage::qdrant::RecoveryError>() {
+            return match error {
+                crate::storage::qdrant::RecoveryError::NotFound(message) => {
+                    Self::NotFound(message.clone())
+                }
+                crate::storage::qdrant::RecoveryError::Conflict(message) => {
+                    Self::Conflict(message.clone())
+                }
+            };
+        }
         if e.is::<crate::storage::qdrant::CertifiedMemoryError>() {
             return Self::Conflict(e.to_string());
         }
