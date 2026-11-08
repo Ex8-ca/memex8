@@ -1,7 +1,7 @@
 # memex8 improvement execution plan
 
 Date: 2026-11-08  
-Status: A merged; B validated in PR #26; C implemented and validated; D–H pending
+Status: A merged; B validated in PR #26; C validated in PR #27; D locally validated; E–H pending
 Source: `PLAN-2026-11-08-trending-improvements.md` (original brief, preserved)
 
 ## Outcomes
@@ -138,13 +138,13 @@ source deletion, and restore do not cause unrecoverable loss or duplicate restor
 Branch: `fix/slumber-near-dup-removal`  
 Dependencies: A, B, C
 
-- [ ] Archive losers before removal, merge tags and access counts into the winner,
+- [x] Archive losers before removal, merge tags and access counts into the winner,
   and record loser IDs and dedup provenance without losing existing ancestry.
-- [ ] Make the metadata merge idempotent: retries must not add access counts twice.
+- [x] Make the metadata merge idempotent: retries must not add access counts twice.
   Recheck protection and relevant state immediately before mutation.
-- [ ] Keep `dedup_dry_run = true` as the shipped default. Disabling it is an explicit
+- [x] Keep `dedup_dry_run = true` as the shipped default. Disabling it is an explicit
   operator action after candidate review and a verified recovery procedure.
-- [ ] Refresh/invalidate TurboVec and other affected cached references through the
+- [x] Refresh/invalidate TurboVec and other affected cached references through the
   existing consistency mechanism so removed IDs stop surfacing in retrieval.
 
 Done when: the four-vector fixture retains one winner plus the distinct point,
@@ -302,6 +302,8 @@ Draft PR: https://github.com/Ex8-ca/memex8/pull/26 (all three CI checks passed).
 
 ### 2026-11-08 — Package C
 
+Draft PR: https://github.com/Ex8-ca/memex8/pull/27 (all three CI checks passed).
+
 - Built on `feat/certified-memories` in a separate dependent branch,
   `feat/consolidation-provenance`; B remains a separate PR.
 - Added durable full-source/vector journals, provenance and underlying evidence
@@ -319,6 +321,24 @@ Draft PR: https://github.com/Ex8-ca/memex8/pull/26 (all three CI checks passed).
   regressions passed. The existing k-means skip and compiler warnings remain.
 - No deployment or live-data changes. Archives are retained; independent writer
   processes need external serialization.
+
+### 2026-11-08 — Package D
+
+- Built on the recovery branch in `fix/slumber-near-dup-removal`; C remains a
+  separate dependent PR. Default dry run remains enabled; no deployment performed.
+- Added archive-before-delete operations, atomic winner metadata/marker writes,
+  per-identity access accounting, protection/scope/vector/snapshot rechecks,
+  interrupted-operation handling, and explicit duplicate recovery across all tools.
+- Added 30-day restored-point cooldowns, indexed orphan-reference cleanup, cache
+  invalidation, and candidate/removal/skipped/operation-ID reporting. Existing
+  backup/restore includes both journal kinds and accepts older consolidation journals.
+  Consolidation undo remains available after dedup and applies both cooldowns.
+- Added Rust accounting/scope tests and disposable-Qdrant removal/failure/retry/
+  recovery/certification/backup tests, plus Hermes contracts. Formatting/build,
+  71+71+38 Rust tests (existing kmeans skip), all seven dedup and five consolidation
+  recovery scenarios, and certification/inspection/plugin/backup/path/bridge
+  regressions passed.
+- Future live rollout still requires candidate review and explicit removal enablement.
 
 ## First work session
 

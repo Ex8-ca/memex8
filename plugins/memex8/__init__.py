@@ -316,6 +316,9 @@ class _Client:
             body["visibility"] = visibility
         return self.request("POST", "/api/v1/memories", json_body=body)
 
+    def restore_duplicate(self, operation_id: str) -> dict:
+        return self.request("POST", f"/api/v1/dedup/{operation_id}/restore")
+
     def unconsolidate(self, memory_id: str) -> dict:
         return self.request("POST", f"/api/v1/memories/{memory_id}/unconsolidate")
 
@@ -481,6 +484,13 @@ REMEMBER_SCHEMA = {
         },
         "required": ["content"],
     },
+}
+
+RESTORE_DUPLICATE_SCHEMA = {
+    "name": "memex8_restore_duplicate",
+    "description": "Restore a removed duplicate from its slumber operation journal. Keeps the current winner and newer edits, applies 30-day dedup/consolidation cooldowns, and is safe to retry. Use an operation ID from the slumber report/log.",
+    "parameters": {"type": "object", "properties": {"operation_id": {"type": "string"}},
+                   "required": ["operation_id"]},
 }
 
 UNCONSOLIDATE_SCHEMA = {
@@ -1498,7 +1508,7 @@ class Memex8MemoryProvider(MemoryProvider):
     # -- Tools --
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [SEARCH_SCHEMA, RECALL_SCHEMA, REMEMBER_SCHEMA, CERTIFY_SCHEMA, UNCONSOLIDATE_SCHEMA, FORGET_SCHEMA, REALMS_SCHEMA, GET_SCHEMA]
+        return [SEARCH_SCHEMA, RECALL_SCHEMA, REMEMBER_SCHEMA, CERTIFY_SCHEMA, UNCONSOLIDATE_SCHEMA, RESTORE_DUPLICATE_SCHEMA, FORGET_SCHEMA, REALMS_SCHEMA, GET_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._is_breaker_open():
@@ -1555,6 +1565,12 @@ class Memex8MemoryProvider(MemoryProvider):
                 # enum constraint is the only gate.
                 visibility=args.get("visibility"),
             )
+
+        if tool_name == "memex8_restore_duplicate":
+            operation_id = args.get("operation_id", "")
+            if not operation_id:
+                return {"error": "operation_id is required"}
+            return client.restore_duplicate(operation_id)
 
         if tool_name == "memex8_unconsolidate":
             memory_id = args.get("memory_id", "")

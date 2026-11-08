@@ -18,6 +18,12 @@ impl Engine {
                         id
                     ))
                 })?;
+                if memory.derived_by == "dedup" && memory.chunk_type != "consolidated" {
+                    return Err(RecoveryError::Conflict(
+                        "Use restore-duplicate with a dedup_applied_operations journal ID".into(),
+                    )
+                    .into());
+                }
                 if memory.consolidated_from.is_empty() {
                     return Err(RecoveryError::Conflict(
                         "Memory has no recoverable consolidation sources".into(),
@@ -35,6 +41,8 @@ impl Engine {
                 // overwriting newer edits with an older approximation.
                 let operation = ConsolidationOperation {
                     version: 1,
+                    kind: "consolidation".into(),
+                    dedup_winner: None,
                     summary_id: id.into(),
                     summary_hash: content_hash(&memory.content),
                     created_at: chrono::Utc::now().to_rfc3339(),
@@ -50,6 +58,12 @@ impl Engine {
                 operation
             }
         };
+        if operation.kind != "consolidation" {
+            return Err(RecoveryError::Conflict(
+                "Use restore-duplicate for a duplicate-removal journal".into(),
+            )
+            .into());
+        }
         let ids: Vec<_> = operation
             .sources
             .iter()
@@ -79,7 +93,7 @@ impl Engine {
         if let Some(summary) = &summary {
             if summary.is_certified()
                 || content_hash(&summary.content) != operation.summary_hash
-                || summary.consolidated_from != ids
+                || ids.iter().any(|id| !summary.consolidated_from.contains(id))
             {
                 return Err(RecoveryError::Conflict(
                     "Summary was edited or certified; revoke certification or resolve the edit before undo".into(),
@@ -108,17 +122,7 @@ impl Engine {
 
         // Invalidate both memory and disk caches before restoring sources. Search
         // falls back to Qdrant until slumber builds a fresh compressed index.
-        *self.turbovec_index.write().await = None;
-        for path in [
-            &self.config.turbovec.index_path,
-            &self.config.turbovec.id_map_path,
-        ] {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
+        self.invalidate_search_index().await?;
         let mut restored = 0;
         let mut retained = 0;
         let mut embedder = None;
@@ -132,10 +136,17 @@ impl Engine {
                     .filter(|v| v.with_timezone(&chrono::Utc) > cooldown_time)
                     .map(|v| v.to_rfc3339())
                     .unwrap_or_else(|| cooldown.clone());
+                let dedup_until = existing
+                    .no_dedup_until
+                    .as_deref()
+                    .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+                    .map(|v| v.with_timezone(&chrono::Utc).max(cooldown_time))
+                    .unwrap_or(cooldown_time)
+                    .to_rfc3339();
                 self.store
                     .update_memory_payload(
                         &existing.id,
-                        serde_json::json!({"no_consolidate_until": until}).try_into()?,
+                        serde_json::json!({"no_consolidate_until": until, "no_dedup_until": dedup_until}).try_into()?,
                     )
                     .await?;
                 retained += 1;
@@ -157,6 +168,7 @@ impl Engine {
                 );
                 let mut memory = snapshot.memory.clone();
                 memory.no_consolidate_until = Some(cooldown.clone());
+                memory.no_dedup_until = Some(cooldown.clone());
                 self.store.replace_memory(&memory, &vector).await?;
                 restored += 1;
             }
@@ -170,12 +182,15 @@ impl Engine {
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Source {} is not durable after restore", source))?;
             anyhow::ensure!(
-                restored
-                    .memory
-                    .no_consolidate_until
+                [
+                    restored.memory.no_consolidate_until,
+                    restored.memory.no_dedup_until
+                ]
+                .iter()
+                .all(|value| value
                     .as_deref()
                     .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
-                    .is_some_and(|v| v >= cooldown_time),
+                    .is_some_and(|v| v >= cooldown_time)),
                 "Source {} cooldown failed read-back",
                 source
             );

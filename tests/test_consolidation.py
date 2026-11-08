@@ -22,7 +22,7 @@ from test_certification import request, wait_ready
 
 
 @contextmanager
-def fixture(preserve=False, archive_dimensions=1):
+def fixture(preserve=False, archive_dimensions=1, dedup_dry_run=True):
     repo = Path(__file__).resolve().parents[1]
     binary = os.environ.get("MEMEX8_TEST_BINARY", str(repo / "target/debug/memex8"))
     container = subprocess.check_output([
@@ -94,6 +94,7 @@ def fixture(preserve=False, archive_dimensions=1):
             assert '[memex8_md]\nenabled = false' in config
             assert '[digest_md]\nenabled = false' in config
             assert '[verification]\nenabled = false' in config
+            config = config.replace('dedup_dry_run = true', 'dedup_dry_run = ' + str(dedup_dry_run).lower())
             config = config.replace('preserve_originals = true', 'preserve_originals = ' + str(preserve).lower())
             config = config.replace('idle_timeout = "10m"', 'idle_timeout = "24h"')
             config_path = work / "config.toml"
@@ -250,8 +251,8 @@ class ConsolidationTests(unittest.TestCase):
                     self.assertEqual(restored["content"], "Newer user edit")
                     self.assertEqual(restored["tags"], ["newer-edit"])
                 else:
-                    expected = {k: v for k, v in snapshot.items() if k not in {"vector", "no_consolidate_until"}}
-                    actual = {k: v for k, v in restored.items() if k != "no_consolidate_until"}
+                    expected = {k: v for k, v in snapshot.items() if k not in {"vector", "no_consolidate_until", "no_dedup_until"}}
+                    actual = {k: v for k, v in restored.items() if k not in {"no_consolidate_until", "no_dedup_until"}}
                     for field in ["importance", "verification_confidence", "reaction_score", "quantized_bit_width"]:
                         self.assertAlmostEqual(actual.pop(field), expected.pop(field), places=6)
                     self.assertEqual(actual, expected)
@@ -287,6 +288,11 @@ class ConsolidationTests(unittest.TestCase):
             f["api"]("/slumber/trigger?force_consolidation=true", {}, "POST")
             summary_id = next(p["id"] for p in points(f) if p["payload"].get("chunk_type") == "consolidated")
             self.assertTrue(operation(f, summary_id)["preserve_originals"])
+            # Package C archives had neither of these fields; defaults retain undo.
+            legacy_journal = operation(f, summary_id)
+            legacy_journal.pop("kind", None)
+            legacy_journal.pop("dedup_winner", None)
+            write_operation(f, legacy_journal)
             # Refuse to discard an edited summary.
             original_summary = f["api"]("/memories/" + summary_id)["content"]
             f["q"]("/collections/memories/points/payload?wait=true", {"points": [summary_id],

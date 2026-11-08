@@ -72,6 +72,13 @@ pub async fn store(
     }))
 }
 
+pub async fn restore_duplicate(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::engine::dedup_removal::DuplicateRestoreResult>, ApiError> {
+    Ok(Json(state.engine.restore_duplicate(&id).await?))
+}
+
 pub async fn unconsolidate(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

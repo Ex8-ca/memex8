@@ -4,6 +4,7 @@ pub mod chunker;
 pub mod consolidation;
 pub mod decay;
 pub mod dedup;
+pub mod dedup_removal;
 pub mod doctor;
 pub mod embedder;
 pub mod graph;
@@ -1077,6 +1078,12 @@ impl Engine {
         }
     }
 
+    /// Qdrant remains authoritative while compressed indexes are rebuilt.
+    pub(crate) async fn invalidate_search_index(&self) -> anyhow::Result<()> {
+        *self.turbovec_index.write().await = None;
+        dedup_removal::invalidate_index_files(&self.config)
+    }
+
     pub async fn trigger_slumber(
         &self,
         force_consolidation: bool,
@@ -1088,7 +1095,18 @@ impl Engine {
 
         tracing::info!("💤 Slumber started...");
         let slumber = slumber::SlumberEngine::new(self.config.clone(), self.store.clone_store());
-        let report = slumber.run_full_pipeline(force_consolidation).await?;
+        let result = async {
+            if !self.config.slumber.dedup_dry_run {
+                self.invalidate_search_index().await?;
+            }
+            slumber.run_full_pipeline(force_consolidation).await
+        }
+        .await;
+        // Reset even after an archive/index/storage failure so status is accurate.
+        if result.is_err() {
+            self.slumber_state.write().await.status = "idle".into();
+        }
+        let report = result?;
 
         {
             let mut state = self.slumber_state.write().await;
