@@ -177,7 +177,7 @@ pub struct SlumberConfig {
     /// Minimum original-vector cosine similarity for a duplicate candidate.
     #[serde(default = "default_dedup_threshold")]
     pub dedup_threshold: f32,
-    /// Safe default. Removal is unavailable until archive support lands.
+    /// Safe default. False enables archived duplicate removal during full slumber.
     #[serde(default = "default_dedup_dry_run")]
     pub dedup_dry_run: bool,
     /// Bound pair comparisons per realm; truncated reports are explicitly marked.

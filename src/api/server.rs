@@ -110,6 +110,10 @@ pub async fn run_with_engine(
 fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
+            "/dedup/{id}/restore",
+            axum::routing::post(crate::api::routes::memories::restore_duplicate),
+        )
+        .route(
             "/memories/{id}/unconsolidate",
             axum::routing::post(crate::api::routes::memories::unconsolidate),
         )

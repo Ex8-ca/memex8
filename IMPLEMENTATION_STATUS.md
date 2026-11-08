@@ -1,5 +1,34 @@
 # memex8 Implementation Status
 
+## 2026-11-08 — Safe duplicate removal (roadmap D)
+
+- Full slumber supports archived removal when `dedup_dry_run=false`; the shipped
+  default remains true and `slumber inspect-duplicates` is always read-only.
+  Candidate eligibility adds project-tag scope and restored-point cooldowns.
+- Added backward-compatible dedup journal kinds to the existing archive. Full loser
+  snapshots/vectors and pre-merge winner payloads are verified before mutation.
+  Winner tags/ancestry/evidence and an idempotency marker are written together;
+  per-identity access contributions avoid repeated counting and shared-ancestry
+  inflation. Existing derivation/certification metadata and content are retained.
+- Prepared operations resume after interruption and recheck current vectors,
+  source snapshots, ordering, scope, and protection. Changed operations are
+  cancelled with archives retained. Reports distinguish candidates, actual removals,
+  skipped pairs, and journal IDs. Failures reset slumber status to idle.
+- Added REST/MCP/Hermes duplicate restoration with current-model re-embedding,
+  preservation of existing source edits/certification, retry state, and 30-day
+  dedup/consolidation cooldowns. Winner metadata is retained during restoration.
+  Existing CLI backups carry both journal kinds; old consolidation journals default
+  to their original kind. Consolidation undo accepts appended dedup ancestry and
+  gives its restored sources both cooldowns to prevent immediate removal.
+- Invalidated in-memory/disk search caches before removal/restore; cleaned dangling
+  graph/association references. Added archive kind/state and association keyword
+  indexes, including existing collections, for bounded retrieval of affected records.
+- Validation: formatting/build passed; Rust suites passed (71 lib, 71 binary,
+  38 integration; existing kmeans skip). Seven disposable-Qdrant dedup scenarios,
+  five consolidation recovery scenarios, certification/inspection, Hermes contracts,
+  and backup/path/bridge regressions passed. Existing configuration keys only; no
+  deployment or live-data changes. Independent writer processes require serialization.
+
 ## 2026-11-08 — Provenance and recoverable consolidation (roadmap C)
 
 - Added default-safe derivation timestamps, consolidation cooldowns, and evidence

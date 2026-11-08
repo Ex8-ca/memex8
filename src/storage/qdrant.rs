@@ -46,6 +46,15 @@ pub struct MemoryPoint {
     /// Content fingerprints of underlying evidence, retained after sources disappear.
     #[serde(default)]
     pub consolidated_evidence: Vec<String>,
+    /// Dedup recovery protects a restored point from immediate removal.
+    #[serde(default)]
+    pub no_dedup_until: Option<String>,
+    /// Journal IDs applied atomically with metadata; prevents retrying the merge.
+    #[serde(default)]
+    pub dedup_applied_operations: Vec<String>,
+    /// Per-original-ID access contributions avoid counting shared ancestry twice.
+    #[serde(default)]
+    pub dedup_access_contributions: std::collections::BTreeMap<String, u32>,
     /// IDs of semantically associated memories.
     #[serde(default)]
     pub related_memory_ids: Vec<String>,
@@ -360,6 +369,9 @@ fn memory_to_payload(mem: &MemoryPoint) -> Payload {
         "consolidated_at": mem.consolidated_at,
         "no_consolidate_until": mem.no_consolidate_until,
         "consolidated_evidence": mem.consolidated_evidence,
+        "no_dedup_until": mem.no_dedup_until,
+        "dedup_applied_operations": mem.dedup_applied_operations,
+        "dedup_access_contributions": mem.dedup_access_contributions,
         "related_memory_ids": mem.related_memory_ids,
         "association_strengths": mem.association_strengths,
         "reaction_score": mem.reaction_score,
@@ -411,6 +423,12 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
         consolidated_at: map_str(map, "consolidated_at"),
         no_consolidate_until: map_str(map, "no_consolidate_until"),
         consolidated_evidence: map_str_vec(map, "consolidated_evidence"),
+        no_dedup_until: map_str(map, "no_dedup_until"),
+        dedup_applied_operations: map_str_vec(map, "dedup_applied_operations"),
+        dedup_access_contributions: map
+            .get("dedup_access_contributions")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
         related_memory_ids: map_str_vec(map, "related_memory_ids"),
         association_strengths: map_f32_vec(map, "association_strengths"),
         reaction_score: map_f32(map, "reaction_score"),
@@ -545,16 +563,14 @@ impl QdrantStore {
         self.backfill_visibility().await?;
 
         // Also install the index for existing collections; creation is idempotent.
-        self.client
-            .create_field_index(
-                CreateFieldIndexCollectionBuilder::new(
-                    MEMORIES,
-                    "verification_status",
-                    FieldType::Keyword,
+        for field in ["verification_status", "related_memory_ids"] {
+            self.client
+                .create_field_index(
+                    CreateFieldIndexCollectionBuilder::new(MEMORIES, field, FieldType::Keyword)
+                        .wait(true),
                 )
-                .wait(true),
-            )
-            .await?;
+                .await?;
+        }
 
         self.ensure_consolidation_archive().await?;
 
@@ -708,6 +724,9 @@ impl QdrantStore {
             consolidated_at: None,
             no_consolidate_until: None,
             consolidated_evidence: Vec::new(),
+            no_dedup_until: None,
+            dedup_applied_operations: Vec::new(),
+            dedup_access_contributions: Default::default(),
             related_memory_ids: vec![],
             association_strengths: vec![],
             reaction_score,
@@ -2013,6 +2032,9 @@ mod tests {
             consolidated_at: Some("2026-11-08T00:00:00Z".into()),
             no_consolidate_until: Some("2026-12-08T00:00:00Z".into()),
             consolidated_evidence: vec!["evidence-fingerprint".into()],
+            no_dedup_until: Some("2026-12-08T00:00:00Z".into()),
+            dedup_applied_operations: vec!["operation-id".into()],
+            dedup_access_contributions: [("source-a".into(), 4)].into(),
             related_memory_ids: vec![],
             association_strengths: vec![],
             reaction_score: 0.0,
@@ -2045,6 +2067,15 @@ mod tests {
         assert_eq!(decoded.derived_by, original.derived_by);
         assert_eq!(decoded.consolidated_at, original.consolidated_at);
         assert_eq!(decoded.no_consolidate_until, original.no_consolidate_until);
+        assert_eq!(decoded.no_dedup_until, original.no_dedup_until);
+        assert_eq!(
+            decoded.dedup_applied_operations,
+            original.dedup_applied_operations
+        );
+        assert_eq!(
+            decoded.dedup_access_contributions,
+            original.dedup_access_contributions
+        );
         assert_eq!(
             decoded.consolidated_evidence,
             original.consolidated_evidence
@@ -2070,6 +2101,9 @@ mod tests {
         assert!(decoded.derived_by.is_empty());
         assert!(decoded.consolidated_at.is_none());
         assert!(decoded.no_consolidate_until.is_none());
+        assert!(decoded.no_dedup_until.is_none());
+        assert!(decoded.dedup_applied_operations.is_empty());
+        assert!(decoded.dedup_access_contributions.is_empty());
         assert!(decoded.consolidated_evidence.is_empty());
         assert!(!decoded.is_certified());
         assert!(decoded.certified_at.is_none());

@@ -403,6 +403,7 @@ memex8 stats         # System statistics
 | `GET`  | `/api/v1/memories/verification-summary` | Count memories by verification status (certified/verified/stale/contradicted/unverified) |
 | `POST` | `/api/v1/memories/{id}/certify` | Certify a memory; optional body `{ "by": "marc", "note": "Confirmed" }` |
 | `DELETE` | `/api/v1/memories/{id}/certify` | Revoke certification and resume normal lifecycle |
+| `POST` | `/api/v1/dedup/{operation_id}/restore` | Restore a removed duplicate from its journal |
 | `POST` | `/api/v1/memories/{id}/unconsolidate` | Restore consolidation sources, then remove the summary; safe to retry |
 | `GET`  | `/api/v1/memories/{id}` | Get memory by ID, including provenance |
 | `PATCH` | `/api/v1/memories/{id}` | Partial payload update — accepts `{memory_type, importance}`. Used by the retroactive classifier script |
@@ -489,8 +490,56 @@ Maintenance, certification, edit/import, payload changes, deletion, backup, and 
 coordinate within one process. Run maintenance/recovery through a single writer;
 independent processes sharing Qdrant require external serialization. Qdrant filters
 also recheck content, type, visibility, and certification immediately at deletion.
-No new configuration keys are required. Near-duplicate deletion remains disabled
-until the separate safe-removal work lands.
+No new configuration keys are required.
+
+### Archived duplicate removal
+
+`[slumber] dedup_dry_run = true` remains the default. In a full slumber run, setting
+it to `false` enables actual exact/near-duplicate removal. The separate
+`memex8 slumber inspect-duplicates` command always stays read-only, including when
+that setting is false. Review its candidate report before enabling removal.
+A full slumber still runs the other mutating maintenance phases when dedup dry run is enabled.
+
+Each loser must match its retained winner directly using current original vectors,
+the configured similarity threshold, and deterministic winner ordering. Removal
+respects realm, visibility, `project:` tag scope, long-lived memory types,
+certification, and recovery cooldowns. Two certified duplicates both survive.
+A certified winner retains its content, importance, and certification; merging tags,
+access counts, and provenance is allowed.
+
+Before deletion, the full loser payload/vector and the winner's pre-merge payload
+are saved and read back in `consolidation_archive` with `kind="dedup"`. The winner
+receives the union of tags and ancestry (`consolidated_from`), evidence fingerprints,
+and a journal marker in the same payload write. Per-original-ID access contributions
+prevent repeated counting across retries, restored duplicates, and shared ancestry.
+Existing derivation labels are retained; otherwise `derived_by` becomes `dedup`.
+Full retrieval exposes `no_dedup_until`, `dedup_applied_operations`, and
+`dedup_access_contributions` with backward-compatible defaults.
+The source snapshot, pair eligibility, and original vectors are checked again
+before removal. If an interrupted operation has changed, it is cancelled and its
+archive retained. Pending prepared operations resume on the next enabled slumber.
+
+Slumber reports distinguish `dedup_candidates`, actual `deduplicated`,
+`dedup_skipped`, and `dedup_operation_ids`. Journal IDs are also logged as soon as
+archiving succeeds, so partial failures remain recoverable. Find the last report at
+`GET /api/v1/slumber/status`. Removal invalidates the serving process's TurboVec
+cache/files; slumber rebuilds the disk index and search falls back to Qdrant.
+Dangling graph edges and association IDs are removed with indexed lookups.
+
+Restore a loser with `POST /api/v1/dedup/{operation_id}/restore` or
+`memex8_restore_duplicate(operation_id)` in MCP/Hermes. Missing points are
+re-embedded with the current model and restored under their original IDs; current
+source edits and certification are retained. Both dedup and consolidation receive
+at least a 30-day cooldown. Consolidation undo applies both cooldowns as well and
+continues to work after a summary has received duplicate ancestry. Retry partial restores using the same operation ID.
+Completed restores return `already_restored=true` without recreating points removed
+later. The winner's current metadata is retained rather than subtracting historical
+counts/tags from newer activity; contribution tracking prevents a later removal of
+the restored identity from counting the same accesses twice.
+
+Dedup journals use the existing archive retention and backup/restore rules above.
+As with consolidation recovery, independent writers require external serialization.
+This feature does not enable removal in an existing default configuration.
 
 All endpoints (except `/health`) require `Authorization: Bearer *api_key*`.
 

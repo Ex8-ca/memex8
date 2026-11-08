@@ -16,9 +16,13 @@ pub struct DuplicateCandidate {
 pub struct DedupReport {
     pub memories_scanned: usize,
     pub candidates: Vec<DuplicateCandidate>,
-    /// Actual writes are deliberately unavailable in the detection release.
+    /// Actual removals; inspection always leaves this at zero.
     pub deduplicated: usize,
     pub dry_run: bool,
+    #[serde(default)]
+    pub skipped: usize,
+    #[serde(default)]
+    pub operation_ids: Vec<String>,
     pub protected_duplicates: usize,
     pub invalid_vectors: usize,
     pub comparisons: usize,
@@ -33,10 +37,19 @@ fn memory_type(memory: &MemoryPoint) -> &str {
     }
 }
 
-fn compatible(a: &MemoryPoint, b: &MemoryPoint) -> bool {
+pub(crate) fn compatible(a: &MemoryPoint, b: &MemoryPoint) -> bool {
     let long_lived = |t| matches!(t, "profile" | "preference" | "entity" | "relationship");
     let (at, bt) = (memory_type(a), memory_type(b));
-    normalize_visibility(&a.visibility) == normalize_visibility(&b.visibility)
+    let projects = |memory: &MemoryPoint| -> std::collections::BTreeSet<String> {
+        memory
+            .tags
+            .iter()
+            .filter(|tag| tag.starts_with("project:"))
+            .cloned()
+            .collect()
+    };
+    projects(a) == projects(b)
+        && normalize_visibility(&a.visibility) == normalize_visibility(&b.visibility)
         && (at == bt || (!long_lived(at) && !long_lived(bt)))
 }
 
@@ -127,7 +140,10 @@ pub fn plan_duplicates(
                     break 'realm;
                 }
                 comparisons += 1;
-                if !compatible(&winner.memory, &loser.memory) {
+                if !compatible(&winner.memory, &loser.memory)
+                    || dedup_on_cooldown(&winner.memory)
+                    || dedup_on_cooldown(&loser.memory)
+                {
                     continue;
                 }
                 let exact = !winner.memory.source_hash.is_empty()
@@ -180,6 +196,12 @@ pub fn consolidation_inputs<'a>(members: &[&'a MemoryPoint]) -> Vec<&'a MemoryPo
                 && !consolidation_on_cooldown(m)
         })
         .collect()
+}
+
+pub fn dedup_on_cooldown(memory: &MemoryPoint) -> bool {
+    memory.no_dedup_until.as_deref().is_some_and(|until| {
+        chrono::DateTime::parse_from_rfc3339(until).map_or(true, |time| time > chrono::Utc::now())
+    })
 }
 
 /// Malformed cooldowns fail closed until an operator repairs the timestamp.
@@ -469,5 +491,19 @@ mod tests {
         assert_eq!(consolidation_inputs(&[&memory]).len(), 1);
         memory.no_consolidate_until = Some("invalid".into());
         assert!(consolidation_inputs(&[&memory]).is_empty());
+    }
+    #[test]
+    fn project_scope_and_recovery_cooldown_prevent_removal_candidates() {
+        let mut points = [point("a", &[1.0]), point("b", &[1.0])];
+        points[0].memory.tags = vec!["project:one".into()];
+        points[1].memory.tags = vec!["project:two".into()];
+        assert!(plan(&points).candidates.is_empty());
+        points[1].memory.tags = points[0].memory.tags.clone();
+        assert_eq!(plan(&points).candidates.len(), 1);
+        points[1].memory.no_dedup_until =
+            Some((chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339());
+        assert!(plan(&points).candidates.is_empty());
+        points[1].memory.no_dedup_until = Some("malformed".into());
+        assert!(plan(&points).candidates.is_empty());
     }
 }

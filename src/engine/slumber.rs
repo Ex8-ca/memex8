@@ -50,6 +50,10 @@ pub struct SlumberReport {
     #[serde(default)]
     pub dedup_protected: usize,
     #[serde(default)]
+    pub dedup_skipped: usize,
+    #[serde(default)]
+    pub dedup_operation_ids: Vec<String>,
+    #[serde(default)]
     pub dedup_truncated_realms: Vec<String>,
     pub quantized: usize,
     pub realms_updated: usize,
@@ -97,12 +101,18 @@ impl SlumberEngine {
 
         // Phase 1: Deduplicate near-identical memories
         tracing::info!("💤 Slumber phase 1: Deduplication");
-        let dedup = self.inspect_duplicates().await?;
+        let dedup = if self.config.slumber.dedup_dry_run {
+            self.inspect_duplicates().await?
+        } else {
+            super::dedup_removal::remove_duplicates(&self.store, &self.config).await?
+        };
         report.memories_scanned = dedup.memories_scanned;
         report.deduplicated = dedup.deduplicated;
         report.dedup_candidates = dedup.candidates.len();
         report.dedup_dry_run = dedup.dry_run;
         report.dedup_protected = dedup.protected_duplicates;
+        report.dedup_skipped = dedup.skipped;
+        report.dedup_operation_ids = dedup.operation_ids;
         report.dedup_truncated_realms = dedup.truncated_realms;
 
         // Phase 2: ScalarQuant compression
@@ -233,9 +243,6 @@ impl SlumberEngine {
     /// collections, run other maintenance phases, or mutate any payload/index.
     pub async fn inspect_duplicates(&self) -> anyhow::Result<super::dedup::DedupReport> {
         self.config.slumber.validate_dedup()?;
-        if !self.config.slumber.dedup_dry_run {
-            tracing::warn!("Duplicate removal is unavailable until archival support is installed; forcing dry run");
-        }
         let all = self.store.scroll_memories_internal(true).await?;
         let report = super::dedup::plan_duplicates(&all, &self.config.slumber)?;
         for candidate in &report.candidates {
@@ -1958,6 +1965,8 @@ impl SlumberEngine {
             };
             let mut operation = crate::storage::qdrant::ConsolidationOperation {
                 version: 1,
+                kind: "consolidation".into(),
+                dedup_winner: None,
                 summary_id: id.clone(),
                 summary_hash: crate::storage::qdrant::content_hash(&summary),
                 created_at: chrono::Utc::now().to_rfc3339(),

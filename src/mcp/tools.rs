@@ -18,6 +18,13 @@ pub fn list_tools() -> Vec<serde_json::Value> {
             }),
         ),
         tool(
+            "memex8_restore_duplicate",
+            "Restore a removed duplicate from its operation journal. Preserves the current winner and newer source edits; applies 30-day dedup and consolidation cooldowns. Safe to retry. Use an operation ID from the slumber report/log.",
+            json!({"type": "object", "properties": {
+                "operation_id": {"type": "string"}
+            }, "required": ["operation_id"]}),
+        ),
+        tool(
             "memex8_unconsolidate",
             "Undo a consolidated summary using its durable source archive. Restores missing sources, retains newer source edits, then deletes the summary. Restored sources receive a 30-day consolidation cooldown. Safe to retry after a partial failure.",
             json!({"type": "object", "properties": {
