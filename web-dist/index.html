@@ -606,25 +606,20 @@
     <script>
         // ─── Config ──────────────────────────────────────────────
         const BASE_URL = window.location.origin;
-        // Server-injected default (from MEMEX8_API_KEY env). May be empty/null
-        // when running with no key set, in which case the UI lets the user
-        // paste one into Settings — stored in localStorage per browser/device.
-        // Use backticks so Rust's string-replace of __MEMEX8_API_KEY__ can't
-        // produce a syntax error regardless of what the key contains.
-        const INJECTED_KEY = `__MEMEX8_API_KEY__`;
+        // The server never embeds its API key in this page (anyone who could
+        // load the page could read it). Each browser stores its own key in
+        // localStorage via Settings; it is only sent to this origin.
         function resolveApiKey() {
-            // Priority: localStorage (user override) > server-injected > none
             const stored = (() => { try { return localStorage.getItem('memex8_api_key') || ''; } catch { return ''; } })();
             if (stored) return { key: stored, source: 'localStorage (this device)' };
-            if (INJECTED_KEY && INJECTED_KEY !== 'memex8-dev-key') return { key: INJECTED_KEY, source: 'server (MEMEX8_API_KEY env)' };
-            return { key: '', source: 'none — voting and mutations disabled' };
+            return { key: '', source: 'none: open Settings and paste your key' };
         }
         let { key: API_KEY, source: KEY_SOURCE } = resolveApiKey();
 
         // ─── State ────────────────────────────────────────────────
         let allMemories = [];
         let allRealms = [];
-        let voteEnabled = !!(API_KEY && API_KEY !== 'memex8-dev-key');
+        let voteEnabled = !!API_KEY;
         let currentMemoryId = null;
 
         // ─── Navigation ──────────────────────────────────────────
@@ -687,6 +682,7 @@
             // Strip undefined body/method so fetch uses sensible defaults (GET, no body)
             if (!fetchOpts.body) delete fetchOpts.body;
             const resp = await fetch(`${BASE_URL}/api/v1${path}`, fetchOpts);
+            if (resp.status === 401 && !API_KEY) { openSettings(); }
             if (!resp.ok) throw new Error(`API error: ${resp.status} ${resp.statusText}`);
             return resp.json();
         }

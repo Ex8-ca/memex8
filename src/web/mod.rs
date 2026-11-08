@@ -16,7 +16,7 @@ pub fn init(api_key: Option<String>) {
     *cfg = api_key;
 }
 
-/// Serve the root path (index.html) with the API key injected.
+/// Serve the root path (index.html). The API key is never embedded.
 pub async fn serve_root() -> impl IntoResponse {
     let key = WEB_CONFIG.read().unwrap().clone();
     match serve_file("index.html", &key).await {
@@ -57,7 +57,7 @@ pub async fn serve_static(Path(path): Path<String>) -> impl IntoResponse {
 }
 
 /// Serve a file from embedded or filesystem assets.
-/// For index.html, inject the API key from config.
+/// index.html passes through `inject_api_key`, which strips the placeholder only.
 async fn serve_file(path: &str, api_key: &Option<String>) -> WebResult {
     match embedded::get_file(path).await {
         Some((data, mime)) => {
@@ -76,28 +76,30 @@ async fn serve_file(path: &str, api_key: &Option<String>) -> WebResult {
     }
 }
 
-/// Replace __MEMEX8_API_KEY__ placeholder in the HTML with the actual key.
-/// We inject as a bare token (no quotes) — the HTML must wrap the placeholder
-/// itself in valid JS quoting (e.g. backticks or double quotes). Doing it
-/// this way avoids double-injection bugs when the HTML template already has
-/// quote characters around the placeholder.
-fn inject_api_key(html: &[u8], api_key: Option<&str>) -> Vec<u8> {
-    let placeholder = "__MEMEX8_API_KEY__";
-    match api_key {
-        Some(key) => {
-            let html_str = String::from_utf8_lossy(html);
-            // Backslash-escape any backticks in the key so it stays valid
-            // inside a JS template literal. The HTML's wrapping quotes are
-            // the HTML's responsibility; we just emit the raw token.
-            html_str
-                .replace(placeholder, &key.replace('`', "\\`"))
-                .into_bytes()
-        }
-        None => {
-            // No key configured — leave the placeholder so JS prompts the user
-            html.to_vec()
-        }
-    }
+/// Scrub the legacy `__MEMEX8_API_KEY__` placeholder from served HTML.
+///
+/// SECURITY: the server's API key is never written into a page. Anyone who
+/// could fetch `/` (LAN, tunnel, reverse proxy) would otherwise read the key
+/// that guards every write endpoint. The `api_key` argument is accepted only
+/// so call sites stay unchanged; it is deliberately ignored. Clients enter
+/// their key in the UI's Settings (stored in the browser's localStorage).
+fn inject_api_key(html: &[u8], _api_key: Option<&str>) -> Vec<u8> {
+    String::from_utf8_lossy(html)
+        .replace("__MEMEX8_API_KEY__", "")
+        .into_bytes()
 }
 
 type WebResult = Result<(http::HeaderMap, Vec<u8>), StatusCode>;
+
+#[cfg(test)]
+mod tests {
+    use super::inject_api_key;
+
+    #[test]
+    fn served_html_never_contains_the_api_key() {
+        let html = b"const K = `__MEMEX8_API_KEY__`;";
+        let out = String::from_utf8(inject_api_key(html, Some("super-secret-key"))).unwrap();
+        assert!(!out.contains("super-secret-key"));
+        assert!(!out.contains("__MEMEX8_API_KEY__"));
+    }
+}
