@@ -288,6 +288,7 @@ class _Client:
         source: str = None,
         memory_type: str = None,
         visibility: str = None,
+        certified: bool = False,
     ) -> dict:
         """Store a memory. Pass ``visibility="public"`` to make it
         eligible for sharing via the Hermes-A2A bridge; the default
@@ -295,7 +296,11 @@ class _Client:
         forgetful caller can never accidentally mark a memory
         shareable.
         """
+        if not isinstance(certified, bool):
+            raise ValueError("certified must be a boolean")
         body = {"content": content}
+        if certified:
+            body["certified"] = True
         if realm_hint:
             body["realm_hint"] = realm_hint
         if tags:
@@ -310,6 +315,18 @@ class _Client:
             # garbage here is safe.
             body["visibility"] = visibility
         return self.request("POST", "/api/v1/memories", json_body=body)
+
+    def certify(self, memory_id: str, revoke: bool = False, by: str = None, note: str = None) -> dict:
+        if not isinstance(revoke, bool):
+            raise ValueError("revoke must be a boolean")
+        if revoke:
+            return self.request("DELETE", f"/api/v1/memories/{memory_id}/certify")
+        body = {}
+        if by is not None:
+            body["by"] = by
+        if note is not None:
+            body["note"] = note
+        return self.request("POST", f"/api/v1/memories/{memory_id}/certify", json_body=body)
 
     def delete(self, memory_id: str) -> dict:
         return self.request("DELETE", f"/api/v1/memories/{memory_id}")
@@ -436,6 +453,11 @@ REMEMBER_SCHEMA = {
                 "type": "string",
                 "description": "The fact, decision, or observation to remember. Be specific and concise."
             },
+            "certified": {
+                "type": "boolean", "default": False,
+                "description": "Protect from automatic rewriting and decay. Set true only when the user explicitly asks to remember or confirm this fact; ordinary capture stays uncertified."
+            },
+            "memory_type": {"type": "string", "description": "Semantic type, e.g. profile, preference, fact, event."},
             "realm_hint": {
                 "type": "string",
                 "description": "Suggested realm: 'personal', 'environment', 'projects', 'troubleshooting'. Auto-assigned if omitted."
@@ -455,6 +477,21 @@ REMEMBER_SCHEMA = {
             },
         },
         "required": ["content"],
+    },
+}
+
+CERTIFY_SCHEMA = {
+    "name": "memex8_certify",
+    "description": "Protect a user-confirmed memory from automatic rewriting, pruning, decay, and verification. Only certify with explicit user intent. Set revoke=true to resume normal lifecycle.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "memory_id": {"type": "string"},
+            "revoke": {"type": "boolean", "default": False},
+            "by": {"type": "string", "description": "Optional attribution label, not authenticated identity."},
+            "note": {"type": "string", "description": "Optional certification note."},
+        },
+        "required": ["memory_id"],
     },
 }
 
@@ -1448,7 +1485,7 @@ class Memex8MemoryProvider(MemoryProvider):
     # -- Tools --
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [SEARCH_SCHEMA, RECALL_SCHEMA, REMEMBER_SCHEMA, FORGET_SCHEMA, REALMS_SCHEMA, GET_SCHEMA]
+        return [SEARCH_SCHEMA, RECALL_SCHEMA, REMEMBER_SCHEMA, CERTIFY_SCHEMA, FORGET_SCHEMA, REALMS_SCHEMA, GET_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._is_breaker_open():
@@ -1498,11 +1535,20 @@ class Memex8MemoryProvider(MemoryProvider):
                 content,
                 realm_hint=args.get("realm_hint"),
                 source="hermes-tool",
+                memory_type=args.get("memory_type"),
+                certified=args.get("certified", False),
                 # Server treats None as "private"; pass through whatever
                 # the model sent (including "public") so the schema's
                 # enum constraint is the only gate.
                 visibility=args.get("visibility"),
             )
+
+        if tool_name == "memex8_certify":
+            memory_id = args.get("memory_id", "")
+            if not memory_id:
+                return {"error": "memory_id is required"}
+            return client.certify(memory_id, revoke=args.get("revoke", False),
+                                  by=args.get("by"), note=args.get("note"))
 
         if tool_name == "memex8_forget":
             memory_id = args.get("memory_id", "")

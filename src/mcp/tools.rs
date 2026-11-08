@@ -17,19 +17,20 @@ pub fn list_tools() -> Vec<serde_json::Value> {
                 "required": ["query"]
             }),
         ),
+        store_tool("memex8_store"),
+        store_tool("memex8_remember"),
         tool(
-            "memex8_store",
-            "Store a new memory",
+            "memex8_certify",
+            "Protect a user-confirmed memory from automatic rewriting, pruning, decay, and verification. Only certify with explicit user intent; revoke=true returns it to normal lifecycle.",
             json!({
                 "type": "object",
                 "properties": {
-                    "content": { "type": "string", "description": "Memory content (markdown)" },
-                    "tags": { "type": "array", "items": { "type": "string" } },
-                    "realm_hint": { "type": "string" },
-                    "source": { "type": "string" },
-                    "visibility": { "type": "string", "enum": ["private", "public"], "default": "private" }
+                    "memory_id": {"type": "string"},
+                    "revoke": {"type": "boolean", "default": false},
+                    "by": {"type": "string", "description": "Optional attribution label, not an authenticated identity"},
+                    "note": {"type": "string", "description": "Optional certification note"}
                 },
-                "required": ["content"]
+                "required": ["memory_id"]
             }),
         ),
         tool(
@@ -154,4 +155,60 @@ fn tool(name: &str, description: &str, input_schema: serde_json::Value) -> serde
         "description": description,
         "inputSchema": input_schema
     })
+}
+
+fn store_tool(name: &str) -> serde_json::Value {
+    tool(name, "Store a durable memory. Set certified=true only when the user explicitly asks to remember/confirm it; ordinary capture remains uncertified.", json!({
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "description": "Memory content (markdown)"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "realm_hint": {"type": "string"},
+            "source": {"type": "string"},
+            "memory_type": {"type": "string"},
+            "visibility": {"type": "string", "enum": ["private", "public"], "default": "private"},
+            "certified": {"type": "boolean", "default": false}
+        },
+        "required": ["content"]
+    }))
+}
+
+pub fn boolean_argument(arguments: &serde_json::Value, name: &str) -> anyhow::Result<bool> {
+    arguments
+        .get(name)
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| anyhow::anyhow!("{} must be a boolean", name))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn certification_flags_require_actual_booleans() {
+        assert!(!boolean_argument(&json!({}), "certified").unwrap());
+        assert!(boolean_argument(&json!({"certified": true}), "certified").unwrap());
+        assert!(!boolean_argument(&json!({"certified": false}), "certified").unwrap());
+        for value in [json!("false"), json!("true"), json!(1), json!(null)] {
+            assert!(boolean_argument(&json!({"certified": value}), "certified").is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_store_and_remember_advertise_identical_parameters() {
+        let tools = list_tools();
+        let schema =
+            |name| tools.iter().find(|tool| tool["name"] == name).unwrap()["inputSchema"].clone();
+        assert_eq!(schema("memex8_store"), schema("memex8_remember"));
+        assert_eq!(schema("memex8_certify")["required"], json!(["memory_id"]));
+        assert_eq!(
+            schema("memex8_remember")["properties"]["certified"]["default"],
+            false
+        );
+    }
 }

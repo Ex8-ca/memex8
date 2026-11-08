@@ -49,6 +49,7 @@ pub struct MemoryResult {
 /// memories rank lower but still surface. See PLAN-memory-memex8.md.
 pub(crate) fn verification_score_multiplier(status: &str) -> f32 {
     match status {
+        "certified" => 1.05,
         "verified" => 1.0,
         "unverified" => 0.95, // slight penalty, not exclusion
         "stale" => 0.85,
@@ -678,7 +679,11 @@ impl Engine {
                     &p.memory_type
                 };
                 let query_time = chrono::Utc::now();
-                let recency = decay::weibull_boost(&p.last_accessed, query_time, mem_type) as f32;
+                let recency = if p.is_certified() {
+                    1.0
+                } else {
+                    decay::weibull_boost(&p.last_accessed, query_time, mem_type) as f32
+                };
 
                 // Vector score already includes similarity; we apply bias to it.
                 // importance: pull from payload.
@@ -775,7 +780,11 @@ impl Engine {
                 };
                 let query_time = chrono::DateTime::from_timestamp(now as i64, 0)
                     .unwrap_or_else(|| chrono::Utc::now());
-                let recency = decay::weibull_boost(&m.last_accessed, query_time, mem_type) as f32;
+                let recency = if m.is_certified() {
+                    1.0
+                } else {
+                    decay::weibull_boost(&m.last_accessed, query_time, mem_type) as f32
+                };
                 // Upvote factor: each upvote adds a multiplicative boost that saturates
                 // gently via log1p. 1 upvote ≈ 1.18×, 5 upvotes ≈ 1.79×, 20 ≈ 3.05×.
                 // Independent of importance so users can flag signal even on under-scored entries.
@@ -1001,7 +1010,7 @@ impl Engine {
             .into_iter()
             .filter(|m| {
                 // Low importance AND (old OR no access)
-                if m.importance > prune_threshold {
+                if m.is_certified() || m.importance > prune_threshold {
                     return false;
                 }
                 let mem_type_for_age = if m.memory_type.is_empty() {
@@ -1035,38 +1044,20 @@ impl Engine {
     }
 
     pub async fn edit_memory(&self, id: &str, new_content: &str) -> anyhow::Result<()> {
-        // Re-embed the new content and update the point
+        let _guard = self.store.maintenance_guard().await;
+        let mut existing = self.get_memory(id).await?;
+        if existing.is_certified() {
+            return Err(crate::storage::qdrant::CertifiedMemoryError.into());
+        }
         let embedder = self.make_embedder()?;
         let vector = embedder.embed(new_content).await?;
-
-        let existing = self.get_memory(id).await?;
-        let realm_id = existing.realm_id.as_deref().unwrap_or("");
-
-        // Infer reaction score from new content
-        let reaction_score = crate::engine::reactions::infer_reaction(new_content);
-
-        self.store
-            .store_memory(
-                id,
-                &vector,
-                new_content,
-                existing.heading.as_deref(),
-                existing.source_file.as_deref(),
-                realm_id,
-                &existing.realm_name,
-                &existing.source_hash,
-                &existing.chunk_type,
-                &existing.memory_type,
-                reaction_score,
-                // Preserve the existing visibility on update.
-                if existing.visibility.is_empty() {
-                    "private"
-                } else {
-                    &existing.visibility
-                },
-            )
-            .await?;
-
+        existing.content = new_content.to_string();
+        existing.summary = None;
+        existing.verification_status = "unverified".into();
+        existing.last_verified = None;
+        existing.verification_confidence = None;
+        existing.reaction_score = crate::engine::reactions::infer_reaction(new_content);
+        self.store.replace_memory(&existing, &vector).await?;
         tracing::info!("Updated memory {}", id);
         Ok(())
     }
@@ -1153,6 +1144,28 @@ impl Engine {
         visibility: Option<&str>,
         memory_type: Option<&str>,
     ) -> anyhow::Result<String> {
+        self.store_memory_with_certification(
+            content,
+            tags,
+            realm_hint,
+            source,
+            visibility,
+            memory_type,
+            false,
+        )
+        .await
+    }
+
+    pub async fn store_memory_with_certification(
+        &self,
+        content: &str,
+        tags: Option<Vec<String>>,
+        realm_hint: Option<&str>,
+        source: Option<&str>,
+        visibility: Option<&str>,
+        memory_type: Option<&str>,
+        certified: bool,
+    ) -> anyhow::Result<String> {
         let embedder = self.make_embedder()?;
         let vector = embedder.embed(content).await?;
 
@@ -1204,6 +1217,7 @@ impl Engine {
                 reaction_score,
                 visibility_str,
                 tags.as_deref().unwrap_or(&[]),
+                certified,
             )
             .await?;
 
@@ -1246,77 +1260,25 @@ impl Engine {
     }
 
     pub async fn import(&self, path: &str, reuse_vectors: bool) -> anyhow::Result<usize> {
+        let _guard = self.store.maintenance_guard().await;
         let content = std::fs::read_to_string(path)?;
-
         if reuse_vectors {
-            // Try to import with vectors first
             if let Ok(memories) = serde_json::from_str::<Vec<MemoryWithVector>>(&content) {
-                let count = memories.len();
-                for m in &memories {
-                    let realm_id = m.memory.realm_id.as_deref().unwrap_or("");
-                    let reaction_score =
-                        crate::engine::reactions::infer_reaction(&m.memory.content);
+                for memory in &memories {
                     self.store
-                        .store_memory(
-                            &m.memory.id,
-                            &m.vector,
-                            &m.memory.content,
-                            m.memory.heading.as_deref(),
-                            m.memory.source_file.as_deref(),
-                            realm_id,
-                            &m.memory.realm_name,
-                            &m.memory.source_hash,
-                            &m.memory.chunk_type,
-                            &m.memory.memory_type,
-                            reaction_score,
-                            // Import path: preserve the source visibility.
-                            if m.memory.visibility.is_empty() {
-                                "private"
-                            } else {
-                                &m.memory.visibility
-                            },
-                        )
+                        .replace_memory(&memory.memory, &memory.vector)
                         .await?;
                 }
-                tracing::info!("Imported {} memories with vectors from {}", count, path);
-                return Ok(count);
+                return Ok(memories.len());
             }
         }
-
-        // Fallback: import without vectors, re-embed
         let memories: Vec<crate::storage::qdrant::MemoryPoint> = serde_json::from_str(&content)?;
-        let count = memories.len();
-
         let embedder = self.make_embedder()?;
-        for mem in &memories {
-            let vector = embedder.embed(&mem.content).await?;
-            let realm_id = mem.realm_id.as_deref().unwrap_or("");
-            let reaction_score = crate::engine::reactions::infer_reaction(&mem.content);
-            self.store
-                .store_memory(
-                    &mem.id,
-                    &vector,
-                    &mem.content,
-                    mem.heading.as_deref(),
-                    mem.source_file.as_deref(),
-                    realm_id,
-                    &mem.realm_name,
-                    &mem.source_hash,
-                    &mem.chunk_type,
-                    &mem.memory_type,
-                    reaction_score,
-                    // Fallback import path: preserve source visibility.
-                    if mem.visibility.is_empty() {
-                        "private"
-                    } else {
-                        &mem.visibility
-                    },
-                )
-                .await?;
+        for memory in &memories {
+            let vector = embedder.embed(&memory.content).await?;
+            self.store.replace_memory(memory, &vector).await?;
         }
-
-        tracing::info!("Imported {} memories from {}", count, path);
-        Ok(count)
+        Ok(memories.len())
     }
 
     /// Return the config file path.
@@ -1536,6 +1498,7 @@ mod tests {
 
     #[test]
     fn test_verification_score_multiplier_values() {
+        assert_eq!(verification_score_multiplier("certified"), 1.05);
         assert_eq!(verification_score_multiplier("verified"), 1.0);
         assert_eq!(verification_score_multiplier("unverified"), 0.95);
         assert_eq!(verification_score_multiplier("stale"), 0.85);

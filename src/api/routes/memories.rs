@@ -20,6 +20,9 @@ pub struct StoreRequest {
     /// Personal-knowledge memories should pass a long-lived type to
     /// avoid the 7-day general-type auto-archive.
     pub memory_type: Option<String>,
+    /// Only opt in when the user explicitly confirms this memory.
+    #[serde(default)]
+    pub certified: bool,
 }
 
 #[derive(Deserialize)]
@@ -53,19 +56,54 @@ pub async fn store(
 ) -> Result<Json<StoreResponse>, crate::api::error::ApiError> {
     let id = state
         .engine
-        .store_memory(
+        .store_memory_with_certification(
             &req.content,
             req.tags,
             req.realm_hint.as_deref(),
             req.source.as_deref(),
             req.visibility.as_deref(),
             req.memory_type.as_deref(),
+            req.certified,
         )
         .await?;
     Ok(Json(StoreResponse {
         id,
         status: "stored".into(),
     }))
+}
+
+#[derive(Default, Deserialize)]
+pub struct CertifyRequest {
+    pub by: Option<String>,
+    pub note: Option<String>,
+}
+
+pub async fn certify(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<CertifyRequest>>,
+) -> Result<Json<crate::storage::qdrant::MemoryPoint>, ApiError> {
+    let Json(req) = body.unwrap_or_default();
+    let memory = state
+        .engine
+        .store()
+        .set_certification(&id, false, req.by.as_deref(), req.note.as_deref())
+        .await?
+        .ok_or_else(|| ApiError::NotFound(id))?;
+    Ok(Json(memory))
+}
+
+pub async fn revoke_certification(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::storage::qdrant::MemoryPoint>, ApiError> {
+    let memory = state
+        .engine
+        .store()
+        .set_certification(&id, true, None, None)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(id))?;
+    Ok(Json(memory))
 }
 
 pub async fn search(

@@ -186,7 +186,7 @@ async fn handle_tool_call(
                 .await?;
             Ok(format_results(results))
         }
-        "memex8_store" => {
+        "memex8_store" | "memex8_remember" => {
             let content = arguments
                 .get("content")
                 .and_then(|v| v.as_str())
@@ -204,17 +204,34 @@ async fn handle_tool_call(
 
             let memory_type = arguments.get("memory_type").and_then(|v| v.as_str());
             let source = arguments.get("source").and_then(|v| v.as_str());
+            let certified = super::tools::boolean_argument(&arguments, "certified")?;
             let id = engine
-                .store_memory(
+                .store_memory_with_certification(
                     content,
                     tags,
                     realm_hint,
                     source.or(Some("mcp")),
                     visibility,
                     memory_type,
+                    certified,
                 )
                 .await?;
             Ok(json!({ "id": id, "status": "stored" }))
+        }
+        "memex8_certify" => {
+            let memory_id = arguments
+                .get("memory_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("memory_id is required"))?;
+            let revoke = super::tools::boolean_argument(&arguments, "revoke")?;
+            let by = arguments.get("by").and_then(|v| v.as_str());
+            let note = arguments.get("note").and_then(|v| v.as_str());
+            let memory = engine
+                .store()
+                .set_certification(memory_id, revoke, by, note)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", memory_id))?;
+            Ok(json!({"content": [{"type": "text", "text": serde_json::to_string(&memory)?}]}))
         }
         "memex8_recall" => {
             let limit = arguments

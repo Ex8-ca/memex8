@@ -56,6 +56,14 @@ jobs:
       - name: Run tests
         run: cargo test -- --skip test_kmeans_simple
 
+      - name: Test duplicate inspection and certification with disposable Qdrant
+        env:
+          MEMEX8_TEST_BINARY: ${{ github.workspace }}/target/release/memex8
+        run: |
+          docker pull qdrant/qdrant:latest
+          python3 tests/test_dedup_inspection.py
+          python3 tests/test_certification.py
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
@@ -96,6 +104,7 @@ jobs:
           python3 integrations/shared-memory/test_bridge.py -v
           python3 tests/test_docker_backup.py -v
           python3 plugins/memex8/tests/test_visibility.py
+          python3 plugins/memex8/tests/test_certification.py
 
       - name: Validate plugin.yaml
         run: |

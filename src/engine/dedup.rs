@@ -41,7 +41,7 @@ fn compatible(a: &MemoryPoint, b: &MemoryPoint) -> bool {
 }
 
 fn certified(memory: &MemoryPoint) -> bool {
-    memory.verification_status == "certified"
+    memory.is_certified()
 }
 
 fn valid_vector(vector: &[f32]) -> bool {

@@ -61,8 +61,9 @@ class DuplicateInspectionTest(unittest.TestCase):
 
             before = snapshot()
             repo = Path(__file__).resolve().parents[1]
+            binary = os.environ.get("MEMEX8_TEST_BINARY", str(repo / "target/debug/memex8"))
             result = subprocess.run([
-                str(repo / "target/debug/memex8"), "--config", "/nonexistent-memex8-test-config",
+                binary, "--config", "/nonexistent-memex8-test-config",
                 "slumber", "inspect-duplicates",
             ], env={**os.environ, "QDRANT_URL": grpc_url}, capture_output=True, text=True, check=True)
             report = json.loads(result.stdout)
