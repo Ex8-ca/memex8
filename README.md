@@ -378,6 +378,7 @@ memex8 watch add .   # Persistent file watcher
 memex8 search "query" # Semantic search
 memex8 recall        # Wakeup context (top memories)
 memex8 slumber status # Slumber status
+memex8 slumber inspect-duplicates # Read-only candidate report; skips all other phases
 memex8 slumber trigger # Run maintenance now
 memex8 doctor        # Diagnose issues
 memex8 serve         # Start REST API server
@@ -539,5 +540,3 @@ MIT
 Personal project shared for reference. No guarantees, no SLA, no support. Fork it, adapt it, build on the ideas.
 
 See [TODO.md](TODO.md) and [PLAN.md](PLAN.md) for the roadmap.
-
-

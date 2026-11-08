@@ -44,6 +44,13 @@ cron_ingest = "*/5 * * * *"
 quantize_bit_width = 3.5
 auto_archive_days = 90
 prune_threshold = 0.1
+# Duplicate inspection uses original vectors and never crosses realm/visibility boundaries.
+dedup_threshold = 0.95
+# Removal is unavailable in this detection release, even if this is false.
+# A full slumber still runs other mutating phases; use `slumber inspect-duplicates`
+# for a read-only report.
+dedup_dry_run = true
+dedup_max_comparisons_per_realm = 1000000
 consolidation_schedule = "0 3 * * *"   # Daily at 3am; "" to disable
 
 # Memory evolution: decay, associations, spreading activation

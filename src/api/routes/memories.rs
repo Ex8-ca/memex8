@@ -15,6 +15,11 @@ pub struct StoreRequest {
     /// "private" so a malformed caller can never accidentally mark a
     /// memory shareable.
     pub visibility: Option<String>,
+    /// Weibull decay type: profile|preference|entity|relationship|setup
+    /// |pattern|fact|project|observation|learning|general (default).
+    /// Personal-knowledge memories should pass a long-lived type to
+    /// avoid the 7-day general-type auto-archive.
+    pub memory_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -54,6 +59,7 @@ pub async fn store(
             req.realm_hint.as_deref(),
             req.source.as_deref(),
             req.visibility.as_deref(),
+            req.memory_type.as_deref(),
         )
         .await?;
     Ok(Json(StoreResponse {

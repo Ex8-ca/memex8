@@ -165,6 +165,7 @@ async fn handle_tool_call(
             // everything it touches to the A2A bridge.
             let visibility = arguments.get("visibility").and_then(|v| v.as_str());
 
+            let memory_type = arguments.get("memory_type").and_then(|v| v.as_str());
             let source = arguments.get("source").and_then(|v| v.as_str());
             let id = engine
                 .store_memory(
@@ -173,6 +174,7 @@ async fn handle_tool_call(
                     realm_hint,
                     source.or(Some("mcp")),
                     visibility,
+                    memory_type,
                 )
                 .await?;
             Ok(json!({ "id": id, "status": "stored" }))

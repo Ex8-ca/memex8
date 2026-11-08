@@ -2,6 +2,7 @@ pub mod associations;
 pub mod backup;
 pub mod chunker;
 pub mod decay;
+pub mod dedup;
 pub mod doctor;
 pub mod embedder;
 pub mod graph;
@@ -1150,6 +1151,7 @@ impl Engine {
         realm_hint: Option<&str>,
         source: Option<&str>,
         visibility: Option<&str>,
+        memory_type: Option<&str>,
     ) -> anyhow::Result<String> {
         let embedder = self.make_embedder()?;
         let vector = embedder.embed(content).await?;
@@ -1180,6 +1182,13 @@ impl Engine {
         let visibility_str =
             crate::storage::qdrant::normalize_visibility(visibility.unwrap_or("private"));
 
+        // Caller-supplied memory_type wins; default to "general" only when
+        // omitted. The 7-day Weibull decay for "general" is too aggressive
+        // for personal-knowledge memories — callers should set type
+        // explicitly (profile, preference, entity, etc) for 365-day
+        // retention.
+        let memory_type_str = memory_type.unwrap_or("general");
+
         self.store
             .store_memory_with_tags(
                 &id,
@@ -1191,7 +1200,7 @@ impl Engine {
                 &realm_name,
                 "",
                 "manual",
-                "general",
+                memory_type_str,
                 reaction_score,
                 visibility_str,
                 tags.as_deref().unwrap_or(&[]),

@@ -174,6 +174,15 @@ pub struct RealmsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlumberConfig {
+    /// Minimum original-vector cosine similarity for a duplicate candidate.
+    #[serde(default = "default_dedup_threshold")]
+    pub dedup_threshold: f32,
+    /// Safe default. Removal is unavailable until archive support lands.
+    #[serde(default = "default_dedup_dry_run")]
+    pub dedup_dry_run: bool,
+    /// Bound pair comparisons per realm; truncated reports are explicitly marked.
+    #[serde(default = "default_dedup_max_comparisons")]
+    pub dedup_max_comparisons_per_realm: usize,
     pub idle_timeout: String,
     pub cron_ingest: String,
     pub quantize_bit_width: f32,
@@ -230,6 +239,30 @@ pub struct SlumberConfig {
     /// Similarity threshold for inferring associations.
     #[serde(default = "default_inference_similarity_threshold")]
     pub inference_similarity_threshold: f32,
+}
+
+fn default_dedup_threshold() -> f32 {
+    0.95
+}
+fn default_dedup_dry_run() -> bool {
+    true
+}
+fn default_dedup_max_comparisons() -> usize {
+    1_000_000
+}
+
+impl SlumberConfig {
+    pub fn validate_dedup(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.dedup_threshold.is_finite() && (0.0..=1.0).contains(&self.dedup_threshold),
+            "slumber.dedup_threshold must be finite and between 0 and 1"
+        );
+        anyhow::ensure!(
+            self.dedup_max_comparisons_per_realm > 0,
+            "slumber.dedup_max_comparisons_per_realm must be greater than zero"
+        );
+        Ok(())
+    }
 }
 
 fn default_topic_clusters_k() -> u32 {
@@ -580,6 +613,7 @@ impl AppConfig {
         if config_path.exists() {
             let content = std::fs::read_to_string(config_path)?;
             let config: AppConfig = toml::from_str(&content)?;
+            config.slumber.validate_dedup()?;
             Ok(config)
         } else {
             tracing::warn!("Config file not found at {}, using defaults", path);
@@ -635,6 +669,9 @@ impl Default for AppConfig {
                 merge_threshold: 0.3,
             },
             slumber: SlumberConfig {
+                dedup_threshold: default_dedup_threshold(),
+                dedup_dry_run: default_dedup_dry_run(),
+                dedup_max_comparisons_per_realm: default_dedup_max_comparisons(),
                 idle_timeout: "10m".into(),
                 cron_ingest: "*/5 * * * *".into(),
                 quantize_bit_width: 3.5,
@@ -673,6 +710,36 @@ impl Default for AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_config_defaults_to_bounded_dedup_dry_run() {
+        let mut value = toml::Value::try_from(AppConfig::default()).unwrap();
+        let slumber = value.get_mut("slumber").unwrap().as_table_mut().unwrap();
+        for key in [
+            "dedup_threshold",
+            "dedup_dry_run",
+            "dedup_max_comparisons_per_realm",
+        ] {
+            slumber.remove(key);
+        }
+        let decoded: AppConfig = value.try_into().unwrap();
+        assert_eq!(decoded.slumber.dedup_threshold, 0.95);
+        assert!(decoded.slumber.dedup_dry_run);
+        assert_eq!(decoded.slumber.dedup_max_comparisons_per_realm, 1_000_000);
+        decoded.slumber.validate_dedup().unwrap();
+    }
+
+    #[test]
+    fn invalid_dedup_config_is_rejected() {
+        let mut config = AppConfig::default().slumber;
+        for threshold in [-0.01, 1.01, f32::NAN, f32::INFINITY] {
+            config.dedup_threshold = threshold;
+            assert!(config.validate_dedup().is_err());
+        }
+        config.dedup_threshold = 0.95;
+        config.dedup_max_comparisons_per_realm = 0;
+        assert!(config.validate_dedup().is_err());
+    }
 
     /// Pins the per-type age-cutoff derivation against the Weibull
     /// params. If someone tunes `weibull_params` in `engine::decay`

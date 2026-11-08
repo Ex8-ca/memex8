@@ -42,6 +42,15 @@ impl SlumberEngine {
 pub struct SlumberReport {
     pub memories_scanned: usize,
     pub deduplicated: usize,
+    /// Proposed losers; separate from actual deletions for dry-run reporting.
+    #[serde(default)]
+    pub dedup_candidates: usize,
+    #[serde(default)]
+    pub dedup_dry_run: bool,
+    #[serde(default)]
+    pub dedup_protected: usize,
+    #[serde(default)]
+    pub dedup_truncated_realms: Vec<String>,
     pub quantized: usize,
     pub realms_updated: usize,
     pub realms_renamed: usize,
@@ -87,9 +96,13 @@ impl SlumberEngine {
 
         // Phase 1: Deduplicate near-identical memories
         tracing::info!("💤 Slumber phase 1: Deduplication");
-        let all = self.store.scroll_all_memories().await?;
-        report.memories_scanned = all.len();
-        report.deduplicated = self.deduplicate().await?;
+        let dedup = self.inspect_duplicates().await?;
+        report.memories_scanned = dedup.memories_scanned;
+        report.deduplicated = dedup.deduplicated;
+        report.dedup_candidates = dedup.candidates.len();
+        report.dedup_dry_run = dedup.dry_run;
+        report.dedup_protected = dedup.protected_duplicates;
+        report.dedup_truncated_realms = dedup.truncated_realms;
 
         // Phase 2: ScalarQuant compression
         tracing::info!("💤 Slumber phase 2: ScalarQuant compression");
@@ -215,44 +228,33 @@ impl SlumberEngine {
 
     // ─── Phase 1: Deduplication ──────────────────────────────────────────────
 
-    /// Find and remove near-duplicate memories (cosine similarity > 0.95).
-    /// Keeps the one with higher importance (upvotes + recency).
-    async fn deduplicate(&self) -> anyhow::Result<usize> {
-        let all = self.store.scroll_all_memories().await?;
-        let mut removed = 0;
-        let _dedup_threshold = 0.95f32;
-
-        // Group by source_hash first (exact duplicates)
-        let mut by_hash: std::collections::HashMap<String, Vec<&MemoryPoint>> =
-            std::collections::HashMap::new();
-        for mem in &all {
-            if !mem.source_hash.is_empty() {
-                by_hash
-                    .entry(mem.source_hash.clone())
-                    .or_default()
-                    .push(mem);
-            }
+    /// Read-only duplicate inspection. This entry point does not initialize
+    /// collections, run other maintenance phases, or mutate any payload/index.
+    pub async fn inspect_duplicates(&self) -> anyhow::Result<super::dedup::DedupReport> {
+        self.config.slumber.validate_dedup()?;
+        if !self.config.slumber.dedup_dry_run {
+            tracing::warn!("Duplicate removal is unavailable until archival support is installed; forcing dry run");
         }
-
-        // Remove exact duplicates (same source_hash) — keep highest importance
-        for (_hash, group) in &by_hash {
-            if group.len() > 1 {
-                let mut sorted = group.to_vec();
-                sorted.sort_by(|a, b| {
-                    b.importance
-                        .partial_cmp(&a.importance)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                // Keep the first (highest importance), delete the rest
-                for mem in sorted.iter().skip(1) {
-                    self.store.delete_memory(&mem.id).await?;
-                    removed += 1;
-                }
-            }
+        let all = self.store.scroll_memories_internal(true).await?;
+        let report = super::dedup::plan_duplicates(&all, &self.config.slumber)?;
+        for candidate in &report.candidates {
+            tracing::info!(
+                winner_id = %candidate.winner_id,
+                loser_id = %candidate.loser_id,
+                cosine = ?candidate.cosine,
+                reason = %candidate.reason,
+                "Duplicate candidate (dry run; no deletion)"
+            );
         }
-
-        tracing::info!("  Deduplicated {} exact duplicates", removed);
-        Ok(removed)
+        tracing::info!(
+            candidates = report.candidates.len(),
+            protected = report.protected_duplicates,
+            invalid_vectors = report.invalid_vectors,
+            comparisons = report.comparisons,
+            truncated_realms = report.truncated_realms.len(),
+            "Duplicate inspection complete (dry run; no writes)"
+        );
+        Ok(report)
     }
 
     // ─── Phase 2: TurboVec Compression ────────────────────────────────────────
@@ -631,15 +633,16 @@ impl SlumberEngine {
     }
 
     /// Merge realms whose centroids are very similar.
-    /// Uses a lower threshold (0.6) for text embeddings where even
-    /// different topics can have moderate cosine similarity.
+    /// Threshold is read from `[realms] merge_threshold` in config.toml
+    /// (default 0.85; the value 0.35 hardcoded here previously broke
+    /// personal-knowledge isolation — fixed 2026-10-04 after the realm
+    /// merge at 0.47 similarity destroyed Marc's stored facts).
     async fn merge_similar_realms(&self) -> anyhow::Result<usize> {
         let realms = self.store.list_realms().await?;
         let mut merged = 0;
 
-        // Lower threshold for text embeddings: 0.35 instead of 0.85
-        // Text embeddings from different topics typically have 0.2-0.4 cosine similarity
-        let merge_threshold = 0.35f32;
+        // Use the config value so users can tune it. Default 0.85.
+        let merge_threshold = self.config.realms.merge_threshold;
 
         for i in 0..realms.len() {
             for j in (i + 1)..realms.len() {
@@ -1723,22 +1726,25 @@ impl SlumberEngine {
 
         // Group memories by realm
         let all = self.store.scroll_all_memories().await?;
-        let mut by_realm: std::collections::HashMap<String, Vec<&MemoryPoint>> =
-            std::collections::HashMap::new();
-
+        let mut by_realm: std::collections::BTreeMap<_, Vec<&MemoryPoint>> =
+            std::collections::BTreeMap::new();
         for mem in &all {
-            // Project records retain their scope and source attribution. The
-            // legacy realm summary writer does not preserve either yet.
+            // Keep project scope/source protections from the shared-memory work.
             if mem.tags.iter().any(|tag| tag.starts_with("project:")) {
                 continue;
             }
-            let realm = mem.realm_name.clone();
-            by_realm.entry(realm).or_default().push(mem);
+            let key = (
+                mem.realm_id.clone(),
+                mem.realm_name.clone(),
+                crate::storage::qdrant::normalize_visibility(&mem.visibility),
+            );
+            by_realm.entry(key).or_default().push(mem);
         }
 
         let mut consolidated = 0;
 
-        for (realm_name, memories) in &by_realm {
+        for ((realm_id, realm_name, visibility), members) in &by_realm {
+            let memories = super::dedup::consolidation_inputs(members);
             // Only consolidate realms with 2+ memories
             if memories.len() < 2 {
                 continue;
@@ -1751,14 +1757,23 @@ impl SlumberEngine {
                 backend
             );
 
-            // Build the prompt (limit to top 10 memories by importance)
+            // Build the prompt (limit to top memories by importance)
+            // Use config max_cluster_size (default 20, lowered to 6 for
+            // finer-grained consolidation; the value 10 hardcoded here
+            // previously was a dead config — fixed 2026-10-04).
+            let max_cluster = self.config.slumber.summarize.max_cluster_size as usize;
             let mut sorted = memories.to_vec();
             sorted.sort_by(|a, b| {
                 b.importance
                     .partial_cmp(&a.importance)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            sorted.truncate(10);
+            sorted.truncate(max_cluster.max(2));
+            if super::dedup::already_consolidated(&sorted, members) {
+                tracing::debug!("Skipping consolidation: source set already summarized");
+                continue;
+            }
+            let source_ids: Vec<String> = sorted.iter().map(|m| m.id.clone()).collect();
 
             let memory_texts: Vec<String> = sorted
                 .iter()
@@ -1847,16 +1862,49 @@ impl SlumberEngine {
                 .map_err(|e| anyhow::anyhow!("Failed to embed summary: {}", e))?;
 
             // Collect IDs to delete
-            let ids_to_delete: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
+            // Respect config preserve_originals (default true). When
+            // false, the original memories are deleted and replaced by
+            // the summary; when true, the originals are kept and the
+            // summary is added alongside. The value `false` hardcoded
+            // here previously made preserve_originals a dead config —
+            // fixed 2026-10-04.
+            let preserve_originals = self.config.slumber.summarize.preserve_originals;
+            let ids_to_delete: Vec<String> = if preserve_originals {
+                Vec::new()
+            } else {
+                source_ids.clone()
+            };
 
-            // Delete old fragmented memories
-            for id in &ids_to_delete {
-                if let Err(e) = self.store.delete_memory(id).await {
-                    tracing::warn!("  Failed to delete old memory {}: {}", id, e);
+            // Store the consolidated summary with its own embedded vector.
+            // Inherit memory_type from the source memories so the summary's
+            // Weibull decay matches the originals' (e.g. a summary of
+            // profile/preference memories won't decay after 7 days just
+            // because we hardcoded "general" for new memory_type).
+            // Type priority picks the most stable: profile > preference
+            // > relationship > entity > setup > pattern > fact > project.
+            let type_priority = |t: &str| -> u8 {
+                match t {
+                    "profile" => 9,
+                    "preference" => 8,
+                    "relationship" => 8,
+                    "entity" => 7,
+                    "setup" => 6,
+                    "pattern" => 5,
+                    "fact" => 4,
+                    "project" => 3,
+                    "observation" => 2,
+                    "learning" => 2,
+                    "instruction" => 2,
+                    "general" => 1,
+                    _ => 0,
                 }
-            }
+            };
+            let inherited_type = sorted
+                .iter()
+                .map(|m| m.memory_type.as_str())
+                .max_by_key(|t| type_priority(t))
+                .unwrap_or("general");
 
-            // Store the consolidated summary with its own embedded vector
             let id = uuid::Uuid::new_v4().to_string();
             if let Err(e) = self
                 .store
@@ -1864,10 +1912,16 @@ impl SlumberEngine {
                     &id,
                     &summary,
                     &summary_vector,
-                    None,
+                    realm_id.as_deref(),
                     Some(realm_name),
                     1.0,
-                    None,
+                    None, // source_file: consolidated summaries have no file origin
+                    Some(inherited_type), // inherit memory_type from sources for matching Weibull decay
+                    &crate::storage::qdrant::ConsolidationMetadata {
+                        source_ids: source_ids.clone(),
+                        source_fingerprint: super::dedup::source_fingerprint(&sorted),
+                        visibility: visibility.to_string(),
+                    },
                 )
                 .await
             {
@@ -1879,9 +1933,14 @@ impl SlumberEngine {
                 continue;
             }
 
+            // Never delete sources before the replacement was durably stored.
+            for id in &ids_to_delete {
+                self.store.delete_memory(id).await?;
+            }
+
             tracing::info!(
                 "  Consolidated {} memories → 1 summary in '{}'",
-                memories.len(),
+                sorted.len(),
                 realm_name
             );
             consolidated += 1;
