@@ -16,16 +16,33 @@ pub struct CompactMemoryResult {
     pub verification_status: String,
 }
 
+impl CompactMemoryResult {
+    pub fn from_memory(memory: MemoryPoint, score: f32) -> Self {
+        Self {
+            snippet: snippet(&memory.content, memory.summary.as_deref()),
+            id: memory.id,
+            realm_name: memory.realm_name,
+            score,
+            ingested_at: memory.ingested_at,
+            memory_type: memory.memory_type,
+            verification_status: memory.verification_status,
+        }
+    }
+}
+fn snippet(content: &str, summary: Option<&str>) -> String {
+    summary
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(content)
+        .chars()
+        .take(160)
+        .collect()
+}
+
 impl MemoryResult {
     pub fn into_compact(self) -> CompactMemoryResult {
-        let text = self
-            .summary
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or(&self.content);
         CompactMemoryResult {
             id: self.id,
-            snippet: text.chars().take(160).collect(),
+            snippet: snippet(&self.content, self.summary.as_deref()),
             realm_name: self.realm_name,
             score: self.score,
             ingested_at: self.ingested_at,

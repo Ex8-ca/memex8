@@ -21,6 +21,7 @@ pub mod retrieval;
 pub mod scheduler;
 pub mod session;
 pub mod slumber;
+pub mod timeline;
 pub mod watcher;
 
 use crate::config::AppConfig;

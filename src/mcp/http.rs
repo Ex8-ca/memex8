@@ -166,6 +166,12 @@ async fn handle_tool_call(
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
     match name {
+        "memex8_timeline" => {
+            let request = serde_json::from_value(arguments.clone())?;
+            Ok(serde_json::to_value(
+                engine.timeline_request(request).await?,
+            )?)
+        }
         "memex8_search" => {
             let compact = super::tools::boolean_argument(&arguments, "compact")?;
             let query = arguments

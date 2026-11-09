@@ -4,6 +4,23 @@ use serde_json::json;
 pub fn list_tools() -> Vec<serde_json::Value> {
     vec![
         tool(
+            "memex8_timeline",
+            "Chronological compact neighbors around exactly one memory id, query, or RFC3339 at timestamp. Includes ID/query anchor; time mode has no synthetic row. score=0; truncated=true means the 10,000-row scan budget was reached. Use memex8_get for full bodies.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "format": "uuid"},
+                    "query": {"type": "string", "minLength": 1},
+                    "at": {"type": "string", "format": "date-time"},
+                    "before": {"type": "integer", "minimum": 0, "maximum": 50, "default": 5},
+                    "after": {"type": "integer", "minimum": 0, "maximum": 50, "default": 5},
+                    "realm": {"type": "string"},
+                    "visibility": {"type": "string", "enum": ["private", "public"]}
+                },
+                "oneOf": [{"required": ["id"]}, {"required": ["query"]}, {"required": ["at"]}]
+            }),
+        ),
+        tool(
             "memex8_search",
             "Semantic search across memories with a retrieval-strength coverage heuristic. Use compact=true, then memex8_get(ids=[...]) for the ones that matter.",
             json!({

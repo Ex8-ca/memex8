@@ -202,15 +202,15 @@ paths, and a query with no results still has coverage and available realm hints.
 Branch: `feat/memory-timeline`  
 Dependencies: E
 
-- [ ] Accept exactly one anchor: memory ID, query, or RFC3339 timestamp; default
+- [x] Accept exactly one anchor: memory ID, query, or RFC3339 timestamp; default
   before/after to 5 and cap each at 50. Resolve query anchors within caller scope.
-- [ ] Return shared compact rows through engine, REST, MCP, and Hermes.
-- [ ] Normalize timestamps to UTC and add a Qdrant datetime index if supported.
+- [x] Return shared compact rows through engine, REST, MCP, and Hermes.
+- [x] Normalize timestamps to UTC and add a Qdrant datetime index if supported.
   Do not substitute a keyword index for datetime range/ordering semantics.
-- [ ] Prefer indexed nearest-before/after queries; otherwise paginate an expanding
+- [x] Prefer indexed nearest-before/after queries; otherwise paginate an expanding
   time window with explicit work limits. Never sort only the first scroll page and
   assume it contains the nearest neighbors. Report truncation if a work cap is hit.
-- [ ] Include the anchor for ID/query mode; timestamp mode has no synthetic row.
+- [x] Include the anchor for ID/query mode; timestamp mode has no synthetic row.
   Use `(ingested_at, id)` for deterministic order when timestamps tie. Return fewer
   neighbors at dataset boundaries; use an explicit no-match result for query misses.
 
@@ -381,6 +381,23 @@ Draft PR: https://github.com/Ex8-ca/memex8/pull/27 (all three CI checks passed).
   Formatting/build and 80+80+38 Rust tests passed (existing kmeans skip/warnings).
   No deployment or live-data changes.
 - Next package: G, timeline retrieval.
+
+### 2026-11-08 — Package G
+
+- Merged #31 after all required checks passed; created `feat/memory-timeline`
+  from updated main for the final original roadmap item.
+- Added scoped ID/query/time anchors, shared compact output across REST/Rust MCP/
+  Hermes, UTC output, and a genuine datetime index for existing collections.
+- Ordered range queries fully paginate boundary ties, sort by timestamp/ID,
+  and expose truncation at a fixed 10,000-row budget. Query misses are explicit.
+- Disposable-Qdrant tests cover multi-page ties, offset timestamps, scope,
+  boundaries, zero counts, validation, missing/corrupt anchors, query hits/misses,
+  stdio MCP parity, submicrosecond precision, and budget exhaustion. Formatting/
+  build, 81+81+38 Rust tests (existing kmeans skip), three timeline scenarios,
+  compact/coverage regressions and 24 Hermes tests passed. No deployment or
+  live-data changes.
+- Original packages A–H are implemented; live rollout and deferred options
+  remain separate follow-up work.
 
 ## First work session
 

@@ -1,5 +1,22 @@
 # memex8 Implementation Status
 
+## 2026-11-08 — Timeline retrieval (roadmap G)
+
+- Added `memex8_timeline` in both Rust MCP transports and Hermes, plus REST
+  `GET /api/v1/memories/timeline`. Exactly one ID/query/RFC3339 anchor; scoped
+  query resolution; before/after default 5, each bounded at 50.
+- Shared compact rows, UTC output, stable timestamp/ID ordering, explicit query
+  miss, and typed missing/corrupt-anchor errors. ID/query anchors are included;
+  timestamp anchors have no synthetic row.
+- Added a Qdrant datetime index for new/existing collections. Indexed directional
+  queries and full boundary-tie pagination are bounded at 10,000 fetched rows;
+  `truncated` exposes partial reads. No config keys or prefetch changes.
+- Added disposable-Qdrant pagination/tie/scope/anchor/budget/tool tests and Hermes
+  validation/transport contracts to CI. Validation passed: formatting/build,
+  81+81 Rust unit tests and 38 core tests (existing kmeans skip), all three
+  timeline scenarios, compact/coverage regressions, and 24 Hermes tests.
+  No deployment or live-data changes.
+
 ## 2026-11-08 — Private-text redaction (roadmap H, brought forward)
 
 - Added one Unicode-safe stateful private-span parser: case-insensitive/multiline,
