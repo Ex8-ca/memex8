@@ -1,5 +1,30 @@
 # memex8 Implementation Status
 
+## 2026-11-08 — Private-text redaction (roadmap H, brought forward)
+
+- Added one Unicode-safe stateful private-span parser: case-insensitive/multiline,
+  multiple and nested spans, `[private]` replacement, and fail-closed unclosed tags.
+  Empty/marker-only direct writes return 422 `content empty after redaction`.
+- Sanitized capture/edit metadata and bodies, files before chunking/source hashing,
+  watched-file ingestion, webhooks, imports, session inputs before truncation/LLM,
+  and derived summaries before embedding. All-private file/import units skip with
+  safe diagnostics; sessions explicitly report skipped without provider calls.
+- Embedding factory now enforces the shared parser at the provider boundary.
+  Storage guards reject marked memory/archive payloads; exact recovery refuses
+  marked legacy snapshots before re-embedding. Imports re-embed changed bodies
+  rather than reusing incompatible vectors. Backup restores preflight memories
+  and journals before writes. Session embedding uses active provider/dimensions.
+- Removed untrusted provider error bodies and parse details from failure messages.
+  Rust MCP and Hermes remember descriptions explain private tags. No new config
+  keys or parameters; configurable secret patterns remain deferred.
+- Validation: five disposable-Qdrant privacy scenarios passed, checking provider
+  requests, payloads and logs for a sentinel across direct/MCP writes, huge cross-
+  chunk spans, session truncation/message boundaries, webhook input, vector-reuse
+  imports, edits, derived summaries and upstream error bodies. Existing recovery,
+  compact/coverage, certification/inspection, Hermes, path and bridge regressions
+  passed. Formatting/build and 80+80 Rust tests plus 38 core integration tests
+  passed (existing kmeans skip/warnings). No deployment or live-data changes.
+
 ## 2026-11-08 — Search coverage (roadmap F)
 
 - REST search always returns coverage with level, optional raw best score,

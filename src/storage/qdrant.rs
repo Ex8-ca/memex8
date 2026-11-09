@@ -741,6 +741,7 @@ impl QdrantStore {
             memory_type: memory_type.to_string(),
             visibility: normalize_visibility(visibility).to_string(),
         };
+        crate::engine::redaction::ensure_memory(&mem)?;
         let payload = memory_to_payload(&mem);
         let point = PointStruct::new(id.to_string(), vector.to_vec(), payload);
 
@@ -752,6 +753,7 @@ impl QdrantStore {
 
     /// Restore the serialized payload verbatim rather than resetting metadata.
     pub async fn restore_memory(&self, memory: &MemoryWithVector) -> anyhow::Result<()> {
+        crate::engine::redaction::ensure_memory(&memory.memory)?;
         let point = PointStruct::new(
             memory.memory.id.clone(),
             memory.vector.clone(),
@@ -864,10 +866,10 @@ impl QdrantStore {
             }
             memory.verification_status = "certified".into();
             if let Some(by) = by {
-                memory.certified_by = Some(by.to_string());
+                memory.certified_by = Some(crate::engine::redaction::text(by));
             }
             if let Some(note) = note {
-                memory.certification_note = Some(note.to_string());
+                memory.certification_note = Some(crate::engine::redaction::text(note));
             }
         }
         let payload = serde_json::json!({
@@ -890,6 +892,12 @@ impl QdrantStore {
         id: &str,
         payload: Payload,
     ) -> anyhow::Result<()> {
+        let value: serde_json::Value = payload.clone().into();
+        crate::engine::redaction::ensure_clean(&value)?;
+        if let Some(content) = value.get("content").and_then(|v| v.as_str()) {
+            crate::engine::redaction::required(content)?;
+        }
+
         let filter = Filter {
             must: vec![Condition::has_id([id.to_string()])],
             must_not: vec![Condition::matches(
@@ -930,6 +938,7 @@ impl QdrantStore {
     /// Import/edit a complete snapshot without discarding certification or provenance.
     /// Existing certified content requires explicit revocation before replacement.
     pub async fn replace_memory(&self, memory: &MemoryPoint, vector: &[f32]) -> anyhow::Result<()> {
+        crate::engine::redaction::ensure_memory(memory)?;
         if self
             .get_memory(&memory.id)
             .await?
@@ -1128,6 +1137,8 @@ impl QdrantStore {
         memory_type: Option<&str>,
         metadata: &ConsolidationMetadata,
     ) -> anyhow::Result<()> {
+        crate::engine::redaction::required(content)?;
+        crate::engine::redaction::ensure_clean(&(content, realm_name, source_file, memory_type))?;
         let ingested_at = chrono::Utc::now().to_rfc3339();
 
         let payload: Payload = serde_json::json!({
@@ -1705,6 +1716,12 @@ impl QdrantStore {
 
     /// Update arbitrary payload fields on a memory point.
     pub async fn update_memory_payload(&self, id: &str, payload: Payload) -> anyhow::Result<()> {
+        let value: serde_json::Value = payload.clone().into();
+        crate::engine::redaction::ensure_clean(&value)?;
+        if let Some(content) = value.get("content").and_then(|v| v.as_str()) {
+            crate::engine::redaction::required(content)?;
+        }
+
         self.client
             .set_payload(
                 SetPayloadPointsBuilder::new(MEMORIES, payload)

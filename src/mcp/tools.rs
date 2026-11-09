@@ -180,7 +180,7 @@ fn tool(name: &str, description: &str, input_schema: serde_json::Value) -> serde
 }
 
 fn store_tool(name: &str) -> serde_json::Value {
-    tool(name, "Store a durable memory. Set certified=true only when the user explicitly asks to remember/confirm it; ordinary capture remains uncertified.", json!({
+    tool(name, "Store a durable memory. Text inside <private>...</private> is removed before embedding/storage; an unclosed span hides the remaining text. Set certified=true only when the user explicitly asks to remember/confirm it; ordinary capture remains uncertified.", json!({
         "type": "object",
         "properties": {
             "content": {"type": "string", "description": "Memory content (markdown)"},

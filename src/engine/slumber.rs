@@ -1864,14 +1864,14 @@ impl SlumberEngine {
             };
 
             let summary = match summary {
-                Ok(s) => s,
+                Ok(s) => super::redaction::text(&s),
                 Err(e) => {
                     tracing::warn!("  Consolidation failed for '{}': {}", realm_name, e);
                     continue;
                 }
             };
 
-            if summary.trim().is_empty() {
+            if !super::redaction::meaningful(&summary) {
                 continue;
             }
 
@@ -2099,6 +2099,7 @@ impl SlumberEngine {
         model: &str,
         prompt: &str,
     ) -> anyhow::Result<String> {
+        let prompt = super::redaction::text(prompt);
         let client = reqwest::Client::new();
         let response = client
             .post("https://api.openai.com/v1/chat/completions")
@@ -2118,8 +2119,7 @@ impl SlumberEngine {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("OpenAI API error ({}): {}", status, body));
+            return Err(anyhow::anyhow!("OpenAI API error ({})", status));
         }
 
         let body: serde_json::Value = response.json().await?;
@@ -2143,6 +2143,7 @@ impl SlumberEngine {
         model: Option<&str>,
         prompt: &str,
     ) -> anyhow::Result<String> {
+        let prompt = super::redaction::text(prompt);
         let client = reqwest::Client::new();
         let url = base_url.trim_end_matches('/');
         let mut req = client
@@ -2170,12 +2171,7 @@ impl SlumberEngine {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "Local LLM API error ({}): {}",
-                status,
-                body
-            ));
+            return Err(anyhow::anyhow!("Local LLM API error ({})", status));
         }
 
         let body: serde_json::Value = response.json().await?;

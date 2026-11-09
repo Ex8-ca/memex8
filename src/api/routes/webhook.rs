@@ -1,4 +1,5 @@
 use crate::api::server::AppState;
+use crate::engine::redaction;
 use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -8,8 +9,24 @@ use std::sync::Arc;
 /// Both OpenClaw and Hermes can POST here on conversation end.
 pub async fn conversation_end(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<WebhookPayload>,
+    Json(mut payload): Json<WebhookPayload>,
 ) -> Result<Json<serde_json::Value>, crate::api::error::ApiError> {
+    let mut parser = redaction::Redactor::default();
+    let mut meaningful = false;
+    if let Some(summary) = &mut payload.summary {
+        *summary = parser.redact(summary);
+        meaningful |= redaction::meaningful(summary);
+    }
+    if let Some(messages) = &mut payload.messages {
+        for message in messages {
+            message.content = parser.redact(&message.content);
+            meaningful |= redaction::meaningful(&message.content);
+        }
+    }
+    if !meaningful {
+        return Err(anyhow::Error::from(redaction::RedactionError::Empty).into());
+    }
+    let payload: WebhookPayload = redaction::sanitize(&payload)?;
     let source = payload.source.as_deref().unwrap_or("unknown");
     let platform = payload.platform.as_deref().unwrap_or("unknown");
 
@@ -60,6 +77,7 @@ pub async fn skill_executed(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<SkillPayload>,
 ) -> Result<Json<serde_json::Value>, crate::api::error::ApiError> {
+    let payload: SkillPayload = redaction::sanitize(&payload)?;
     let content = format!(
         "# Skill Execution: {}\n\n**Status**: {}\n**Input**: {}\n**Output**: {}",
         payload.skill_name,
@@ -104,7 +122,7 @@ pub async fn skill_executed(
 
 // ─── Payload Types ──────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct WebhookPayload {
     pub summary: Option<String>,
     pub messages: Option<Vec<Message>>,
@@ -120,7 +138,7 @@ pub struct Message {
     pub content: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct SkillPayload {
     pub skill_name: String,
     pub skill_category: Option<String>,

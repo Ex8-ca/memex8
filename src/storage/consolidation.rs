@@ -201,6 +201,7 @@ impl QdrantStore {
         &self,
         operation: &ConsolidationOperation,
     ) -> anyhow::Result<()> {
+        crate::engine::redaction::ensure_clean(operation)?;
         anyhow::ensure!(
             self.get_consolidation(&operation.summary_id)
                 .await?
@@ -237,6 +238,7 @@ impl QdrantStore {
         operation: &mut ConsolidationOperation,
         state: &str,
     ) -> anyhow::Result<()> {
+        crate::engine::redaction::ensure_clean(operation)?;
         operation.state = state.into();
         let payload: Payload = serde_json::json!({"operation": operation}).try_into()?;
         self.client

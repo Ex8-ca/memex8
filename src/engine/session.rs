@@ -9,6 +9,7 @@
 //! Session summaries are stored as high-importance memories in a special realm
 //! so they survive decay and are easily searchable.
 
+use super::redaction;
 use crate::config::AppConfig;
 use crate::storage::qdrant::QdrantStore;
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,8 @@ pub struct SessionMessage {
 /// Report from storing a session extraction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionReport {
+    #[serde(default)]
+    pub skipped: bool,
     pub session_id: String,
     pub summary_memory_id: Option<String>,
     pub decisions_stored: usize,
@@ -95,7 +98,30 @@ impl SessionEngine {
     /// 1. LLM-assisted extraction of decisions, follow-ups, and insights
     /// 2. Store session summary as a high-importance memory
     /// 3. Store each extracted item as an individual memory
-    pub async fn run_session_end(&self, input: SessionInput) -> anyhow::Result<SessionReport> {
+    pub async fn run_session_end(&self, mut input: SessionInput) -> anyhow::Result<SessionReport> {
+        let mut parser = redaction::Redactor::default();
+        let mut meaningful = false;
+        for message in &mut input.messages {
+            message.content = parser.redact(&message.content);
+            meaningful |= redaction::meaningful(&message.content);
+        }
+        if let Some(summary) = &mut input.provided_summary {
+            *summary = redaction::text(summary);
+            meaningful |= redaction::meaningful(summary);
+        }
+        input = redaction::sanitize(&input)?;
+        if !meaningful {
+            tracing::info!("Skipped session: content empty after redaction");
+            return Ok(SessionReport {
+                skipped: true,
+                session_id: input.session_id,
+                summary_memory_id: None,
+                decisions_stored: 0,
+                follow_ups_stored: 0,
+                insights_stored: 0,
+                realm_name: input.realm_hint.unwrap_or_else(|| "sessions".into()),
+            });
+        }
         // Step 1: LLM-assisted extraction
         let extraction = self.extract(&input).await?;
 
@@ -147,6 +173,7 @@ impl SessionEngine {
         );
 
         Ok(SessionReport {
+            skipped: false,
             session_id: extraction.session_id,
             summary_memory_id,
             decisions_stored,
@@ -207,7 +234,8 @@ Only output valid JSON. Be precise and extract only things explicitly present in
             messages_text = messages_text
         );
 
-        let raw_response = self.call_llm(&llm_url, llm_key.as_deref(), &prompt).await?;
+        let raw_response =
+            redaction::text(&self.call_llm(&llm_url, llm_key.as_deref(), &prompt).await?);
 
         // Parse JSON from LLM response
         let extraction = match serde_json::from_str::<SessionExtraction>(&raw_response) {
@@ -217,8 +245,8 @@ Only output valid JSON. Be precise and extract only things explicitly present in
                 if let Some(start) = raw_response.find('{') {
                     if let Some(end) = raw_response.rfind('}') {
                         let json_str = &raw_response[start..=end];
-                        serde_json::from_str(json_str).unwrap_or_else(|e| {
-                            tracing::warn!("Failed to parse LLM session extraction: {}", e);
+                        serde_json::from_str(json_str).unwrap_or_else(|_| {
+                            tracing::warn!("Failed to parse LLM session extraction");
                             SessionExtraction {
                                 session_id: input.session_id.clone(),
                                 summary: input
@@ -260,7 +288,7 @@ Only output valid JSON. Be precise and extract only things explicitly present in
             }
         };
 
-        Ok(extraction)
+        redaction::sanitize(&extraction)
     }
 
     /// Call the local LLM with a prompt.
@@ -270,6 +298,7 @@ Only output valid JSON. Be precise and extract only things explicitly present in
         api_key: Option<&str>,
         prompt: &str,
     ) -> anyhow::Result<String> {
+        let prompt = redaction::text(prompt);
         let client = reqwest::Client::new();
 
         let mut request_body = serde_json::json!({
@@ -295,9 +324,7 @@ Only output valid JSON. Be precise and extract only things explicitly present in
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            tracing::warn!("LLM request failed ({}): {}", status, body);
-            return Err(anyhow::anyhow!("LLM request failed: {} - {}", status, body));
+            return Err(anyhow::anyhow!("LLM request failed: {}", status));
         }
 
         #[derive(Deserialize)]
@@ -309,7 +336,10 @@ Only output valid JSON. Be precise and extract only things explicitly present in
             content: Option<String>,
         }
 
-        let llm_resp: LlmResponse = response.json().await?;
+        let llm_resp: LlmResponse = response
+            .json()
+            .await
+            .map_err(|_| anyhow::anyhow!("Invalid session LLM response"))?;
 
         let text = llm_resp
             .response
@@ -346,6 +376,16 @@ Only output valid JSON. Be precise and extract only things explicitly present in
         realm_id: &str,
         realm_name: &str,
     ) -> anyhow::Result<Option<String>> {
+        if !redaction::meaningful(&extraction.summary)
+            && !extraction
+                .decisions
+                .iter()
+                .chain(&extraction.follow_ups)
+                .chain(&extraction.insights)
+                .any(|item| redaction::meaningful(&item.content))
+        {
+            return Ok(None);
+        }
         // Build full summary content
         let mut content = format!("# Session Summary: {}\n\n", extraction.session_id);
         content.push_str(&format!("**Summary:** {}\n\n", extraction.summary));
@@ -443,7 +483,7 @@ Only output valid JSON. Be precise and extract only things explicitly present in
         let mut stored = 0;
         for item in items {
             // Skip low-confidence items
-            if item.confidence < 0.5 {
+            if item.confidence < 0.5 || !redaction::meaningful(&item.content) {
                 continue;
             }
 

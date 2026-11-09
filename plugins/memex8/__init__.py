@@ -473,6 +473,7 @@ RECALL_SCHEMA = {
 REMEMBER_SCHEMA = {
     "name": "memex8_remember",
     "description": (
+        "Text inside <private>...</private> is removed before embedding/storage. "
         "Store a durable fact in long-term memory. Use when the user asks you "
         "to remember something, shares a preference, corrects you, or reveals "
         "important context about their environment or projects. Stored content "

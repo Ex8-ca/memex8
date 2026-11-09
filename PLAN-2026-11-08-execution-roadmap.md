@@ -1,7 +1,7 @@
 # memex8 improvement execution plan
 
 Date: 2026-11-08  
-Status: A–E merged; F locally validated; G–H pending
+Status: A–F merged; H locally validated; G pending
 Source: `PLAN-2026-11-08-trending-improvements.md` (original brief, preserved)
 
 ## Outcomes
@@ -223,19 +223,19 @@ anchors, and neighbors beyond a single Qdrant scroll page.
 Branch: `feat/private-redaction`  
 Dependencies: baseline only; independent and suitable to bring forward after A
 
-- [ ] Build one reusable sanitizer and make every applicable ingestion path invoke
+- [x] Build one reusable sanitizer and make every applicable ingestion path invoke
   it before embedding, LLM processing, chunking, content hashing, or persistence.
   Audit direct store, file ingest, session ingest, edits, imports, and derived writes
   so the guarantee does not depend on one API entry point.
-- [ ] Replace closed private spans with `[private]`, case-insensitively across
+- [x] Replace closed private spans with `[private]`, case-insensitively across
   multiple lines. Drop from an unclosed opening tag to end; handle nested tags
   conservatively with a parser/state machine rather than relying only on regex.
-- [ ] Track whether meaningful non-private content remains. Marker-only output
+- [x] Track whether meaningful non-private content remains. Marker-only output
   counts as empty: direct REST storage returns 422 with the specified error; batch
   and file/session ingest skip/reject empty units with an explicit safe diagnostic.
-- [ ] Inspect logging and error paths for raw content leakage. Test embedder/LLM
+- [x] Inspect logging and error paths for raw content leakage. Test embedder/LLM
   inputs as well as stored payloads; a payload-only check is insufficient.
-- [ ] Document that redaction affects new writes and cannot erase existing stored
+- [x] Document that redaction affects new writes and cannot erase existing stored
   private text. Defer configurable secret-pattern regexes to a separate proposal.
 
 Done when: single/multiple/multiline/nested/unclosed/all-private cases pass; spies
@@ -366,6 +366,21 @@ Draft PR: https://github.com/Ex8-ca/memex8/pull/27 (all three CI checks passed).
   certification/consolidation/dedup recovery, Hermes, export/import path and bridge
   regressions passed; no deployment or live-data changes.
 - Next package: G, timeline retrieval around a memory/query/time anchor.
+
+### 2026-11-08 — Package H (before G)
+
+- Brought private redaction forward after #30 merged, per the agreed priority.
+  Created `feat/private-redaction` from main.
+- Added one parser across direct/file/watched/session/webhook/edit/import and
+  derived capture, including embedding-boundary enforcement and storage guards.
+  Redaction precedes chunking/source hashing and session truncation/LLM calls.
+- Marker-only inputs reject/skip safely. Imports re-embed changed bodies; exact
+  recovery rejects marked legacy snapshots. Existing stored data is not rewritten.
+- Five isolated privacy scenarios passed with provider/payload/log spies, plus
+  existing recovery/retrieval/certification/Hermes/path/bridge regressions.
+  Formatting/build and 80+80+38 Rust tests passed (existing kmeans skip/warnings).
+  No deployment or live-data changes.
+- Next package: G, timeline retrieval.
 
 ## First work session
 

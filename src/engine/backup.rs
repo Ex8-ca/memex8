@@ -102,8 +102,11 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
     extract_tarball(&path, &temp_dir)?;
 
     // Validate all required exports before the first database write.
-    let _: Vec<crate::storage::qdrant::MemoryWithVector> =
+    let memories: Vec<crate::storage::qdrant::MemoryWithVector> =
         serde_json::from_str(&fs::read_to_string(temp_dir.join("memories.json"))?)?;
+    for snapshot in &memories {
+        super::redaction::ensure_memory(&snapshot.memory)?;
+    }
     let _: Vec<crate::storage::qdrant::RealmPoint> =
         serde_json::from_str(&fs::read_to_string(temp_dir.join("realms.json"))?)?;
     let _: Vec<crate::storage::qdrant::GraphEdge> =
@@ -120,6 +123,7 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
     // Preflight every journal before the first database write. Never downgrade a
     // progressed operation by restoring an older backup over it.
     for operation in &journals {
+        super::redaction::ensure_clean(operation)?;
         anyhow::ensure!(
             operation.version == 1,
             "Unsupported consolidation journal version"
