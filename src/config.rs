@@ -417,6 +417,15 @@ pub struct Memex8MdConfig {
     pub enabled: bool,
     pub max_memories: u32,
     pub update_on_slumber: bool,
+    /// Root for MEMEX8.md files of memories whose `source_file` is a label
+    /// ("hermes", "hermes-sync") or URL rather than a real path. In Docker this
+    /// is the `/watch` bind mount, so files land on the host in `watch_dirs/`.
+    #[serde(default = "default_memex8_md_output_dir")]
+    pub output_dir: String,
+}
+
+fn default_memex8_md_output_dir() -> String {
+    "/watch".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -758,6 +767,7 @@ impl Default for AppConfig {
                 enabled: true,
                 max_memories: 20,
                 update_on_slumber: true,
+                output_dir: default_memex8_md_output_dir(),
             },
             digest_md: DigestMdConfig::default(),
             web: WebConfig {
@@ -807,6 +817,14 @@ mod tests {
             config.turbovec.id_map_path,
             "/var/lib/memex8/data/memories_ids.json"
         );
+    }
+
+    #[test]
+    fn test_memex8_md_output_dir_defaults_when_absent() {
+        let parsed: Memex8MdConfig =
+            toml::from_str("enabled = true\nmax_memories = 20\nupdate_on_slumber = true\n")
+                .expect("memex8_md section without output_dir must parse");
+        assert_eq!(parsed.output_dir, "/watch");
     }
 
     #[test]
