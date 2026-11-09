@@ -13,6 +13,8 @@ use tokio::sync::RwLock;
 
 #[path = "consolidation.rs"]
 mod consolidation;
+#[path = "timeline.rs"]
+mod timeline;
 pub use consolidation::{content_hash, ConsolidationOperation, RecoveryError, UnconsolidateResult};
 
 // ─── Data types ───────────────────────────────────────────────────────────────
@@ -571,6 +573,17 @@ impl QdrantStore {
                 )
                 .await?;
         }
+
+        self.client
+            .create_field_index(
+                CreateFieldIndexCollectionBuilder::new(
+                    MEMORIES,
+                    "ingested_at",
+                    FieldType::Datetime,
+                )
+                .wait(true),
+            )
+            .await?;
 
         self.ensure_consolidation_archive().await?;
 

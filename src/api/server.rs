@@ -136,6 +136,10 @@ fn api_routes() -> Router<Arc<AppState>> {
                 .get(crate::api::routes::memories::search_get),
         )
         .route(
+            "/memories/timeline",
+            axum::routing::get(crate::api::routes::memories::timeline),
+        )
+        .route(
             "/memories/batch-get",
             axum::routing::post(crate::api::routes::memories::batch_get),
         )

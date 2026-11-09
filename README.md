@@ -403,6 +403,7 @@ memex8 stats         # System statistics
 | `GET`  | `/api/v1/memories/verification-summary` | Count memories by verification status (certified/verified/stale/contradicted/unverified) |
 | `POST` | `/api/v1/memories/{id}/certify` | Certify a memory; optional body `{ "by": "marc", "note": "Confirmed" }` |
 | `DELETE` | `/api/v1/memories/{id}/certify` | Revoke certification and resume normal lifecycle |
+| `GET` | `/api/v1/memories/timeline` | Compact chronological neighbors around a memory, query, or time |
 | `POST` | `/api/v1/memories/batch-get` | Get 1–50 full memories in requested order; report unavailable IDs |
 | `POST` | `/api/v1/dedup/{operation_id}/restore` | Restore a removed duplicate from its journal |
 | `POST` | `/api/v1/memories/{id}/unconsolidate` | Restore consolidation sources, then remove the summary; safe to retry |
@@ -775,3 +776,33 @@ MIT
 Personal project shared for reference. No guarantees, no SLA, no support. Fork it, adapt it, build on the ideas.
 
 See [TODO.md](TODO.md) and [PLAN.md](PLAN.md) for the roadmap.
+
+### Memory timeline
+
+Use `memex8_timeline(id="…", before=5, after=5)` to see what happened around a
+memory, then `memex8_get(ids=[…])` for selected full bodies. Rust MCP and Hermes
+also accept `query="…"` or `at="2026-11-08T00:00:00Z"`; pass exactly one anchor.
+REST exposes the same parameters through `GET /api/v1/memories/timeline`.
+
+`before` and `after` default to 5, each accepts 0–50, and optional `realm` and
+`visibility` (`private` or `public`) scope both the anchor and its neighbors.
+Query mode uses the top search hit with the existing 0.3 minimum score; a miss
+returns `no_match=true`, no anchor, and an empty results list. Missing or
+out-of-scope ID anchors return 404; a legacy anchor with an invalid stored
+timestamp returns 409.
+
+Responses contain `anchor_id`, `anchor_at`, `results`, `no_match`, and
+`truncated`. Rows use the shared compact shape, UTC RFC3339 timestamps, and
+`score=0` (chronological ordering). ID/query mode includes the anchor, even with
+zero neighbors. Timestamp mode has no synthetic anchor: before is strictly
+earlier, after includes memories at the specified time. Results sort by parsed
+timestamp then ID, and return fewer rows at dataset edges.
+
+Startup creates a Qdrant datetime index on `ingested_at`, including existing
+collections. Timeline uses ordered range queries and paginated equal-time
+buckets, with a fixed 10,000 fetched-row budget per request (boundary rereads
+count). `truncated=true` means a partial result; nearest-neighbor completeness
+is not guaranteed in that case. Legacy timestamps are normalized on output,
+without rewriting stored payloads. Reads are best effort during concurrent
+edits, rather than a database snapshot. ID/time anchors need no model calls;
+query mode embeds once. No new configuration keys or prefetch changes.

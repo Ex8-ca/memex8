@@ -68,6 +68,7 @@ jobs:
           python3 tests/test_compact_retrieval.py
           python3 tests/test_search_coverage.py
           python3 tests/test_private_redaction.py
+          python3 tests/test_timeline.py
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
@@ -114,6 +115,7 @@ jobs:
           python3 plugins/memex8/tests/test_dedup_removal.py
           python3 plugins/memex8/tests/test_compact_retrieval.py
           python3 plugins/memex8/tests/test_search_coverage.py
+          python3 plugins/memex8/tests/test_timeline.py
 
       - name: Validate plugin.yaml
         run: |

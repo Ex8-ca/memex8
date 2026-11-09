@@ -36,6 +36,17 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
+        if let Some(error) = e.downcast_ref::<crate::engine::timeline::TimelineError>() {
+            return match error {
+                crate::engine::timeline::TimelineError::Invalid(_) => {
+                    Self::BadRequest(e.to_string())
+                }
+                crate::engine::timeline::TimelineError::NotFound => Self::NotFound(e.to_string()),
+                crate::engine::timeline::TimelineError::InvalidAnchorTime => {
+                    Self::Conflict(e.to_string())
+                }
+            };
+        }
         if e.is::<crate::engine::redaction::RedactionError>() {
             return Self::Unprocessable(e.to_string());
         }

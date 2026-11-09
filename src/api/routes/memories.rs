@@ -530,3 +530,10 @@ pub struct UpvoteByContentRequest {
     /// 404 returned if nothing clears this bar.
     pub min_score: Option<f32>,
 }
+
+pub async fn timeline(
+    State(state): State<Arc<AppState>>,
+    Query(request): Query<crate::engine::timeline::TimelineRequest>,
+) -> Result<Json<crate::engine::timeline::TimelineResponse>, ApiError> {
+    Ok(Json(state.engine.timeline_request(request).await?))
+}

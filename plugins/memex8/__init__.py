@@ -324,6 +324,10 @@ class _Client:
             body["visibility"] = visibility
         return self.request("POST", "/api/v1/memories", json_body=body)
 
+    def timeline(self, **params) -> dict:
+        return self.request("GET", "/api/v1/memories/timeline",
+                            params={k: v for k, v in params.items() if v is not None})
+
     def batch_get(self, ids: list) -> dict:
         return self.request("POST", "/api/v1/memories/batch-get", json_body={"ids": ids})
 
@@ -427,6 +431,24 @@ def _coverage_first_line(coverage: dict) -> str:
     return (f"coverage={coverage.get('level', 'none')} best={best} "
             f"results_above_min={coverage.get('results_above_min', 0)} try realms: {realms} (retrieval heuristic)")
 
+
+TIMELINE_SCHEMA = {
+    "name": "memex8_timeline",
+    "description": "Chronological compact neighbors around exactly one id, query, or RFC3339 at timestamp. Includes ID/query anchor. Time mode has no synthetic row. score=0; truncated=true indicates the 10,000-row scan budget. Use memex8_get for full bodies.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "format": "uuid"},
+            "query": {"type": "string", "minLength": 1},
+            "at": {"type": "string", "format": "date-time"},
+            "before": {"type": "integer", "minimum": 0, "maximum": 50, "default": 5},
+            "after": {"type": "integer", "minimum": 0, "maximum": 50, "default": 5},
+            "realm": {"type": "string"},
+            "visibility": {"type": "string", "enum": ["private", "public"]},
+        },
+        "oneOf": [{"required": ["id"]}, {"required": ["query"]}, {"required": ["at"]}],
+    },
+}
 
 SEARCH_SCHEMA = {
     "name": "memex8_search",
@@ -1537,7 +1559,7 @@ class Memex8MemoryProvider(MemoryProvider):
     # -- Tools --
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [SEARCH_SCHEMA, RECALL_SCHEMA, REMEMBER_SCHEMA, CERTIFY_SCHEMA, UNCONSOLIDATE_SCHEMA, RESTORE_DUPLICATE_SCHEMA, FORGET_SCHEMA, REALMS_SCHEMA, GET_SCHEMA]
+        return [TIMELINE_SCHEMA, SEARCH_SCHEMA, RECALL_SCHEMA, REMEMBER_SCHEMA, CERTIFY_SCHEMA, UNCONSOLIDATE_SCHEMA, RESTORE_DUPLICATE_SCHEMA, FORGET_SCHEMA, REALMS_SCHEMA, GET_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._is_breaker_open():
@@ -1562,6 +1584,21 @@ class Memex8MemoryProvider(MemoryProvider):
             return tool_error(str(e))
 
     def _dispatch(self, client: _Client, tool_name: str, args: dict) -> Any:
+        if tool_name == "memex8_timeline":
+            if sum(args.get(k) is not None for k in ("id", "query", "at")) != 1:
+                return {"error": "Pass exactly one of id, query, or at"}
+            for key in ("before", "after"):
+                value = args.get(key, 5)
+                if type(value) is not int or not 0 <= value <= 50:
+                    return {"error": "before and after must be integers between 0 and 50"}
+            for key in ("id", "query", "at", "realm"):
+                if key in args and (not isinstance(args[key], str) or not args[key].strip()):
+                    return {"error": key + " must be a nonempty string"}
+            if "visibility" in args and args["visibility"] not in ("private", "public"):
+                return {"error": "visibility must be private or public"}
+            return client.timeline(**{k: args[k] for k in
+                ("id", "query", "at", "before", "after", "realm", "visibility") if k in args})
+
         if tool_name == "memex8_search":
             compact = args.get("compact", False)
             if not isinstance(compact, bool):
