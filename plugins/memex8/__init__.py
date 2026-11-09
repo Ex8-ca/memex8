@@ -78,6 +78,46 @@ _CRON_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Hermes prepends this hint to every scheduled cron prompt. Searched (not
+# anchored) because skill-loading jobs can put skill text ahead of it.
+_CRON_HINT_RE = re.compile(
+    r"\[IMPORTANT:\s*You\s+are\s+running\s+as\s+a\s+scheduled\s+cron\s+job",
+    re.IGNORECASE,
+)
+# Silence tokens Hermes' cron lane honours (gateway.response_filters).
+_CRON_SILENCE_TOKENS = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"})
+_CRON_FAILURE_TOKEN = "[CRON_FAILURE]"
+_CRON_FINDING_MAX_CHARS = 2000
+
+
+def _is_cron_turn(user_content: str, session_id: str = "") -> bool:
+    """True when the turn is a scheduled cron run rather than a user message."""
+    if session_id and session_id.startswith("cron_"):
+        return True
+    return bool(user_content and _CRON_HINT_RE.search(user_content))
+
+
+def _cron_finding(assistant_content: str) -> Optional[str]:
+    """Return the cron run's reportable output, or None when there is nothing
+    worth remembering.
+
+    Mirrors Hermes' autonomous-lane silence rule: a silence token as the whole
+    response, its first line, or its last line (or a response opening with the
+    bracketed ``[SILENT]``) means "nothing new". ``[CRON_FAILURE]`` runs are
+    about the job itself, not a finding, so they are dropped too.
+    """
+    text = (assistant_content or "").strip()
+    if not text:
+        return None
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if text.upper().startswith("[SILENT]"):
+        return None
+    if any(c.upper() in _CRON_SILENCE_TOKENS for c in (text, lines[0], lines[-1])):
+        return None
+    if lines[0] == _CRON_FAILURE_TOKEN:
+        return None
+    return text[:_CRON_FINDING_MAX_CHARS]
+
 # Feature 2: memory-type classifiers
 # Decision/decision-verb pattern (kept conservative — anchored on whole words,
 # excludes the "I decided to ask about X" non-load-bearing sense)
@@ -1149,6 +1189,13 @@ class Memex8MemoryProvider(MemoryProvider):
         if not user_content or _TRIVIAL_RE.match(user_content.strip()):
             return
 
+        # Scheduled cron run: keep only what the job actually found. The
+        # prompt, [SILENT] runs and [CRON_FAILURE] runs are job mechanics,
+        # not knowledge, and previously made up ~70% of the corpus.
+        if _is_cron_turn(user_content, session_id or self._session_id):
+            self._store_cron_finding(assistant_content, session_id or self._session_id)
+            return
+
         # Skip auto-generated cron / A2A / agent-internal messages. These
         # look like user input to the plugin but aren't — storing them
         # produces hundreds of near-identical "summary of cron run"
@@ -1203,6 +1250,39 @@ class Memex8MemoryProvider(MemoryProvider):
         )
         self._sync_thread.start()
 
+    def _store_cron_finding(self, assistant_content: str, session_id: str = "") -> None:
+        """Store a cron run's reportable output (never the prompt) as one memory."""
+        finding = _cron_finding(assistant_content)
+        if finding is None:
+            logger.debug("memex8 cron turn skipped (silent/failure/empty)")
+            return
+        job_id = ""
+        if session_id.startswith("cron_"):
+            # cron_<job_id>_<YYYYmmdd>_<HHMMSS>
+            job_id = session_id[len("cron_"):].rsplit("_", 2)[0]
+        tags = ["cron-finding", "auto-stored"]
+        if job_id:
+            tags.append(f"cron-job:{job_id}")
+
+        def _sync():
+            try:
+                self._get_client().store(
+                    finding,
+                    realm_hint="cron-findings",
+                    tags=tags,
+                    source="hermes-cron",
+                    memory_type="event",
+                )
+                self._record_success()
+            except Exception as e:
+                self._record_failure(str(e))
+                logger.debug("memex8 cron finding store failed: %s", e)
+
+        if self._sync_thread and self._sync_thread.is_alive():
+            self._sync_thread.join(timeout=5.0)
+        self._sync_thread = spawn_context_thread(_sync, name="memex8-cron-finding")
+        self._sync_thread.start()
+
     # -- Session end --
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
@@ -1214,6 +1294,17 @@ class Memex8MemoryProvider(MemoryProvider):
         with self._dedup_lock:
             self._injected_this_session = set()
         if not messages or self._is_breaker_open():
+            return
+
+        # Cron sessions: the finding (if any) was already stored by sync_turn.
+        # A session summary would just re-store the cron prompt.
+        if _is_cron_turn("", self._session_id) or any(
+            m.get("role") == "user"
+            and isinstance(m.get("content"), str)
+            and _CRON_HINT_RE.search(m["content"])
+            for m in messages
+        ):
+            logger.debug("memex8 session-end skipped (cron session)")
             return
 
         def _ingest():
@@ -1296,6 +1387,20 @@ class Memex8MemoryProvider(MemoryProvider):
         # fail-closed behavior — bypass the breaker so a single bad outage
         # doesn't silently trigger the rewrite.
         if self._is_breaker_open() and not require_checkpoint:
+            return ""
+
+        # Cron sessions aren't worth archiving (findings go through sync_turn).
+        # Only skip when the checkpoint is optional — skipping a required one
+        # would block compression.
+        if not require_checkpoint and (
+            _is_cron_turn("", self._session_id)
+            or any(
+                m.get("role") == "user"
+                and isinstance(m.get("content"), str)
+                and _CRON_HINT_RE.search(m["content"])
+                for m in messages
+            )
+        ):
             return ""
 
         # Build the durable summary we want to archive. Use the same shape as
@@ -1672,7 +1777,15 @@ class Memex8MemoryProvider(MemoryProvider):
             return client.delete(memory_id)
 
         if tool_name == "memex8_realms":
-            return client.realms()
+            # The server drops centroids as of the realms-summary fix; strip
+            # them here too so an older server can't flood the context.
+            realms = client.realms()
+            if isinstance(realms, list):
+                realms = [
+                    {k: v for k, v in r.items() if k != "centroid"} if isinstance(r, dict) else r
+                    for r in realms
+                ]
+            return realms
 
         if tool_name == "memex8_get":
             if sum(key in args for key in ("memory_id", "id", "ids")) != 1:
