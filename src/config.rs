@@ -3,6 +3,8 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub search: SearchConfig,
     pub server: ServerConfig,
     pub auth: AuthConfig,
     pub embedding: EmbeddingConfig,
@@ -23,6 +25,42 @@ pub struct AppConfig {
     /// Memory verification sweep configuration (slumber Phase 13).
     #[serde(default)]
     pub verification: VerificationConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchConfig {
+    pub coverage: CoverageConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CoverageConfig {
+    pub high: f32,
+    pub partial: f32,
+}
+
+impl Default for CoverageConfig {
+    fn default() -> Self {
+        Self {
+            high: 0.55,
+            partial: 0.40,
+        }
+    }
+}
+
+impl CoverageConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.high.is_finite()
+                && self.partial.is_finite()
+                && (0.0..=1.0).contains(&self.high)
+                && (0.0..=1.0).contains(&self.partial)
+                && self.partial < self.high,
+            "search.coverage thresholds must satisfy 0 <= partial < high <= 1"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -614,6 +652,7 @@ impl AppConfig {
             let content = std::fs::read_to_string(config_path)?;
             let config: AppConfig = toml::from_str(&content)?;
             config.slumber.validate_dedup()?;
+            config.search.coverage.validate()?;
             Ok(config)
         } else {
             tracing::warn!("Config file not found at {}, using defaults", path);
@@ -640,6 +679,7 @@ impl AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            search: SearchConfig::default(),
             server: ServerConfig {
                 host: "0.0.0.0".into(),
                 port: 8080,
@@ -710,6 +750,27 @@ impl Default for AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coverage_defaults_and_validation_survive_legacy_configs() {
+        let mut value = toml::Value::try_from(AppConfig::default()).unwrap();
+        value.as_table_mut().unwrap().remove("search");
+        let config: AppConfig = value.try_into().unwrap();
+        assert_eq!(config.search.coverage.high, 0.55);
+        assert_eq!(config.search.coverage.partial, 0.40);
+        config.search.coverage.validate().unwrap();
+        let config: SearchConfig = toml::from_str("[coverage]\nhigh = 0.7").unwrap();
+        assert_eq!(config.coverage.partial, 0.40);
+        for (partial, high) in [
+            (0.5, 0.5),
+            (0.7, 0.6),
+            (-0.1, 0.5),
+            (0.4, 1.1),
+            (0.4, f32::NAN),
+        ] {
+            assert!(CoverageConfig { high, partial }.validate().is_err());
+        }
+    }
 
     #[test]
     fn legacy_config_defaults_to_bounded_dedup_dry_run() {

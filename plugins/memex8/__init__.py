@@ -268,8 +268,12 @@ class _Client:
             raise RuntimeError(f"memex8 {method} {path} failed ({resp.status_code}): {msg or payload}")
         return payload
 
-    def search(self, query: str, top_k: int = 8, realm: str = None, min_score: float = 0.3, compact: bool = False) -> dict:
+    def search(self, query: str, top_k: int = 8, realm: str = None, min_score: float = 0.3, compact: bool = False, tags: list = None, visibility: str = None) -> dict:
         body = {"query": query, "limit": top_k, "min_score": min_score}
+        if tags is not None:
+            body["tags"] = tags
+        if visibility is not None:
+            body["visibility"] = visibility
         if compact:
             body["compact"] = True
         if realm:
@@ -416,11 +420,20 @@ class _Client:
 # Tool Schemas
 # ---------------------------------------------------------------------------
 
+def _coverage_first_line(coverage: dict) -> str:
+    best = coverage.get("best_score")
+    best = f"{best:.2f}" if isinstance(best, (int, float)) else "null"
+    realms = ", ".join(str(r).replace("\n", " ").replace("\r", " ") for r in coverage.get("suggested_realms", [])) or "none"
+    return (f"coverage={coverage.get('level', 'none')} best={best} "
+            f"results_above_min={coverage.get('results_above_min', 0)} try realms: {realms} (retrieval heuristic)")
+
+
 SEARCH_SCHEMA = {
     "name": "memex8_search",
     "description": (
         "Search your long-term memory by meaning. Finds relevant facts, "
         "project context, and user preferences stored across all past sessions. "
+        "Returns a retrieval-strength coverage heuristic, not proof of answerability. "
         "Use this before making decisions to check existing knowledge. "
         "Use compact=true, then memex8_get(ids=[...]) for the ones that matter."
     ),
@@ -429,6 +442,8 @@ SEARCH_SCHEMA = {
         "properties": {
             "compact": {"type": "boolean", "default": False},
             "query": {"type": "string", "description": "What to search for."},
+            "tags": {"type": "array", "items": {"type": "string"}, "description": "Require all tags."},
+            "visibility": {"type": "string", "enum": ["private", "public"]},
             "top_k": {"type": "integer", "description": "Max results (default: 8, max: 20)."},
             "realm": {"type": "string", "description": "Filter to a specific realm (optional)."},
             "min_score": {"type": "number", "description": "Minimum similarity 0-1 (default: 0.3)."},
@@ -1538,6 +1553,8 @@ class Memex8MemoryProvider(MemoryProvider):
         try:
             result = self._dispatch(client, tool_name, args)
             self._record_success()
+            if tool_name == "memex8_search" and isinstance(result, dict) and isinstance(result.get("coverage"), dict):
+                return _coverage_first_line(result["coverage"]) + "\n" + json.dumps(result, ensure_ascii=False)
             return json.dumps(result, ensure_ascii=False)
         except Exception as e:
             self._record_failure(str(e))
@@ -1557,7 +1574,11 @@ class Memex8MemoryProvider(MemoryProvider):
                 realm=args.get("realm"),
                 min_score=float(args.get("min_score", _DEFAULT_RECALL_MIN_SCORE)),
                 **({"compact": True} if compact else {}),
+                **({"tags": args["tags"]} if "tags" in args else {}),
+                **({"visibility": args["visibility"]} if "visibility" in args else {}),
             )
+            if isinstance(results, dict) and "coverage" in results:
+                return results
             return results.get("results", results) if isinstance(results, dict) else results
 
         if tool_name == "memex8_recall":

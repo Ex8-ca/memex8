@@ -127,23 +127,28 @@ pub async fn search(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, crate::api::error::ApiError> {
+    if req.min_score.is_some_and(|score| !score.is_finite()) {
+        return Err(ApiError::BadRequest("min_score must be finite".into()));
+    }
     let limit = req.limit.unwrap_or(10);
     let offset = req.offset.unwrap_or(0);
     let tags_ref = req.tags.clone();
-    let results = state
+    let outcome = state
         .engine
-        .search(
+        .search_with_coverage(
             &req.query,
             req.realm.as_deref(),
             tags_ref.as_deref().map(|t| t.as_ref()),
             limit,
             offset,
             req.min_score.unwrap_or(0.3),
+            req.visibility.as_deref(),
         )
         .await?;
-    let total = results.len();
+    let total = outcome.results.len();
     Ok(Json(SearchResponse {
-        results: RetrievalResults::new(results, req.compact),
+        coverage: outcome.coverage,
+        results: RetrievalResults::new(outcome.results, req.compact),
         total,
         limit,
         offset,
@@ -152,6 +157,7 @@ pub async fn search(
 
 #[derive(Serialize)]
 pub struct SearchResponse {
+    pub coverage: crate::engine::coverage::SearchCoverage,
     pub results: RetrievalResults,
     pub total: usize,
     pub limit: usize,

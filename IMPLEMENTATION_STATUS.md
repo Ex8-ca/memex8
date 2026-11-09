@@ -1,5 +1,29 @@
 # memex8 Implementation Status
 
+## 2026-11-08 — Search coverage (roadmap F)
+
+- REST search always returns coverage with level, optional raw best score,
+  bounded count above min_score before pagination, realm suggestions and a helpful hint.
+  Full/compact/GET/POST paths share the signal, including empty and offset pages.
+- Added default-safe `[search.coverage] high=0.55, partial=0.40` with finite/range/
+  ordering validation. Coverage probes up to 100 uncompressed Qdrant candidates
+  without payloads or a score cutoff and reuses the query embedding on both index
+  paths; raw scores remain distinct from boosted result scores.
+- Realm suggestions rank up to three valid centroids and check current members
+  against realm/tag/visibility filters. Missing/orphan/incompatible/zero centroids
+  are skipped; unavailable realm data degrades hints only. Search combines all
+  filters server-side in Qdrant and checks scope on compressed-index payloads.
+- Both Rust MCP transports retain structured coverage and prepend a standard text
+  first line; Hermes preserves coverage through dispatch and formats it first.
+  Old-server fallback, automatic prefetch and context injection remain compatible.
+- Validation: deterministic disposable-Qdrant known-hit/partial/miss, empty-store/
+  offset/cutoff, bounded-count, raw-vs-boosted, filter, centroid-failure, embedding-
+  reuse and Qdrant/TurboVec parity tests passed, plus Hermes coverage contracts.
+  Formatting/build and 77+77 Rust tests plus 38 core integration tests passed
+  (existing kmeans skip/warnings). Compact retrieval, certification, consolidation/
+  dedup recovery, Hermes, export/import path and bridge regressions passed. No
+  deployment or live-data changes.
+
 ## 2026-11-08 — Compact retrieval and batch get (roadmap E)
 
 - Added opt-in `compact=false` search/recall parameters to REST, both Rust MCP

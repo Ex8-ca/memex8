@@ -145,10 +145,23 @@ async fn handle_tool_call(
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.3) as f32;
 
-            let results = engine
-                .search(query, realm, None, limit, 0, min_score)
+            let tags: Option<Vec<String>> = arguments
+                .get("tags")
+                .map(|v| serde_json::from_value(v.clone()))
+                .transpose()?;
+            let visibility = arguments.get("visibility").and_then(|v| v.as_str());
+            let outcome = engine
+                .search_with_coverage(
+                    query,
+                    realm,
+                    tags.as_deref(),
+                    limit,
+                    0,
+                    min_score,
+                    visibility,
+                )
                 .await?;
-            Ok(format_results(results, compact))
+            super::tools::with_coverage(format_results(outcome.results, compact), &outcome.coverage)
         }
         "memex8_store" | "memex8_remember" => {
             let content = arguments

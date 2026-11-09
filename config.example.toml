@@ -123,3 +123,9 @@ theme = "dark"
 # path = "/home/user/notes"
 # chunk_by = "file"
 # poll_interval = "10m"
+
+# Retrieval-strength heuristic, using raw cosine before boosts/min_score/pagination.
+# Thresholds must satisfy 0 <= partial < high <= 1.
+[search.coverage]
+high = 0.55
+partial = 0.40

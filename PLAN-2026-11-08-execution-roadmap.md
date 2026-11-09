@@ -1,7 +1,7 @@
 # memex8 improvement execution plan
 
 Date: 2026-11-08  
-Status: A–D merged; E locally validated; F–H pending
+Status: A–E merged; F locally validated; G–H pending
 Source: `PLAN-2026-11-08-trending-improvements.md` (original brief, preserved)
 
 ## Outcomes
@@ -179,19 +179,19 @@ memories; report bytes separately from token estimates.
 Branch: `feat/search-coverage`  
 Dependencies: E
 
-- [ ] Always return coverage for search, including empty results and offset pages.
+- [x] Always return coverage for search, including empty results and offset pages.
   Add `[search.coverage] high = 0.55` and `partial = 0.40`, validating their order.
-- [ ] Define `best_score` as the best eligible raw cosine candidate before minimum
+- [x] Define `best_score` as the best eligible raw cosine candidate before minimum
   score filtering and pagination, distinct from boosted ranking scores. Use null
   when there are no eligible candidates; define that case as `level = none`.
-- [ ] Define `results_above_min` as eligible candidates meeting `min_score` in the
+- [x] Define `results_above_min` as eligible candidates meeting `min_score` in the
   bounded candidate set, before pagination; document it as a candidate count rather
   than a collection-wide total. Compute identical semantics on TurboVec and Qdrant.
-- [ ] Rank up to three accessible realm centroids using the same query embedding.
+- [x] Rank up to three accessible realm centroids using the same query embedding.
   Handle absent/stale centroids gracefully and respect request filters.
-- [ ] Put coverage first in Rust MCP and Hermes text output. Keep hints useful
+- [x] Put coverage first in Rust MCP and Hermes text output. Keep hints useful
   without making an installation-specific digest path a universal assumption.
-- [ ] Label this a retrieval-strength heuristic, not proof that a query is answerable.
+- [x] Label this a retrieval-strength heuristic, not proof that a query is answerable.
   Calibrate defaults using known-hit and known-miss fixtures before rollout.
 
 Done when: fixed known-hit/miss fixtures produce expected levels on both retrieval
@@ -351,6 +351,21 @@ Draft PR: https://github.com/Ex8-ca/memex8/pull/27 (all three CI checks passed).
   Hermes contracts passed. Representative UTF-8 JSON bytes measured 12,230 full
   versus 1,406 compact (11.5%). No deployment or live-data changes.
 - Next package: F, query coverage and realm suggestions.
+
+### 2026-11-08 — Package F
+
+- Merged #29 after all three required checks passed, then created
+  `feat/search-coverage` from updated main.
+- Added shared raw-cosine coverage, configurable/validated thresholds, filtered
+  live-member realm hints, and coverage-first Rust MCP/Hermes search text.
+  Kept ranking scores separate; a payload-free Qdrant probe (max 100) gives the
+  same coverage semantics on Qdrant and TurboVec, including empty offset pages.
+- Known-hit/partial/miss fixtures, request filters, bounded candidate count,
+  missing/orphan centroids, query-embedding reuse and tool contracts passed.
+  Formatting/build and 77+77+38 Rust tests (existing kmeans skip), compact retrieval,
+  certification/consolidation/dedup recovery, Hermes, export/import path and bridge
+  regressions passed; no deployment or live-data changes.
+- Next package: G, timeline retrieval around a memory/query/time anchor.
 
 ## First work session
 

@@ -39,7 +39,7 @@ def fixture(preserve=False, archive_dimensions=1, dedup_dry_run=True):
         wait_ready(qhttp + "/readyz")
         request(qhttp + "/collections/consolidation_archive",
                 {"vectors": {"size": archive_dimensions, "distance": "Dot"}}, "PUT")
-        state = {"fail_embedding": None, "summaries": 0, "embeddings": 0}
+        state = {"fail_embedding": None, "summaries": 0, "embeddings": 0, "embedding_vectors": {}}
 
         class MockLLM(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
@@ -53,8 +53,8 @@ def fixture(preserve=False, archive_dimensions=1, dedup_dry_run=True):
                     if state["fail_embedding"] in inputs:
                         status, response = 500, {"error": "injected restore embedding failure"}
                     else:
-                        response = {"data": [{"index": i, "embedding": [1.] + [0.] * 63}
-                                             for i, _ in enumerate(inputs)]}
+                        response = {"data": [{"index": i, "embedding": state["embedding_vectors"].get(text, [1.] + [0.] * 63)}
+                                             for i, text in enumerate(inputs)]}
                 else:
                     state["summaries"] += 1
                     response = {"choices": [{"message": {"content": f"Consolidation fixture summary {state['summaries']}."}}]}
