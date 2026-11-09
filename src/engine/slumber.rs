@@ -5,6 +5,7 @@ use crate::engine::memex8_md::write_digest_md;
 use crate::engine::quantizer::{decide_bit_width, TurboQuantVectorIndex};
 use crate::engine::reactions::reaction_boost;
 use crate::storage::qdrant::{GapPoint, MemoryPoint, QdrantStore, VerificationStatusCounts};
+use std::path::{Path, PathBuf};
 
 pub struct SlumberEngine {
     config: AppConfig,
@@ -1641,21 +1642,44 @@ impl SlumberEngine {
     // ─── Phase 5: MEMEX8.md Write-Back ───────────────────────────────────────
 
     /// Write top memories as MEMEX8.md files to watched directories.
+    ///
+    /// Memories are grouped by their `source_file`, but `source_file` is not
+    /// always a filesystem path — in the plugin-backed deployment it is a
+    /// source *label* ("hermes", "hermes-sync", "manual"), and occasionally a
+    /// URL. Treating those as paths produced nonsense targets: a bare label
+    /// resolved to a relative "MEMEX8.md" (written against the process working
+    /// directory, which is read-only in the container), and a URL resolved to a
+    /// path like "https://youtu.be/MEMEX8.md" that can never exist.
+    ///
+    /// Resolution rules:
+    ///   1. A real path whose parent directory exists → write MEMEX8.md beside
+    ///      it, preserving the original "context file next to the content"
+    ///      behaviour. Inside the container the watched path is already
+    ///      `/watch/...`, so the file lands on the host via the bind mount.
+    ///   2. A label or URL → sanitize it to a safe directory name and write to
+    ///      `<output_dir>/<label>/MEMEX8.md`.
+    ///   3. Empty or missing source → skipped; there is no grouping key.
     async fn update_memex8_md(&self) -> anyhow::Result<usize> {
         let max_memories = self.config.memex8_md.max_memories as usize;
+        let output_dir = std::path::Path::new(&self.config.memex8_md.output_dir);
         let mut written = 0;
 
         let all = self.store.scroll_all_memories().await?;
-        let mut by_dir: std::collections::HashMap<String, Vec<&MemoryPoint>> =
+        let mut by_dir: std::collections::HashMap<PathBuf, Vec<&MemoryPoint>> =
             std::collections::HashMap::new();
 
         for mem in &all {
-            if let Some(ref source) = mem.source_file {
-                if let Some(parent) = std::path::Path::new(source).parent() {
-                    let dir = parent.to_string_lossy().to_string();
-                    by_dir.entry(dir).or_default().push(mem);
-                }
+            let Some(ref source) = mem.source_file else {
+                continue;
+            };
+            let source = source.trim();
+            if source.is_empty() {
+                continue;
             }
+            let Some(dir) = Self::resolve_memex8_md_dir(source, output_dir) else {
+                continue;
+            };
+            by_dir.entry(dir).or_default().push(mem);
         }
 
         for (dir, mut memories) in by_dir {
@@ -1667,7 +1691,19 @@ impl SlumberEngine {
             });
             memories.truncate(max_memories);
 
-            let md_path = std::path::Path::new(&dir).join("MEMEX8.md");
+            // Only create directories we own (the label-grouped ones under
+            // output_dir). Never create directories for real source paths —
+            // if their parent does not exist, that source is not writable and
+            // creating it would fabricate a path that was never there.
+            let is_label_group = dir.starts_with(output_dir) && dir.parent() == Some(output_dir);
+            if is_label_group {
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    tracing::warn!("Failed to create directory {:?}: {}", dir, e);
+                    continue;
+                }
+            }
+
+            let md_path = dir.join("MEMEX8.md");
             let content = Self::format_memex8_md(&memories);
 
             if let Err(e) = std::fs::write(&md_path, &content) {
@@ -1680,6 +1716,80 @@ impl SlumberEngine {
 
         tracing::info!("  Wrote {} MEMEX8.md files", written);
         Ok(written)
+    }
+
+    /// Resolve the directory a memory's MEMEX8.md should be written into.
+    ///
+    /// Returns `None` when the source carries no usable grouping key.
+    fn resolve_memex8_md_dir(source: &str, output_dir: &Path) -> Option<PathBuf> {
+        let path = Path::new(source);
+
+        // Rule 1: a real absolute path whose parent directory exists.
+        //
+        // Restricted to absolute paths with no `..` component: the file
+        // ingester records absolute paths, so that is the only shape a
+        // genuine "write beside the content" case takes. A relative path
+        // containing `..` is treated as untrusted and falls through to the
+        // label rule, where it is sanitized into a harmless directory name
+        // instead of escaping the output directory.
+        if path.is_absolute()
+            && !path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() && parent.is_dir() {
+                    return Some(parent.to_path_buf());
+                }
+            }
+        }
+
+        // Rule 2: label, URL, or unusable path → sanitized directory under
+        // output_dir. The sanitizer guarantees a single path component with
+        // no separators, so this can never escape output_dir.
+        let label = Self::sanitize_memex8_md_label(source);
+        if label.is_empty() {
+            return None;
+        }
+        Some(output_dir.join(label))
+    }
+
+    /// Turn an arbitrary source label into a safe single path component.
+    ///
+    /// Replaces every character outside `[A-Za-z0-9._-]` with `-`, collapses
+    /// repeated dashes, strips leading/trailing dashes and dots, and caps the
+    /// length. This prevents path traversal ("../..") and keeps URL-shaped
+    /// sources from producing URL-shaped directories.
+    fn sanitize_memex8_md_label(source: &str) -> String {
+        // Drop a URL scheme and host so "https://youtu.be/abc" becomes
+        // "youtu.be-abc" rather than "--https---youtu.be-abc".
+        let stripped = match source.find("://") {
+            Some(idx) => &source[idx + 3..],
+            None => source,
+        };
+
+        let mut out = String::with_capacity(stripped.len());
+        let mut last_dash = false;
+        for ch in stripped.chars() {
+            let keep = ch.is_ascii_alphanumeric() || ch == '.' || ch == '_';
+            if keep {
+                out.push(ch);
+                last_dash = false;
+            } else if !last_dash {
+                out.push('-');
+                last_dash = true;
+            }
+        }
+
+        // Trim separators that would create empty or traversal components.
+        let trimmed = out.trim_matches(|c: char| c == '-' || c == '.').to_string();
+
+        // Cap the length, preserving a readable prefix.
+        if trimmed.chars().count() > 64 {
+            trimmed.chars().take(64).collect()
+        } else {
+            trimmed
+        }
     }
 
     /// Format memories as a MEMEX8.md file.
@@ -2891,4 +3001,112 @@ fn kmeans_split_2(vectors: &[Vec<f32>], max_iter: usize) -> (Vec<f32>, Vec<f32>,
     }
 
     (c1, c2, assignments)
+}
+
+#[cfg(test)]
+mod memex8_md_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn resolve(source: &str) -> Option<PathBuf> {
+        SlumberEngine::resolve_memex8_md_dir(source, Path::new("/watch"))
+    }
+
+    fn sanitize(source: &str) -> String {
+        SlumberEngine::sanitize_memex8_md_label(source)
+    }
+
+    /// A bare source label must not resolve to a relative "MEMEX8.md" written
+    /// against the process working directory. This was the bug that made the
+    /// phase log "Permission denied" every cycle and write zero files.
+    #[test]
+    fn test_bare_label_resolves_under_output_dir() {
+        let dir = resolve("hermes").expect("label must resolve");
+        assert_eq!(dir, Path::new("/watch/hermes"));
+        assert!(
+            dir.is_absolute(),
+            "label target must be absolute, got {:?}",
+            dir
+        );
+    }
+
+    #[test]
+    fn test_hyphenated_label_resolves_under_output_dir() {
+        assert_eq!(
+            resolve("hermes-sync").expect("label must resolve"),
+            Path::new("/watch/hermes-sync")
+        );
+    }
+
+    /// A URL source must not produce a URL-shaped path.
+    #[test]
+    fn test_url_source_is_sanitized_not_used_verbatim() {
+        let dir = resolve("https://youtu.be/dQw4w9WgXcQ").expect("url must resolve");
+        assert!(
+            dir.is_absolute(),
+            "url target must be absolute, got {:?}",
+            dir
+        );
+        assert!(
+            !dir.to_string_lossy().contains("://"),
+            "url target must not contain a scheme, got {:?}",
+            dir
+        );
+        assert_eq!(dir, Path::new("/watch/youtu.be-dQw4w9WgXcQ"));
+    }
+
+    /// Path traversal must be impossible via a crafted source label.
+    #[test]
+    fn test_path_traversal_is_neutralized() {
+        let dir = resolve("../../etc/passwd").expect("must resolve somewhere safe");
+        assert!(
+            dir.starts_with("/watch"),
+            "traversal escaped output_dir: {:?}",
+            dir
+        );
+        assert_eq!(dir, Path::new("/watch/etc-passwd"));
+    }
+
+    #[test]
+    fn test_sanitize_rejects_empty_and_dot_only() {
+        assert_eq!(sanitize(""), "");
+        assert_eq!(sanitize("..."), "");
+        assert_eq!(sanitize("/"), "");
+    }
+
+    #[test]
+    fn test_sanitize_collapses_and_trims() {
+        assert_eq!(sanitize("  hermes  "), "hermes");
+        assert_eq!(sanitize("a///b"), "a-b");
+        assert_eq!(sanitize("--lead--"), "lead");
+    }
+
+    #[test]
+    fn test_sanitize_caps_length() {
+        let long = "x".repeat(200);
+        assert_eq!(sanitize(&long).len(), 64);
+    }
+
+    /// An absolute path whose parent exists must win over the label rule —
+    /// that preserves "MEMEX8.md sits beside the content it describes".
+    #[test]
+    fn test_real_path_with_existing_parent_is_used_directly() {
+        let dir = resolve("/tmp/example.md").expect("existing dir must resolve");
+        assert_eq!(dir, Path::new("/tmp"));
+    }
+
+    /// An absolute path whose parent does not exist cannot be written beside
+    /// the content, so it degrades to a label directory under output_dir
+    /// rather than being dropped — the memory still reaches the write-back.
+    #[test]
+    fn test_real_path_with_missing_parent_falls_back_to_label() {
+        let dir = resolve("/nonexistent-dir-xyz/file.md")
+            .expect("must degrade to a label, not be dropped");
+        assert!(
+            dir.starts_with("/watch"),
+            "must stay under output_dir: {:?}",
+            dir
+        );
+        assert_eq!(dir, Path::new("/watch/nonexistent-dir-xyz-file.md"));
+    }
 }
