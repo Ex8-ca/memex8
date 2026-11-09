@@ -648,15 +648,40 @@ impl Default for VerificationConfig {
 impl AppConfig {
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let config_path = Path::new(path);
-        if config_path.exists() {
+        let mut config = if config_path.exists() {
             let content = std::fs::read_to_string(config_path)?;
             let config: AppConfig = toml::from_str(&content)?;
             config.slumber.validate_dedup()?;
             config.search.coverage.validate()?;
-            Ok(config)
+            config
         } else {
             tracing::warn!("Config file not found at {}, using defaults", path);
-            Ok(Self::default())
+            Self::default()
+        };
+        config.apply_env_overrides();
+        Ok(config)
+    }
+
+    /// Environment overrides applied after deserialization.
+    /// Precedence: env var → config.toml → built-in default.
+    ///
+    /// serde's `#[serde(default = ...)]` only reads `TURBOVEC_*` when the key
+    /// is absent from the TOML. config.toml sets relative `data/...` paths, so
+    /// in the container (cwd `/`, uid 1000) the index resolved to
+    /// `/data/memories.tv`, which can't be created — every slumber logged
+    /// "Failed to save TurboVec index: No such file or directory" and the
+    /// on-disk index went stale. The compose file exports absolute paths on
+    /// the persistent volume; this makes them authoritative.
+    fn apply_env_overrides(&mut self) {
+        if let Ok(p) = std::env::var("TURBOVEC_INDEX_PATH") {
+            if !p.is_empty() {
+                self.turbovec.index_path = p;
+            }
+        }
+        if let Ok(p) = std::env::var("TURBOVEC_ID_MAP_PATH") {
+            if !p.is_empty() {
+                self.turbovec.id_map_path = p;
+            }
         }
     }
 
@@ -750,6 +775,39 @@ impl Default for AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression pin: an explicit relative path in config.toml must not mask
+    /// TURBOVEC_* (the container could not persist its index for weeks).
+    /// One test touches the env vars, so parallel tests can't race on them.
+    #[test]
+    fn test_turbovec_env_overrides_config_file() {
+        let mut config = AppConfig::default();
+        config.turbovec.index_path = "data/memories.tv".into();
+        config.turbovec.id_map_path = "data/memories_ids.json".into();
+
+        std::env::remove_var("TURBOVEC_INDEX_PATH");
+        std::env::remove_var("TURBOVEC_ID_MAP_PATH");
+        config.apply_env_overrides();
+        assert_eq!(config.turbovec.index_path, "data/memories.tv");
+
+        std::env::set_var("TURBOVEC_INDEX_PATH", "/var/lib/memex8/data/memories.tv");
+        std::env::set_var(
+            "TURBOVEC_ID_MAP_PATH",
+            "/var/lib/memex8/data/memories_ids.json",
+        );
+        config.apply_env_overrides();
+        std::env::remove_var("TURBOVEC_INDEX_PATH");
+        std::env::remove_var("TURBOVEC_ID_MAP_PATH");
+
+        assert_eq!(
+            config.turbovec.index_path,
+            "/var/lib/memex8/data/memories.tv"
+        );
+        assert_eq!(
+            config.turbovec.id_map_path,
+            "/var/lib/memex8/data/memories_ids.json"
+        );
+    }
 
     #[test]
     fn coverage_defaults_and_validation_survive_legacy_configs() {

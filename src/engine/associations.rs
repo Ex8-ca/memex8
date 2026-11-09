@@ -280,9 +280,10 @@ pub fn kmeans_topic_clusters(
 /// Uses word frequency to pick the top 2-3 distinctive words.
 pub fn generate_cluster_label(memory_ids: &[String], all_memories: &[MemoryPoint]) -> String {
     // Collect texts from all memories in this cluster
-    let texts: Vec<&str> = memory_ids
+    let wanted: std::collections::HashSet<&str> = memory_ids.iter().map(|s| s.as_str()).collect();
+    let texts: Vec<&str> = all_memories
         .iter()
-        .filter_map(|id| all_memories.iter().find(|m| &m.id == id))
+        .filter(|m| wanted.contains(m.id.as_str()))
         .map(|m| m.content.as_str())
         .collect();
 
@@ -996,68 +997,57 @@ pub fn detect_gaps(
         return gaps;
     }
 
-    // For each pair of clusters, check if there's a bridge memory
+    // Precompute once. The old version re-scanned `memories` with `find` inside
+    // per-member loops, and recomputed cluster B's newest timestamp for every
+    // member of A — O(|A|·|B|·n) per cluster pair, 30+ minutes at 20k memories
+    // while slumber held the maintenance lock (blocking deletes and edits).
+    let ingested: HashMap<&str, i64> = memories
+        .iter()
+        .map(|m| {
+            let ts = chrono::DateTime::parse_from_rfc3339(&m.ingested_at)
+                .map(|dt| dt.timestamp())
+                .unwrap_or(0);
+            (m.id.as_str(), ts)
+        })
+        .collect();
+    // Newest ingest time per cluster (members missing from `memories` count as 0,
+    // matching the old `unwrap_or(0)`).
+    let newest: Vec<i64> = clusters
+        .iter()
+        .map(|c| {
+            c.memory_ids
+                .iter()
+                .map(|id| ingested.get(id.as_str()).copied().unwrap_or(0))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    // Highest similarity of any member of `from` (that has a memory record and a
+    // vector) to the centroid of `to`.
+    let best_bridge = |from: &TopicCluster, to: &TopicCluster| -> Option<f32> {
+        from.memory_ids
+            .iter()
+            .filter(|id| ingested.contains_key(id.as_str()))
+            .filter_map(|id| memory_vectors.get(id))
+            .map(|v| cosine_similarity(v, &to.centroid))
+            .reduce(f32::max)
+    };
+
     for i in 0..clusters.len() {
         for j in (i + 1)..clusters.len() {
             let cluster_a = &clusters[i];
             let cluster_b = &clusters[j];
 
-            // Find the memories closest to the boundary between clusters
-            // (memories in A that are most similar to centroids of B)
-            let mut best_bridge_a: Option<(&MemoryPoint, f32)> = None;
-            let mut best_bridge_b: Option<(&MemoryPoint, f32)> = None;
-
-            for mem_id in &cluster_a.memory_ids {
-                if let Some(vec) = memory_vectors.get(mem_id) {
-                    let sim_b = cosine_similarity(vec, &cluster_b.centroid);
-                    if let Some((_, prev)) = best_bridge_a {
-                        if sim_b > prev {
-                            let mem = memories.iter().find(|m| m.id == *mem_id);
-                            if let Some(m) = mem {
-                                best_bridge_a = Some((m, sim_b));
-                            }
-                        }
-                    } else {
-                        let mem = memories.iter().find(|m| m.id == *mem_id);
-                        if let Some(m) = mem {
-                            best_bridge_a = Some((m, sim_b));
-                        }
-                    }
-                }
-            }
-
-            for mem_id in &cluster_b.memory_ids {
-                if let Some(vec) = memory_vectors.get(mem_id) {
-                    let sim_a = cosine_similarity(vec, &cluster_a.centroid);
-                    if let Some((_, prev)) = best_bridge_b {
-                        if sim_a > prev {
-                            let mem = memories.iter().find(|m| m.id == *mem_id);
-                            if let Some(m) = mem {
-                                best_bridge_b = Some((m, sim_a));
-                            }
-                        }
-                    } else {
-                        let mem = memories.iter().find(|m| m.id == *mem_id);
-                        if let Some(m) = mem {
-                            best_bridge_b = Some((m, sim_a));
-                        }
-                    }
-                }
-            }
-
-            // If both clusters have memories but they're far apart, there's a gap
-            let (Some((_bridge_a, sim_a_to_b)), Some((_bridge_b, sim_b_to_a))) =
-                (best_bridge_a, best_bridge_b)
-            else {
+            let (Some(sim_a_to_b), Some(sim_b_to_a)) = (
+                best_bridge(cluster_a, cluster_b),
+                best_bridge(cluster_b, cluster_a),
+            ) else {
                 continue;
             };
 
             // The gap exists if neither memory is very close to the other cluster
             if sim_a_to_b < 0.4 && sim_b_to_a < 0.4 {
-                // These clusters are semantically distant but topically related (based on
-                // k-means being confident they're separate clusters — i.e., they are
-                // distinct but might benefit from a bridging memory).
-                let gap = Gap::new(
+                gaps.push(Gap::new(
                     cluster_a.label.clone(),
                     cluster_b.label.clone(),
                     LinkType::FillGap,
@@ -1067,37 +1057,14 @@ pub fn detect_gaps(
                         cluster_a.label, cluster_b.label, cluster_a.label, cluster_b.label
                     ),
                     0.7,
-                );
-                gaps.push(gap);
+                ));
             }
 
-            // Check for temporal gaps: if cluster A memories are all older than B, but
-            // there's no transitional memory, suggest a temporal gap
-            let all_a_older = cluster_a.memory_ids.iter().all(|id| {
-                memories
-                    .iter()
-                    .find(|m| m.id == *id)
-                    .map(|m| {
-                        chrono::DateTime::parse_from_rfc3339(&m.ingested_at)
-                            .map(|dt| dt.timestamp())
-                            .unwrap_or(0)
-                    })
-                    .unwrap_or(0)
-                    < cluster_b
-                        .memory_ids
-                        .iter()
-                        .filter_map(|id| memories.iter().find(|m| m.id == *id))
-                        .filter_map(|m| {
-                            chrono::DateTime::parse_from_rfc3339(&m.ingested_at)
-                                .map(|dt| dt.timestamp())
-                                .ok()
-                        })
-                        .max()
-                        .unwrap_or(0)
-            });
-
+            // Temporal gap: every memory in A is older than B's newest memory,
+            // i.e. newest(A) < newest(B).
+            let all_a_older = newest[i] < newest[j];
             if all_a_older && sim_a_to_b > 0.3 && sim_a_to_b < 0.6 {
-                let gap = Gap::new(
+                gaps.push(Gap::new(
                     cluster_a.label.clone(),
                     cluster_b.label.clone(),
                     LinkType::TemporalNext,
@@ -1107,8 +1074,7 @@ pub fn detect_gaps(
                         cluster_a.label, cluster_b.label
                     ),
                     0.6,
-                );
-                gaps.push(gap);
+                ));
             }
         }
     }
@@ -1125,6 +1091,246 @@ pub fn detect_gaps(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Pre-optimization detect_gaps, kept verbatim as an oracle.
+    #[allow(clippy::all)]
+    fn detect_gaps_reference(
+        clusters: &[TopicCluster],
+        memories: &[MemoryPoint],
+        memory_vectors: &HashMap<String, Vec<f32>>,
+    ) -> Vec<Gap> {
+        let mut gaps = Vec::new();
+
+        if clusters.len() < 2 {
+            return gaps;
+        }
+
+        // For each pair of clusters, check if there's a bridge memory
+        for i in 0..clusters.len() {
+            for j in (i + 1)..clusters.len() {
+                let cluster_a = &clusters[i];
+                let cluster_b = &clusters[j];
+
+                // Find the memories closest to the boundary between clusters
+                // (memories in A that are most similar to centroids of B)
+                let mut best_bridge_a: Option<(&MemoryPoint, f32)> = None;
+                let mut best_bridge_b: Option<(&MemoryPoint, f32)> = None;
+
+                for mem_id in &cluster_a.memory_ids {
+                    if let Some(vec) = memory_vectors.get(mem_id) {
+                        let sim_b = cosine_similarity(vec, &cluster_b.centroid);
+                        if let Some((_, prev)) = best_bridge_a {
+                            if sim_b > prev {
+                                let mem = memories.iter().find(|m| m.id == *mem_id);
+                                if let Some(m) = mem {
+                                    best_bridge_a = Some((m, sim_b));
+                                }
+                            }
+                        } else {
+                            let mem = memories.iter().find(|m| m.id == *mem_id);
+                            if let Some(m) = mem {
+                                best_bridge_a = Some((m, sim_b));
+                            }
+                        }
+                    }
+                }
+
+                for mem_id in &cluster_b.memory_ids {
+                    if let Some(vec) = memory_vectors.get(mem_id) {
+                        let sim_a = cosine_similarity(vec, &cluster_a.centroid);
+                        if let Some((_, prev)) = best_bridge_b {
+                            if sim_a > prev {
+                                let mem = memories.iter().find(|m| m.id == *mem_id);
+                                if let Some(m) = mem {
+                                    best_bridge_b = Some((m, sim_a));
+                                }
+                            }
+                        } else {
+                            let mem = memories.iter().find(|m| m.id == *mem_id);
+                            if let Some(m) = mem {
+                                best_bridge_b = Some((m, sim_a));
+                            }
+                        }
+                    }
+                }
+
+                // If both clusters have memories but they're far apart, there's a gap
+                let (Some((_bridge_a, sim_a_to_b)), Some((_bridge_b, sim_b_to_a))) =
+                    (best_bridge_a, best_bridge_b)
+                else {
+                    continue;
+                };
+
+                // The gap exists if neither memory is very close to the other cluster
+                if sim_a_to_b < 0.4 && sim_b_to_a < 0.4 {
+                    // These clusters are semantically distant but topically related (based on
+                    // k-means being confident they're separate clusters — i.e., they are
+                    // distinct but might benefit from a bridging memory).
+                    let gap = Gap::new(
+                        cluster_a.label.clone(),
+                        cluster_b.label.clone(),
+                        LinkType::FillGap,
+                        format!(
+                            "Topic cluster '{}' and '{}' are related but lack a bridging memory. \
+                             Consider adding content that connects {} to {}.",
+                            cluster_a.label, cluster_b.label, cluster_a.label, cluster_b.label
+                        ),
+                        0.7,
+                    );
+                    gaps.push(gap);
+                }
+
+                // Check for temporal gaps: if cluster A memories are all older than B, but
+                // there's no transitional memory, suggest a temporal gap
+                let all_a_older = cluster_a.memory_ids.iter().all(|id| {
+                    memories
+                        .iter()
+                        .find(|m| m.id == *id)
+                        .map(|m| {
+                            chrono::DateTime::parse_from_rfc3339(&m.ingested_at)
+                                .map(|dt| dt.timestamp())
+                                .unwrap_or(0)
+                        })
+                        .unwrap_or(0)
+                        < cluster_b
+                            .memory_ids
+                            .iter()
+                            .filter_map(|id| memories.iter().find(|m| m.id == *id))
+                            .filter_map(|m| {
+                                chrono::DateTime::parse_from_rfc3339(&m.ingested_at)
+                                    .map(|dt| dt.timestamp())
+                                    .ok()
+                            })
+                            .max()
+                            .unwrap_or(0)
+                });
+
+                if all_a_older && sim_a_to_b > 0.3 && sim_a_to_b < 0.6 {
+                    let gap = Gap::new(
+                        cluster_a.label.clone(),
+                        cluster_b.label.clone(),
+                        LinkType::TemporalNext,
+                        format!(
+                            "'{}' appears to precede '{}' chronologically but there's no \
+                             clear transitional memory connecting them.",
+                            cluster_a.label, cluster_b.label
+                        ),
+                        0.6,
+                    );
+                    gaps.push(gap);
+                }
+            }
+        }
+
+        tracing::debug!(
+            "Detected {} knowledge gaps across {} clusters",
+            gaps.len(),
+            clusters.len()
+        );
+
+        gaps
+    }
+
+    fn gap_memory(id: &str, ts: i64) -> MemoryPoint {
+        let mut m: MemoryPoint = serde_json::from_value(serde_json::json!({
+            "id": id, "content": "", "realm_name": "", "importance": 0.5, "upvotes": 0,
+            "tags": [], "ingested_at": "", "last_accessed": "", "access_count": 0,
+            "chunk_type": "manual", "source_hash": ""
+        }))
+        .expect("minimal MemoryPoint");
+        m.ingested_at = chrono::DateTime::from_timestamp(ts, 0)
+            .unwrap()
+            .to_rfc3339();
+        m
+    }
+
+    fn gap_key(g: &Gap) -> (String, String, String, String, u32) {
+        (
+            g.from_cluster.clone(),
+            g.to_cluster.clone(),
+            format!("{:?}", g.missing_link_type),
+            g.description.clone(),
+            g.confidence.to_bits(),
+        )
+    }
+
+    /// The fast detect_gaps must produce exactly what the old O(n^2) one did,
+    /// including members with no memory record or no vector.
+    #[test]
+    fn test_detect_gaps_matches_reference() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        for trial in 0..40 {
+            let dims = 6;
+            let n = rng.gen_range(5..60);
+            let k = rng.gen_range(2..7);
+            let mut memories = Vec::new();
+            let mut vectors = HashMap::new();
+            let mut clusters: Vec<TopicCluster> = (0..k)
+                .map(|c| TopicCluster {
+                    id: format!("cluster-{c}"),
+                    label: format!("L{c}"),
+                    memory_ids: vec![],
+                    centroid: (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect(),
+                    total_link_strength: 0.0,
+                })
+                .collect();
+            for i in 0..n {
+                let id = format!("m{trial}-{i}");
+                // ~10% have no memory record, ~10% no vector
+                if rng.gen_bool(0.9) {
+                    memories.push(gap_memory(&id, rng.gen_range(1_600_000_000..1_800_000_000)));
+                }
+                if rng.gen_bool(0.9) {
+                    vectors.insert(
+                        id.clone(),
+                        (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect(),
+                    );
+                }
+                clusters[rng.gen_range(0..k)].memory_ids.push(id);
+            }
+            let mut fast: Vec<_> = detect_gaps(&clusters, &memories, &vectors)
+                .iter()
+                .map(gap_key)
+                .collect();
+            let mut slow: Vec<_> = detect_gaps_reference(&clusters, &memories, &vectors)
+                .iter()
+                .map(gap_key)
+                .collect();
+            fast.sort();
+            slow.sort();
+            assert_eq!(fast, slow, "trial {trial}");
+        }
+    }
+
+    /// 20k memories must finish in well under a second (was 30+ min).
+    #[test]
+    fn test_detect_gaps_scales() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let (n, k, dims) = (20_000, 8, 64);
+        let mut memories = Vec::with_capacity(n);
+        let mut vectors = HashMap::new();
+        let mut clusters: Vec<TopicCluster> = (0..k)
+            .map(|c| TopicCluster {
+                id: format!("cluster-{c}"),
+                label: format!("L{c}"),
+                memory_ids: vec![],
+                centroid: (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect(),
+                total_link_strength: 0.0,
+            })
+            .collect();
+        for i in 0..n {
+            let id = format!("m{i}");
+            memories.push(gap_memory(&id, 1_700_000_000 + i as i64));
+            vectors.insert(
+                id.clone(),
+                (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect(),
+            );
+            clusters[i % k].memory_ids.push(id);
+        }
+        let t = std::time::Instant::now();
+        detect_gaps(&clusters, &memories, &vectors);
+        assert!(t.elapsed().as_secs_f32() < 2.0, "took {:?}", t.elapsed());
+    }
 
     #[test]
     fn test_cosine_similarity() {
