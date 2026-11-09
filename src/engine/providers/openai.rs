@@ -62,16 +62,13 @@ impl Embedder for OpenAiEmbedder {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await?;
-            anyhow::bail!(
-                "Embedding API error at {} ({}): {}",
-                self.base_url,
-                status,
-                body
-            );
+            anyhow::bail!("Embedding API error at {} ({})", self.base_url, status);
         }
 
-        let result: OpenAiResponse = resp.json().await?;
+        let result: OpenAiResponse = resp
+            .json()
+            .await
+            .map_err(|_| anyhow::anyhow!("Invalid embedding response"))?;
         result
             .data
             .into_iter()
@@ -97,16 +94,13 @@ impl Embedder for OpenAiEmbedder {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await?;
-            anyhow::bail!(
-                "Embedding API error at {} ({}): {}",
-                self.base_url,
-                status,
-                body
-            );
+            anyhow::bail!("Embedding API error at {} ({})", self.base_url, status);
         }
 
-        let result: OpenAiResponse = resp.json().await?;
+        let result: OpenAiResponse = resp
+            .json()
+            .await
+            .map_err(|_| anyhow::anyhow!("Invalid embedding response"))?;
         Ok(result.data.into_iter().map(|d| d.embedding).collect())
     }
 

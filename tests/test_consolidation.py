@@ -39,11 +39,12 @@ def fixture(preserve=False, archive_dimensions=1, dedup_dry_run=True):
         wait_ready(qhttp + "/readyz")
         request(qhttp + "/collections/consolidation_archive",
                 {"vectors": {"size": archive_dimensions, "distance": "Dot"}}, "PUT")
-        state = {"fail_embedding": None, "summaries": 0, "embeddings": 0, "embedding_vectors": {}}
+        state = {"fail_embedding": None, "summaries": 0, "embeddings": 0, "embedding_vectors": {}, "requests": []}
 
         class MockLLM(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                state["requests"].append({"path": self.path, "body": body})
                 status = 200
                 if self.path.endswith("/embeddings"):
                     state["embeddings"] += 1
@@ -51,13 +52,15 @@ def fixture(preserve=False, archive_dimensions=1, dedup_dry_run=True):
                     if isinstance(inputs, str):
                         inputs = [inputs]
                     if state["fail_embedding"] in inputs:
-                        status, response = 500, {"error": "injected restore embedding failure"}
+                        status, response = 500, {"error": state.get("error_body", "injected restore embedding failure")}
                     else:
                         response = {"data": [{"index": i, "embedding": state["embedding_vectors"].get(text, [1.] + [0.] * 63)}
                                              for i, text in enumerate(inputs)]}
+                elif self.path == "/generate":
+                    response = {"response": state.get("session_response", "{}")}
                 else:
                     state["summaries"] += 1
-                    response = {"choices": [{"message": {"content": f"Consolidation fixture summary {state['summaries']}."}}]}
+                    response = {"choices": [{"message": {"content": state.get("chat_response", f"Consolidation fixture summary {state['summaries']}.")}}]}
                 data = json.dumps(response).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")

@@ -569,6 +569,45 @@ and Hermes search expose the same optional tags and visibility filters. They pri
 retain the structured coverage metadata. Hermes can still use older servers
 without coverage; automatic prefetch and injected context remain unchanged.
 
+### Private-text redaction
+
+Wrap text in `<private>...</private>` to exclude it from new memory capture:
+
+```text
+The project uses Rust. <private>temporary credential</private> Deployment is manual.
+```
+
+The stored/embedded text becomes `The project uses Rust. [private] Deployment is manual.`
+Tags are case-insensitive and spans may cross lines. Nested spans remain private
+until the outer tag closes. An opening tag without a closing tag hides the rest
+of the input. Only the literal tag syntax is recognized; no attributes or escaping
+syntax are supported.
+
+One shared parser runs before direct storage, edits, file chunking/source hashing,
+and session extraction. It retains state across conversation messages before the
+session's last-50-message selection. Webhooks, watched-file re-ingestion, imports,
+and LLM-derived summaries use the same rules. Textual metadata is sanitized as
+well. The shared embedding factory applies redaction as a final boundary check;
+Qdrant memory and archive writes reject still-marked payloads instead of pairing
+modified content with an old vector. Provider error bodies are not logged or
+returned, since an upstream service can echo sensitive input or output.
+
+Whitespace/marker-only direct memories return HTTP 422 with
+`content empty after redaction`. All-private files/chunks and imported records
+are skipped with a safe diagnostic. All-private sessions return `status=skipped`,
+a reason, and no stored IDs, without calling the LLM or embedder. Conversation
+webhooks with no remaining meaningful content return 422. Imports re-embed any
+body changed by redaction even when vector reuse was requested; metadata-only
+changes can retain the existing vector.
+
+Redaction applies to new capture and does not erase existing memories, original
+files, backups, exports, or copies already sent elsewhere. Exact backup/recovery
+paths reject marked legacy snapshots rather than silently changing archived
+provenance or restoring mismatched vectors; use a sanitized regular import for
+those records. Untagged secrets and paraphrases are not detected automatically.
+The feature is always enabled, requires no configuration or migration, and does
+not include configurable secret-pattern matching.
+
 ### Archived duplicate removal
 
 `[slumber] dedup_dry_run = true` remains the default. In a full slumber run, setting

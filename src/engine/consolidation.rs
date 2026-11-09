@@ -156,6 +156,7 @@ impl Engine {
                 }
                 // Re-embed missing points with the current model. Archived vectors
                 // remain available for audit and future compatible-model restores.
+                super::redaction::ensure_memory(&snapshot.memory)?;
                 let vector = embedder
                     .as_ref()
                     .unwrap()

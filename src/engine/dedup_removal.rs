@@ -79,6 +79,7 @@ async fn apply_operation(
     config: &AppConfig,
     op: &mut ConsolidationOperation,
 ) -> anyhow::Result<(bool, bool)> {
+    super::redaction::ensure_clean(op)?;
     let before = op
         .dedup_winner
         .as_ref()
@@ -302,6 +303,7 @@ impl Engine {
                     .await?;
                 retained += 1;
             } else {
+                super::redaction::ensure_memory(&source.memory)?;
                 let vector = self.make_embedder()?.embed(&source.memory.content).await?;
                 anyhow::ensure!(
                     vector.len() == self.embed_dimensions as usize

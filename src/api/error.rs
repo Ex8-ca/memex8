@@ -8,6 +8,7 @@ pub enum ApiError {
     NotFound(String),
     Unauthorized,
     BadRequest(String),
+    Unprocessable(String),
     Conflict(String),
     Internal(anyhow::Error),
 }
@@ -17,6 +18,7 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             ApiError::NotFound(id) => (StatusCode::NOT_FOUND, format!("Not found: {}", id)),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized".into()),
+            ApiError::Unprocessable(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
             ApiError::Internal(e) => {
@@ -34,6 +36,9 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
+        if e.is::<crate::engine::redaction::RedactionError>() {
+            return Self::Unprocessable(e.to_string());
+        }
         if let Some(error) = e.downcast_ref::<crate::storage::qdrant::RecoveryError>() {
             return match error {
                 crate::storage::qdrant::RecoveryError::NotFound(message) => {

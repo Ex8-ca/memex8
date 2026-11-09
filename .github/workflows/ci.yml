@@ -67,6 +67,7 @@ jobs:
           python3 tests/test_dedup_removal.py
           python3 tests/test_compact_retrieval.py
           python3 tests/test_search_coverage.py
+          python3 tests/test_private_redaction.py
 
       - name: Upload binary
         uses: actions/upload-artifact@v4

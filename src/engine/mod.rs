@@ -16,6 +16,7 @@ pub mod quantizer;
 pub mod query_intent;
 pub mod reactions;
 pub mod realms;
+pub mod redaction;
 pub mod retrieval;
 pub mod scheduler;
 pub mod session;
@@ -258,6 +259,9 @@ impl Engine {
         let ingester = ingester::Ingester::new(self.config.clone());
         let chunks = ingester.ingest_path(path, chunk_by).await?;
         tracing::info!("Ingested {} chunks from {}", chunks.len(), path);
+        if chunks.is_empty() {
+            return Ok(());
+        }
 
         let embedder = self.make_embedder()?;
         let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
@@ -502,6 +506,9 @@ impl Engine {
             .ingest_path(&path.to_string_lossy(), chunk_by)
             .await?;
 
+        if chunks.is_empty() {
+            return Ok(());
+        }
         let embedder = self.make_embedder()?;
         let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
         let vectors = embedder.embed_batch(&texts).await?;
@@ -1066,11 +1073,14 @@ impl Engine {
     }
 
     pub async fn edit_memory(&self, id: &str, new_content: &str) -> anyhow::Result<()> {
+        let clean_content = redaction::required(new_content)?;
+        let new_content = clean_content.as_str();
         let _guard = self.store.maintenance_guard().await;
         let mut existing = self.get_memory(id).await?;
         if existing.is_certified() {
             return Err(crate::storage::qdrant::CertifiedMemoryError.into());
         }
+        existing = redaction::sanitize(&existing)?;
         let embedder = self.make_embedder()?;
         let vector = embedder.embed(new_content).await?;
         existing.content = new_content.to_string();
@@ -1205,6 +1215,19 @@ impl Engine {
         memory_type: Option<&str>,
         certified: bool,
     ) -> anyhow::Result<String> {
+        let clean_content = redaction::required(content)?;
+        let content = clean_content.as_str();
+        let tags = tags.map(|tags| {
+            tags.into_iter()
+                .map(|s| redaction::text(&s))
+                .collect::<Vec<_>>()
+        });
+        let clean_realm = realm_hint.map(redaction::text);
+        let realm_hint = clean_realm.as_deref();
+        let clean_source = source.map(redaction::text);
+        let source = clean_source.as_deref();
+        let clean_type = memory_type.map(redaction::text);
+        let memory_type = clean_type.as_deref();
         let embedder = self.make_embedder()?;
         let vector = embedder.embed(content).await?;
 
@@ -1301,23 +1324,53 @@ impl Engine {
     pub async fn import(&self, path: &str, reuse_vectors: bool) -> anyhow::Result<usize> {
         let _guard = self.store.maintenance_guard().await;
         let content = std::fs::read_to_string(path)?;
-        if reuse_vectors {
-            if let Ok(memories) = serde_json::from_str::<Vec<MemoryWithVector>>(&content) {
-                for memory in &memories {
-                    self.store
-                        .replace_memory(&memory.memory, &memory.vector)
-                        .await?;
-                }
-                return Ok(memories.len());
+        let memories: Vec<MemoryWithVector> = if reuse_vectors {
+            serde_json::from_str(&content)
+                .or_else(|_| {
+                    serde_json::from_str::<Vec<crate::storage::qdrant::MemoryPoint>>(&content).map(
+                        |points| {
+                            points
+                                .into_iter()
+                                .map(|memory| MemoryWithVector {
+                                    memory,
+                                    vector: Vec::new(),
+                                })
+                                .collect()
+                        },
+                    )
+                })
+                .map_err(|_| anyhow::anyhow!("Invalid memory import format"))?
+        } else {
+            serde_json::from_str::<Vec<crate::storage::qdrant::MemoryPoint>>(&content)
+                .map_err(|_| anyhow::anyhow!("Invalid memory import format"))?
+                .into_iter()
+                .map(|memory| MemoryWithVector {
+                    memory,
+                    vector: Vec::new(),
+                })
+                .collect()
+        };
+        let mut stored = 0;
+        for snapshot in memories {
+            let mut memory: crate::storage::qdrant::MemoryPoint =
+                redaction::sanitize(&snapshot.memory)?;
+            if !redaction::meaningful(&memory.content) {
+                tracing::info!("Skipped imported memory: content empty after redaction");
+                continue;
             }
+            let changed = memory.content != snapshot.memory.content;
+            if changed {
+                memory.source_hash = crate::storage::qdrant::content_hash(&memory.content);
+            }
+            let vector = if reuse_vectors && !changed && !snapshot.vector.is_empty() {
+                snapshot.vector
+            } else {
+                self.make_embedder()?.embed(&memory.content).await?
+            };
+            self.store.replace_memory(&memory, &vector).await?;
+            stored += 1;
         }
-        let memories: Vec<crate::storage::qdrant::MemoryPoint> = serde_json::from_str(&content)?;
-        let embedder = self.make_embedder()?;
-        for memory in &memories {
-            let vector = embedder.embed(&memory.content).await?;
-            self.store.replace_memory(memory, &vector).await?;
-        }
-        Ok(memories.len())
+        Ok(stored)
     }
 
     /// Return the config file path.
@@ -1456,8 +1509,14 @@ impl Engine {
         &self,
         input: crate::engine::session::SessionInput,
     ) -> anyhow::Result<crate::engine::session::SessionReport> {
-        let session_engine =
-            crate::engine::session::SessionEngine::new(self.config.clone(), self.store.clone());
+        // Session embedding must use the active provider/dimensions, including env overrides.
+        let mut config = self.config.clone();
+        config.embedding.provider = self.embed_provider.clone();
+        config.embedding.model = self.embed_model.clone();
+        config.embedding.dimensions = self.embed_dimensions;
+        config.embedding.openai.base_url = self.openai_base_url.clone();
+        config.embedding.openai.dimensions = self.embed_dimensions;
+        let session_engine = crate::engine::session::SessionEngine::new(config, self.store.clone());
         session_engine.run_session_end(input).await
     }
 
