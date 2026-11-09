@@ -1,8 +1,11 @@
 # memex8 improvement execution plan
 
 Date: 2026-11-08  
-Status: A–F merged; H locally validated; G pending
+Status: A–H merged and deployed to 192.168.1.3 (2026-11-09 UTC)
 Source: `PLAN-2026-11-08-trending-improvements.md` (original brief, preserved)
+
+Follow-up: [gbrain-inspired implementation plan](PLAN-2026-11-08-gbrain-improvements.md).
+The baseline notes below describe the start of the original work; they are historical.
 
 ## Outcomes
 

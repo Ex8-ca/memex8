@@ -1,6 +1,8 @@
 # TODO.md — memex8 Action Items
 
-> Last updated: 2026-04-13
+> Current implementation queue: [gbrain-inspired roadmap](PLAN-2026-11-08-gbrain-improvements.md).
+> Next action: P0, establish the memory-quality baseline.
+> Legacy inventory below was last updated 2026-04-13.
 
 ## 🔴 High Priority
 
