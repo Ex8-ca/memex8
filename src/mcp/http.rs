@@ -296,6 +296,8 @@ async fn handle_tool_call(
         }
         "memex8_realms_list" => {
             let realms = engine.list_realms().await?;
+            let realms: Vec<crate::api::routes::realms::RealmSummary> =
+                realms.into_iter().map(Into::into).collect();
             Ok(json!({ "realms": realms }))
         }
         "memex8_realms_show" => {
@@ -304,6 +306,7 @@ async fn handle_tool_call(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Missing 'name' parameter"))?;
             let realm = engine.show_realm(name).await?;
+            let realm: crate::api::routes::realms::RealmSummary = realm.into();
             Ok(json!({ "realm": realm }))
         }
         "memex8_upvote" => {
