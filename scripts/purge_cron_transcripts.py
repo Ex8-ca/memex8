@@ -96,16 +96,17 @@ def main():
                 "tags": ["cron-finding", "backfilled"], "source": "hermes-cron",
             })
             stored += 1
-    deleted = failed = 0
-    for i, m in enumerate(cron, 1):
-        try:
-            api("DELETE", f"/api/v1/memories/{m['id']}")
-            deleted += 1
-        except subprocess.CalledProcessError:
-            failed += 1
-        if i % 1000 == 0:
-            print(f"  ...{i}/{len(cron)}", flush=True)
-    print(f"re-stored findings={stored} deleted={deleted} failed={failed}")
+    # One exec, IDs on stdin: ~14k separate `docker exec` calls take ~40 min.
+    loop = ('while read id; do curl -s -o /dev/null -w "%{http_code}\\n" -X DELETE '
+            '-H "Authorization: Bearer $MEMEX8_API_KEY" '
+            '"http://localhost:8080/api/v1/memories/$id"; done')
+    out = subprocess.run(["docker", "exec", "-i", CONTAINER, "sh", "-c", loop],
+                         input="\n".join(m["id"] for m in cron) + "\n",
+                         capture_output=True, text=True, check=True).stdout.split()
+    deleted = out.count("200")
+    failed = len(cron) - deleted
+    print(f"re-stored findings={stored} deleted={deleted} failed={failed} "
+          f"codes={sorted(set(out))}")
     return 0 if failed == 0 else 1
 
 
