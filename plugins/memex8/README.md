@@ -41,7 +41,7 @@ hermes plugins install memex8
 hermes memory setup       # pick "memex8", enter URL + API key
 ```
 
-Then restart Hermes. The catalog entry pins the plugin to a known-good SHA, and future `hermes update` keeps the pin fresh.
+Then restart Hermes. The catalog entry pins the plugin to a known-good commit SHA. The pin only moves when a new version is published to the catalog, so `hermes plugins update memex8` picks up a new release once its catalog entry is bumped.
 
 ### Alternative install paths
 
@@ -120,6 +120,17 @@ See [v1.1.0 Features](#v110-features) below for what each of these does.
 1. **Environment variables** — highest priority (overrides everything)
 2. **`~/.hermes/memex8.json`** — persistent config from `hermes memory setup`
 3. **Hardcoded defaults** — fallback
+
+## v1.2.0 Features
+
+New in v1.2.0. Everything here works through the Hermes tools below; the server-side pieces need a memex8 server that includes the same commits.
+
+- **Private-span redaction** — text inside `<private>...</private>` is removed before it is captured or embedded.
+- **Compact retrieval + ordered batch get** — `memex8_search` and `memex8_recall` accept `compact=true` for a smaller result; fetch the ones that matter with `memex8_get(ids=[...])` (up to 50, order preserved).
+- **Scoped chronological timeline** — `memex8_timeline` returns compact neighbors around one memory ID, query, or RFC3339 timestamp.
+- **Certified memories** — `memex8_certify(memory_id, revoke=false, by=..., note=...)` protects a user-confirmed memory from automatic rewriting, pruning, decay, and verification. Only certify on explicit user intent.
+- **Recoverable consolidation and dedup** — consolidation sources are archived; `memex8_unconsolidate(memory_id)` undoes a summary and `memex8_restore_duplicate(operation_id)` restores a removed duplicate.
+- **Search coverage reporting** — search reports raw coverage and filtered realm suggestions.
 
 ## v1.1.0 Features
 
@@ -201,7 +212,11 @@ Output is human-readable by default; pass `--json` for machine-readable.
 | `memex8_recall` | Get high-importance memories (wakeup context) |
 | `memex8_realms` | List all knowledge realms |
 | `memex8_forget` | Delete a memory by ID |
-| `memex8_get` | Get a specific memory by ID |
+| `memex8_get` | Get a memory by ID, or up to 50 with `ids` (order preserved) |
+| `memex8_timeline` | Chronological compact neighbors around an ID, query, or timestamp |
+| `memex8_certify` | Protect (or revoke protection for) a user-confirmed memory |
+| `memex8_unconsolidate` | Undo a consolidated summary from its archive |
+| `memex8_restore_duplicate` | Restore a removed duplicate from its slumber journal |
 
 ## How It Works
 
@@ -217,9 +232,9 @@ Hermes Agent
   ├── memex8_search      → POST /api/v1/memories/search
   ├── memex8_remember    → POST /api/v1/memories
   ├── memex8_recall      → GET  /api/v1/memories/recall
-  ├── on_session_end()   → POST /api/v1/webhooks/conversation
+  ├── on_session_end()   → POST /api/v1/webhooks/conversation   (declared in plugin.yaml hooks)
   ├── on_memory_write()  → mirror built-in memory writes
-  └── on_pre_compress()  → archive transcript before lossy rewrite (API v2)
+  └── on_pre_compress()  → archive transcript before lossy rewrite (API v2; a provider method, not listed under plugin.yaml hooks)
         │
         ▼
  memex8 Engine
