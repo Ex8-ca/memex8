@@ -1,7 +1,5 @@
 # memex8 — Human-Like Memory for AI Agents
 
-> **Personal project.** Shared because the ideas are worth discussing — not a product, no support commitments. Fork it, adapt it, use it at your own risk.
-
 A self-hosted memory system that models how **human memory actually works**: memories fade over time at *different rates depending on what they are*, queries re-weight themselves based on *what the user is actually asking for*, related ideas connect automatically, and scattered fragments consolidate into dense summaries. Powered by Google's **TurboQuant** algorithm via [**TurboVec**](https://github.com/RyanCodrai/turbovec) for 8x compressed vector storage.
 
 ```
