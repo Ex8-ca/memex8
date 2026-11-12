@@ -7,4 +7,3 @@ requires_env:
   - MEMEX8_API_KEY
 hooks:
   - on_session_end
-  - on_pre_compress
