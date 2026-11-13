@@ -38,7 +38,9 @@ pub struct SearchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HybridConfig {
-    /// Blend BM25 keyword matches into vector search.
+    /// Blend BM25 keyword matches into vector search. On by default: on the
+    /// MemDerive bench it lifts top-15 support recall from 47.6 to 52.5 with no
+    /// world regressing (docs/plans/nov13_memex8_plan.md, Findings).
     pub enabled: bool,
     /// Bonus for the best keyword match, on the cosine scale (0..=1).
     pub lexical_weight: f32,
@@ -49,7 +51,7 @@ pub struct HybridConfig {
 impl Default for HybridConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             lexical_weight: 0.15,
             lexical_candidates: 50,
         }
@@ -929,6 +931,13 @@ mod tests {
     #[test]
     fn hybrid_defaults_validate_and_bad_values_are_rejected() {
         let d = HybridConfig::default();
+        assert!(d.enabled, "hybrid search is on by default");
+        assert_eq!(d.lexical_weight, 0.15);
+        let legacy: SearchConfig = toml::from_str("[coverage]\n").unwrap();
+        assert!(
+            legacy.hybrid.enabled,
+            "configs without [search.hybrid] get it on"
+        );
         assert!(d.validate().is_ok());
         let heavy = HybridConfig {
             lexical_weight: 1.5,
