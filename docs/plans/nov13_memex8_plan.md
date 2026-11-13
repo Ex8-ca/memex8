@@ -1345,4 +1345,37 @@ Every world improves at 0.15 and 0.25; none regresses; full witness never drops.
 (0.25: 61.1). The gate (+5 points support, no full-witness drop) is met by 0.25 (+5.17). 0.15 (+4.85) has the
 best full-witness score and the smallest closure dip; the two are within a fraction of a point.
 
-**Pending:** Task 1.5 numbers (after Phase 1b), Phase 1b counts, live A/B verdict, final weight (PR B).
+**Live A/B (Task 2.6 step 5, real store, 6.2k memories), hybrid off vs on at 0.15:** the known answer text appeared in
+the top 10 for 8 of 18 queries off and 10 of 18 on; two misses became hits, two moved to rank 1, one slipped from
+rank 1 to 2. Queries with no shared words (paraphrases) missed either way, as expected. Verdict: pass. Final weight
+0.15; default flipped on (PR B).
+
+**Phase 1b dry run (467 legacy summaries, none certified):**
+
+| memory_type | n | covered | partial | orphan |
+|---|---:|---:|---:|---:|
+| general | 326 | 138 | 183 | 5 |
+| profile | 99 | 24 | 75 | 0 |
+| setup | 16 | 11 | 5 | 0 |
+| preference | 12 | 11 | 1 | 0 |
+| other | 14 | 4 | 8 | 2 |
+| **all (local model, thinking off)** | **467** | **188** | **272** | **7** |
+
+Re-running `general` through a stronger model gave 210 covered / 111 partial / 5 orphan: 124 covered by both, 86
+covered only by the stronger model, 14 only by the local one. In a sample of "missing" facts about 32% were
+paraphrase false alarms (nearly every word is in the originals), so the strict quote check over-flags. Removal
+therefore requires every model that checked a summary to say covered (174 of 467 under that rule). Partial and orphan
+summaries are never removed.
+
+Two findings changed the script: (1) a reasoning model spent about 13k hidden tokens (2.5 min) per summary; with
+thinking off the same call takes 9 s and classifies the same way, so thinking is off by default (`LLM_THINKING=1`
+restores it). (2) The API has no way to add a tag, so partial/orphan summaries are listed in the report file instead of
+tagged, and the backup is a JSON array (what `memex8 import` reads), not JSON lines.
+
+**Task 1.5 verdict: keep consolidation, off by default.** Used: summaries are 7.4% of the store with mean
+`access_count` 357 against 17 for originals, and appear in the top 5 for 44% of 32 replayed queries (31% with hybrid
+on). Adds information: 279 of 467 (60%) hold at least one fact no original states, well above the 25% bar even after
+discounting false alarms. Consequence: Phase 3 (stale summaries) stays in scope, and the consolidation scheduler needs
+its own fix (Task 1.4 confirmed the cause) before anyone turns the switch on.
+
+**Pending:** apply step of Phase 1b (needs approval), Phase 3, Phase 4.
