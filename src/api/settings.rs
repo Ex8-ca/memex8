@@ -58,6 +58,13 @@ const FIELDS: &[Field] = &[
         kind: Kind::Float(0.5, 1.0),
     },
     Field {
+        key: "slumber.consolidation.enabled",
+        group: "Slumber",
+        label: "LLM consolidation",
+        help: "Merge related memories into AI-written summaries during slumber. Off by default: summaries can drop details, and durable types (profile, preference, setup, ...) are never merged.",
+        kind: Kind::Bool,
+    },
+    Field {
         key: "slumber.dedup_dry_run",
         group: "Slumber",
         label: "Dedup dry run",

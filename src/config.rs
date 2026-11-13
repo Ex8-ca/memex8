@@ -360,6 +360,11 @@ impl Default for SummarizeConfig {
 /// Supports both OpenAI (default, cheap for this use case) and local LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsolidationConfig {
+    /// Run LLM consolidation (slumber phase 6). Off by default: summaries tend to
+    /// drop exceptions and exact values, and they crowd originals out of the
+    /// top-k. Turn on in Settings -> Slumber -> "LLM consolidation".
+    #[serde(default)]
+    pub enabled: bool,
     /// Backend to use: "openai" (default) or "local".
     #[serde(default = "default_consolidation_backend")]
     pub backend: String,
@@ -377,6 +382,7 @@ fn default_consolidation_backend() -> String {
 impl Default for ConsolidationConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             backend: "openai".into(),
             model: Some("gpt-4o-mini".into()),
         }
@@ -866,6 +872,21 @@ impl Default for AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consolidation_is_off_by_default_and_can_be_enabled() {
+        assert!(!AppConfig::default().slumber.consolidation.enabled);
+        let base = toml::to_string(&AppConfig::default()).unwrap();
+        let on = AppConfig::from_toml_with_overrides(
+            &base,
+            Some("[slumber.consolidation]\nenabled = true\n"),
+        )
+        .unwrap();
+        assert!(on.slumber.consolidation.enabled);
+        // A config file that predates the switch keeps consolidation off.
+        let legacy: ConsolidationConfig = toml::from_str("backend = \"openai\"").unwrap();
+        assert!(!legacy.enabled);
+    }
 
     /// Regression pin: an explicit relative path in config.toml must not mask
     /// TURBOVEC_* (the container could not persist its index for weeks).

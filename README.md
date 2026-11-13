@@ -169,7 +169,9 @@ Every memory carries a `memory_type` field that determines its decay rate. New m
 
 ### 💤 Slumber Consolidation
 
-Nightly "sleep" pipeline (13 phases): deduplicate → **TurboQuant compression** → re-cluster realms → rename/merge realms → prune stale → **LLM consolidation** → index optimization → spreading activation → **associate memories** → **detect gaps** → **session review** → prune empty realms → **memory verification**.
+Nightly "sleep" pipeline (13 phases): deduplicate → **TurboQuant compression** → re-cluster realms → rename/merge realms → prune stale → **LLM consolidation** (opt-in, see below) → index optimization → spreading activation → **associate memories** → **detect gaps** → **session review** → prune empty realms → **memory verification**.
+
+**LLM consolidation is off by default.** Merging memories into AI-written summaries saves space but can drop exceptions and exact values, and summaries tend to crowd the originals out of search results. Turn it on in **Settings → Slumber → LLM consolidation** (or `[slumber.consolidation] enabled = true`). Even when it's on, `profile`, `preference`, `relationship`, `setup`, `instruction`, `decision` and `commitment` memories are never merged; they keep their exact wording.
 
 | Backend | Model | Notes |
 |---------|-------|-------|

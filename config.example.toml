@@ -64,6 +64,11 @@ spreading_activation_bump = 0.005
 # backend: "openai" (uses OPENAI_API_KEY) or "local" (uses LOCAL_LLM_URL + LOCAL_LLM_API_KEY)
 # Embedding provider is configured separately: [embedding].provider = "openai" | "ollama"
 [slumber.consolidation]
+# LLM consolidation merges related memories into summaries (slumber phase 6).
+# Off by default: summaries can drop exceptions and exact values. Durable types
+# (profile, preference, relationship, setup, instruction, decision, commitment)
+# are never merged even when it is on. Toggle in the web UI: Settings -> Slumber.
+# enabled = false
 backend = "openai"
 model = "gpt-4o-mini"    # OpenAI model name
 
