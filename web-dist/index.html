@@ -2,603 +2,604 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>memex8 — Memory Browser</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#07060d">
+    <title>memex8 — Second Brain</title>
     <style>
+        /* No external fonts or CDNs: this page talks to a private memory store,
+           so it must not phone home. The stacks below pick up good local faces
+           where they exist and degrade to the platform mono/sans otherwise. */
         :root {
-            --bg: #0f0f0f;
-            --surface: #1a1a1a;
-            --surface-hover: #252525;
-            --border: #333;
-            --text: #e0e0e0;
-            --text-muted: #888;
-            --accent: #6366f1;
-            --accent-hover: #818cf8;
-            --green: #22c55e;
-            --red: #ef4444;
-            --yellow: #eab308;
+            --bg: #07060d;
+            --bg-2: #0c0a17;
+            --panel: rgba(15, 12, 27, 0.82);
+            --panel-solid: #0f0c1b;
+            --line: rgba(170, 150, 255, 0.11);
+            --line-strong: rgba(170, 150, 255, 0.26);
+            --text: #ece8f7;
+            --muted: #8f88aa;
+            --dim: #5d5878;
+            --pink: #ff2e88;
+            --orange: #ff8a3d;
+            --cyan: #2de2e6;
+            --violet: #9b5cff;
+            --lime: #b6ff5c;
+            --amber: #ffc53d;
+            --red: #ff4d5e;
+            --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
+            --display: "Bahnschrift", "DIN Alternate", "Barlow Condensed", "Roboto Condensed", "Arial Narrow", sans-serif;
+            --sans: "IBM Plex Sans", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+            --radius: 14px;
+            --ticker-h: 34px;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
+        html { background: var(--bg); scrollbar-color: rgba(170, 150, 255, 0.28) transparent; }
+        * { scrollbar-width: thin; scrollbar-color: rgba(170, 150, 255, 0.28) transparent; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(170, 150, 255, 0.25); border-radius: 8px; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: var(--bg);
+            font-family: var(--sans);
             color: var(--text);
-            line-height: 1.6;
+            line-height: 1.55;
+            min-height: 100dvh;
+            padding-bottom: calc(var(--ticker-h) + env(safe-area-inset-bottom));
+            background:
+                radial-gradient(1100px 600px at 12% -10%, rgba(255, 46, 136, 0.13), transparent 60%),
+                radial-gradient(900px 600px at 105% 20%, rgba(45, 226, 230, 0.08), transparent 60%),
+                radial-gradient(800px 500px at 50% 120%, rgba(155, 92, 255, 0.10), transparent 60%),
+                var(--bg);
+            background-attachment: fixed;
+        }
+        /* faint HUD grid + scanlines */
+        body::before {
+            content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+            background-image:
+                linear-gradient(rgba(170, 150, 255, 0.035) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(170, 150, 255, 0.035) 1px, transparent 1px);
+            background-size: 48px 48px;
+            mask-image: radial-gradient(ellipse at 50% 30%, #000 30%, transparent 80%);
+        }
+        body::after {
+            content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1000;
+            background: repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.012) 0 1px, transparent 1px 3px);
         }
 
-        /* Header */
-        .header {
-            background: var(--surface);
-            border-bottom: 1px solid var(--border);
-            padding: 1rem 2rem;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            position: sticky;
-            top: 0;
-            z-index: 100;
+        button { font: inherit; color: inherit; }
+        code { font-family: var(--mono); font-size: 0.9em; }
+        ::selection { background: rgba(255, 46, 136, 0.35); }
+
+        /* ── Header ─────────────────────────────────────────── */
+        .top {
+            position: relative; z-index: 2;
+            display: flex; align-items: center; justify-content: space-between; gap: 1.5rem;
+            padding: 1.1rem 2rem 0.9rem;
         }
-
-        .header h1 {
-            font-size: 1.25rem;
-            font-weight: 600;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
+        .brand { display: flex; align-items: center; gap: 0.9rem; min-width: 0; }
+        .logo { width: 42px; height: 42px; flex: none; }
+        .brand-title {
+            font-family: var(--display); font-weight: 700; font-size: 1.55rem;
+            letter-spacing: 0.06em; line-height: 1; text-transform: uppercase;
+            background: linear-gradient(92deg, #fff 0%, #ffd1e6 30%, var(--pink) 62%, var(--orange) 100%);
+            -webkit-background-clip: text; background-clip: text; color: transparent;
         }
+        .brand-title em { font-style: normal; color: var(--muted); -webkit-text-fill-color: var(--muted); font-weight: 500; letter-spacing: 0.14em; font-size: 0.72em; margin-left: 0.4rem; }
+        .brand-sub { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); letter-spacing: 0.08em; margin-top: 0.35rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .brand-sub b { color: var(--cyan); font-weight: 500; }
 
-        .header h1 span {
-            color: var(--accent);
+        .kpis { display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; }
+        .kpi {
+            min-width: 92px; padding: 0.45rem 0.8rem 0.5rem;
+            border: 1px solid var(--line); border-radius: 10px;
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent);
         }
+        .kpi label { display: block; font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--dim); }
+        .kpi b { display: block; font-family: var(--display); font-weight: 700; font-size: 1.3rem; line-height: 1.15; letter-spacing: 0.02em; font-variant-numeric: tabular-nums; }
+        .kpi:nth-child(1) b { color: var(--pink); }
+        .kpi:nth-child(2) b { color: var(--orange); }
+        .kpi:nth-child(3) b { color: var(--lime); }
+        .kpi:nth-child(4) b { color: var(--cyan); font-size: 1.05rem; padding-top: 0.12rem; }
 
-        .search-box {
-            display: flex;
-            gap: 0.5rem;
-            flex: 1;
-            max-width: 500px;
-            margin: 0 2rem;
+        /* ── Nav bar ───────────────────────────────────────── */
+        .bar {
+            position: sticky; top: 0; z-index: 100;
+            display: flex; align-items: center; gap: 1rem;
+            padding: 0.6rem 2rem;
+            background: rgba(7, 6, 13, 0.82);
+            backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+            border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
         }
-
-        .search-box input {
-            flex: 1;
-            padding: 0.5rem 1rem;
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            color: var(--text);
-            font-size: 0.875rem;
-        }
-
-        .search-box input:focus {
-            outline: none;
-            border-color: var(--accent);
-        }
-
-        .search-box button {
-            padding: 0.5rem 1rem;
-            background: var(--accent);
-            color: white;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.875rem;
-        }
-
-        .search-box button:hover { background: var(--accent-hover); }
-
-        .nav-tabs {
-            display: flex;
-            gap: 0.25rem;
-        }
-
+        .tabs { display: flex; gap: 0.2rem; overflow-x: auto; scrollbar-width: none; }
+        .tabs::-webkit-scrollbar { display: none; }
         .nav-tab {
-            padding: 0.5rem 1rem;
-            background: transparent;
-            border: 1px solid transparent;
-            border-radius: 6px;
-            color: var(--text-muted);
-            cursor: pointer;
-            font-size: 0.875rem;
+            position: relative; padding: 0.45rem 0.85rem; background: transparent; border: 0;
+            border-radius: 8px; color: var(--muted); cursor: pointer; white-space: nowrap;
+            font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase;
         }
-
-        .nav-tab:hover { color: var(--text); background: var(--surface-hover); }
-        .nav-tab.active { color: var(--accent); border-color: var(--accent); }
-
-        /* Stats bar */
-        .stats-bar {
-            background: var(--surface);
-            border-bottom: 1px solid var(--border);
-            padding: 0.5rem 2rem;
-            display: flex;
-            gap: 2rem;
-            font-size: 0.8rem;
-            color: var(--text-muted);
+        .nav-tab:hover { color: var(--text); background: rgba(255, 255, 255, 0.04); }
+        .nav-tab.active { color: #fff; }
+        .nav-tab.active::after {
+            content: ""; position: absolute; left: 0.85rem; right: 0.85rem; bottom: 0.15rem; height: 2px; border-radius: 2px;
+            background: linear-gradient(90deg, var(--pink), var(--orange)); box-shadow: 0 0 12px rgba(255, 46, 136, 0.7);
         }
+        .search-box { display: flex; flex: 1; max-width: 480px; margin-left: auto; position: relative; }
+        .search-box input {
+            flex: 1; min-width: 0; padding: 0.5rem 0.9rem 0.5rem 2rem;
+            background: rgba(255, 255, 255, 0.03); border: 1px solid var(--line); border-radius: 9px 0 0 9px;
+            color: var(--text); font-family: var(--mono); font-size: 0.8rem;
+        }
+        .search-box::before { content: "⌕"; position: absolute; left: 0.7rem; top: 50%; transform: translateY(-52%); color: var(--dim); font-size: 1rem; pointer-events: none; }
+        .search-box input:focus { outline: none; border-color: var(--pink); box-shadow: 0 0 0 3px rgba(255, 46, 136, 0.12); }
+        .search-box button {
+            padding: 0.5rem 0.95rem; border: 1px solid var(--pink); border-left: 0; border-radius: 0 9px 9px 0; cursor: pointer;
+            background: linear-gradient(180deg, rgba(255, 46, 136, 0.28), rgba(255, 46, 136, 0.12)); color: #fff;
+            font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase;
+        }
+        .search-box button:hover { background: rgba(255, 46, 136, 0.4); }
+        .icon-btn { width: 36px; height: 36px; flex: none; border: 1px solid var(--line); border-radius: 9px; background: transparent; color: var(--muted); cursor: pointer; font-size: 1rem; }
+        .icon-btn:hover { color: var(--text); border-color: var(--line-strong); }
 
-        .stats-bar span { color: var(--text); font-weight: 600; }
-
-        /* Main content */
-        .main { padding: 1.5rem 2rem; }
+        /* ── Layout ────────────────────────────────────────── */
+        .main { position: relative; z-index: 1; padding: 1.25rem 2rem 2rem; }
         .view { display: none; }
-        .view.active { display: block; }
+        .view.active { display: block; animation: fadein 0.35s ease both; }
+        @keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
-        /* Card view */
-        .cards {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-            gap: 1rem;
+        .panel {
+            position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+            padding: 1rem 1.1rem 1.1rem; overflow: hidden;
+            box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 20px 40px -24px rgba(0, 0, 0, 0.8);
         }
+        /* HUD corner ticks */
+        .panel::before, .panel::after { content: ""; position: absolute; width: 10px; height: 10px; pointer-events: none; border-color: var(--line-strong); border-style: solid; }
+        .panel::before { top: 7px; left: 7px; border-width: 1px 0 0 1px; }
+        .panel::after { bottom: 7px; right: 7px; border-width: 0 1px 1px 0; }
+        .panel-head {
+            display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.85rem;
+            font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted);
+        }
+        .panel-head .ttl { display: flex; align-items: center; gap: 0.5rem; color: var(--text); }
+        .panel-head .num { color: var(--dim); }
+        .panel-head .aside { color: var(--dim); letter-spacing: 0.1em; text-transform: none; font-size: 0.68rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; background: currentColor; box-shadow: 0 0 10px currentColor; }
 
+        /* ── Overview grid ─────────────────────────────────── */
+        .ov-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 1rem; }
+        .ov-hero { grid-column: span 8; grid-row: span 2; min-height: 520px; display: flex; flex-direction: column; padding: 0; }
+        .ov-hero .panel-head { position: absolute; top: 1rem; left: 1.1rem; right: 1.1rem; z-index: 3; margin: 0; }
+        .ov-side { grid-column: span 4; }
+        .ov-third { grid-column: span 4; }
+        .core-wrap { position: relative; flex: 1; min-height: 520px; }
+        #core-canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: pan-y; }
+        #core-canvas.dragging { cursor: grabbing; }
+        .hero-stats { position: absolute; left: 1.1rem; bottom: 1rem; z-index: 3; display: flex; gap: 1.4rem; pointer-events: none; }
+        .hero-stats div { border-left: 2px solid var(--pink); padding-left: 0.6rem; }
+        .hero-stats div:nth-child(2) { border-color: var(--cyan); }
+        .hero-stats div:nth-child(3) { border-color: var(--orange); }
+        .hero-stats b { display: block; font-family: var(--display); font-size: 1.9rem; font-weight: 700; line-height: 1; letter-spacing: 0.01em; font-variant-numeric: tabular-nums; }
+        .hero-stats label { font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); }
+        .hero-hint { position: absolute; right: 1.1rem; bottom: 1.05rem; z-index: 3; font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.12em; color: var(--dim); text-transform: uppercase; pointer-events: none; }
+        .float-tip {
+            position: absolute; z-index: 20; display: none; pointer-events: none; max-width: 280px;
+            padding: 0.5rem 0.7rem; border-radius: 8px; border: 1px solid var(--line-strong);
+            background: rgba(10, 8, 20, 0.95); font-size: 0.75rem; line-height: 1.4; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+        }
+        .float-tip strong { display: block; font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.06em; margin-bottom: 0.15rem; }
+        .float-tip small { color: var(--muted); font-family: var(--mono); font-size: 0.65rem; }
+
+        /* verification */
+        .seg { display: flex; height: 10px; border-radius: 99px; overflow: hidden; background: rgba(255, 255, 255, 0.05); margin: 0.2rem 0 0.9rem; }
+        .seg span { display: block; height: 100%; transition: width 0.8s cubic-bezier(.2, .8, .2, 1); }
+        .big-num { font-family: var(--display); font-weight: 700; font-size: 2.3rem; line-height: 1; letter-spacing: 0.01em; font-variant-numeric: tabular-nums; }
+        .big-num small { font-size: 0.42em; color: var(--muted); font-family: var(--mono); font-weight: 400; letter-spacing: 0.08em; margin-left: 0.35rem; }
+        .rows { display: grid; gap: 0.3rem; font-family: var(--mono); font-size: 0.72rem; }
+        .row { display: grid; grid-template-columns: 12px 1fr auto auto; align-items: center; gap: 0.55rem; color: var(--muted); }
+        .row b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+        .row em { font-style: normal; color: var(--dim); min-width: 3.2em; text-align: right; }
+
+        /* slumber */
+        .state-badge { display: inline-flex; align-items: center; gap: 0.45rem; padding: 0.2rem 0.6rem; border-radius: 99px; border: 1px solid currentColor; font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.12em; text-transform: uppercase; }
+        .state-badge.running .dot { animation: pulse 1.1s ease-in-out infinite; }
+        @keyframes pulse { 50% { opacity: 0.25; } }
+        .counters { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.45rem 1rem; margin-top: 0.85rem; }
+        .counter { display: flex; justify-content: space-between; gap: 0.5rem; border-bottom: 1px dashed var(--line); padding-bottom: 0.25rem; font-family: var(--mono); font-size: 0.7rem; color: var(--muted); }
+        .counter b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+        .subtle { color: var(--muted); font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.04em; }
+
+        /* decay chart */
+        .decay svg { width: 100%; height: auto; display: block; overflow: visible; }
+        .decay .curve { fill: none; stroke-width: 1.6; opacity: 0.9; transition: opacity 0.2s, stroke-width 0.2s; }
+        .decay.focus .curve { opacity: 0.12; }
+        .decay.focus .curve.on { opacity: 1; stroke-width: 2.6; }
+        .legend { display: flex; flex-wrap: wrap; gap: 0.3rem 0.8rem; margin-top: 0.6rem; font-family: var(--mono); font-size: 0.66rem; color: var(--muted); }
+        .legend span { display: inline-flex; align-items: center; gap: 0.35rem; cursor: default; }
+        .legend i { width: 14px; height: 2px; border-radius: 2px; display: inline-block; }
+
+        /* realm bars */
+        .bars { display: grid; gap: 0.5rem; }
+        .bar-row { display: grid; gap: 0.2rem; cursor: pointer; border-radius: 6px; padding: 0.15rem 0.2rem; margin: 0 -0.2rem; }
+        .bar-row:hover { background: rgba(255, 255, 255, 0.03); }
+        .bar-row .lbl { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.78rem; }
+        .bar-row .lbl span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .bar-row .lbl b { font-family: var(--mono); font-weight: 500; font-size: 0.72rem; color: var(--muted); }
+        .track { height: 4px; border-radius: 4px; background: rgba(255, 255, 255, 0.05); overflow: hidden; }
+        .track i { display: block; height: 100%; border-radius: 4px; }
+
+        /* recent list */
+        .recent { display: grid; gap: 0.15rem; }
+        .recent-item { display: grid; grid-template-columns: auto 1fr; gap: 0.6rem; padding: 0.45rem 0.4rem; margin: 0 -0.4rem; border-radius: 8px; cursor: pointer; }
+        .recent-item:hover { background: rgba(255, 255, 255, 0.035); }
+        .recent-item time { font-family: var(--mono); font-size: 0.65rem; color: var(--dim); padding-top: 0.15rem; min-width: 4.6em; }
+        .recent-item p { font-size: 0.8rem; color: var(--text); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .recent-item .meta { display: flex; gap: 0.4rem; margin-top: 0.2rem; }
+
+        /* ── Chips & badges ────────────────────────────────── */
+        .chip { display: inline-flex; align-items: center; gap: 0.35rem; max-width: 100%; padding: 0.1rem 0.5rem; border-radius: 99px; font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.04em; border: 1px solid currentColor; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: rgba(255, 255, 255, 0.02); }
+        .chip.flat { border-color: var(--line); color: var(--muted); }
+        .vdot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }
+        .v-verified { background: var(--lime); box-shadow: 0 0 8px var(--lime); }
+        .v-certified { background: var(--cyan); box-shadow: 0 0 8px var(--cyan); }
+        .v-stale { background: var(--amber); }
+        .v-contradicted { background: var(--red); box-shadow: 0 0 8px var(--red); }
+        .v-unverified { background: var(--dim); }
+
+        /* ── Cards view ────────────────────────────────────── */
+        .list-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
+        .list-head h2 { font-family: var(--display); font-size: 1.35rem; letter-spacing: 0.04em; text-transform: uppercase; font-weight: 700; }
+        .list-head h2 small { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; color: var(--muted); text-transform: none; font-weight: 400; margin-left: 0.6rem; }
+        .ghost-btn { padding: 0.35rem 0.75rem; border: 1px solid var(--line-strong); border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase; }
+        .ghost-btn:hover { color: var(--text); border-color: var(--pink); }
+        .coverage { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); padding: 0.55rem 0.8rem; border: 1px dashed var(--line-strong); border-radius: 10px; margin-bottom: 1rem; }
+        .coverage b { color: var(--cyan); font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; }
+
+        .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 0.9rem; }
         .card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 1rem;
-            transition: border-color 0.2s;
+            position: relative; display: flex; flex-direction: column; gap: 0.55rem; cursor: pointer;
+            background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 0.9rem 1rem 0.8rem 1.1rem;
+            transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
         }
+        .card::before { content: ""; position: absolute; left: 0; top: 0.9rem; bottom: 0.9rem; width: 2px; border-radius: 2px; background: var(--rc, var(--violet)); box-shadow: 0 0 10px var(--rc, var(--violet)); opacity: 0.85; }
+        .card:hover { border-color: var(--line-strong); transform: translateY(-1px); box-shadow: 0 14px 30px -18px var(--rc, var(--violet)); }
+        .card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.6rem; }
+        .card-heading { font-size: 0.92rem; font-weight: 600; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .card-realm { flex: none; max-width: 45%; }
+        .card-content { font-size: 0.8rem; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; word-break: break-word; }
+        .card-badges { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+        .card-footer { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; margin-top: auto; padding-top: 0.5rem; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 0.66rem; color: var(--muted); }
+        .card-meta { display: flex; align-items: center; gap: 0.7rem; min-width: 0; }
+        .importance-bar { width: 52px; height: 3px; background: rgba(255, 255, 255, 0.07); border-radius: 3px; overflow: hidden; flex: none; }
+        .importance-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--pink), var(--orange)); }
+        .card-actions { display: flex; gap: 0.25rem; flex: none; }
+        .act { min-width: 28px; height: 26px; padding: 0 0.45rem; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; font-size: 0.7rem; display: inline-flex; align-items: center; justify-content: center; gap: 0.3rem; }
+        .act:hover { color: var(--text); border-color: var(--line-strong); }
+        .act.up:hover, .act.up.on { color: var(--lime); border-color: var(--lime); background: rgba(182, 255, 92, 0.08); }
+        .act.down:hover, .act.down.on { color: var(--amber); border-color: var(--amber); background: rgba(255, 197, 61, 0.08); }
+        .act.del:hover { color: var(--red); border-color: var(--red); background: rgba(255, 77, 94, 0.08); }
+        .act[disabled] { opacity: 0.5; cursor: wait; }
 
-        .card:hover { border-color: var(--accent); }
+        /* ── Graph view ────────────────────────────────────── */
+        #graph-container { position: relative; height: calc(100dvh - 190px); min-height: 420px; width: 100%; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: radial-gradient(ellipse at 50% 45%, rgba(155, 92, 255, 0.08), transparent 65%), var(--bg-2); }
+        #graph-canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+        .graph-toolbar { position: absolute; top: 0.75rem; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 0.2rem; padding: 0.3rem 0.4rem; border-radius: 10px; border: 1px solid var(--line-strong); background: rgba(10, 8, 20, 0.9); z-index: 10; }
+        .graph-btn { padding: 0.3rem 0.65rem; background: transparent; border: 0; color: var(--muted); font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; cursor: pointer; border-radius: 7px; }
+        .graph-btn:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); }
+        .graph-btn.active { color: #fff; background: rgba(255, 46, 136, 0.2); }
+        .graph-sep { width: 1px; height: 16px; background: var(--line-strong); margin: 0 0.2rem; }
+        .graph-hint { position: absolute; bottom: 0.75rem; right: 1rem; font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.08em; color: var(--dim); z-index: 10; pointer-events: none; }
+        .legend-item span { overflow: hidden; text-overflow: ellipsis; }
+        .graph-legend { position: absolute; bottom: 0.9rem; left: 0.9rem; max-width: 250px; max-height: 34%; overflow-y: auto; padding: 0.6rem 0.8rem; border-radius: 10px; border: 1px solid var(--line); background: rgba(10, 8, 20, 0.88); font-family: var(--mono); font-size: 0.66rem; z-index: 10; }
+        .legend-item { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.2rem; color: var(--muted); cursor: pointer; white-space: nowrap; }
+        .legend-item:hover { color: var(--text); }
+        .legend-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            margin-bottom: 0.5rem;
-        }
+        /* ── Timeline view ─────────────────────────────────── */
+        .tl-panel { margin-bottom: 1rem; }
+        .tl-readout { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.8rem; }
+        .tl-readout .big-num { font-size: 1.9rem; }
+        input[type=range].scrub { -webkit-appearance: none; appearance: none; width: 100%; height: 26px; background: transparent; cursor: pointer; }
+        input[type=range].scrub::-webkit-slider-runnable-track { height: 4px; border-radius: 4px; background: linear-gradient(90deg, rgba(155, 92, 255, 0.5), rgba(255, 46, 136, 0.8), rgba(255, 138, 61, 0.9)); }
+        input[type=range].scrub::-moz-range-track { height: 4px; border-radius: 4px; background: linear-gradient(90deg, rgba(155, 92, 255, 0.5), rgba(255, 46, 136, 0.8), rgba(255, 138, 61, 0.9)); }
+        input[type=range].scrub::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; margin-top: -7px; border-radius: 50%; background: #fff; border: 3px solid var(--pink); box-shadow: 0 0 16px var(--pink); }
+        input[type=range].scrub::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 3px solid var(--pink); box-shadow: 0 0 16px var(--pink); }
+        .tl-axis { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 0.62rem; color: var(--dim); margin-top: 0.2rem; }
+        .tl-steps { display: flex; gap: 0.35rem; flex-wrap: wrap; margin-top: 0.85rem; }
+        .tl-list { position: relative; display: grid; gap: 0.5rem; padding-left: 1.4rem; }
+        .tl-list::before { content: ""; position: absolute; left: 0.45rem; top: 0.3rem; bottom: 0.3rem; width: 1px; background: linear-gradient(var(--line-strong), var(--pink), var(--line-strong)); }
+        .tl-item { position: relative; display: grid; grid-template-columns: 9.5rem 1fr; gap: 0.9rem; padding: 0.65rem 0.85rem; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); cursor: pointer; }
+        .tl-item:hover { border-color: var(--line-strong); }
+        .tl-item::before { content: ""; position: absolute; left: -1.2rem; top: 1rem; width: 9px; height: 9px; border-radius: 50%; background: var(--bg); border: 2px solid var(--rc, var(--violet)); }
+        .tl-item time { font-family: var(--mono); font-size: 0.68rem; color: var(--muted); line-height: 1.4; }
+        .tl-item time b { display: block; color: var(--text); font-weight: 500; }
+        .tl-item p { font-size: 0.82rem; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+        .tl-item .meta { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.35rem; }
+        .tl-cursor { position: relative; display: flex; align-items: center; gap: 0.6rem; padding: 0.15rem 0; font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--pink); }
+        .tl-cursor::before { content: ""; position: absolute; left: -1.28rem; width: 11px; height: 11px; border-radius: 50%; background: var(--pink); box-shadow: 0 0 14px var(--pink); }
+        .tl-cursor::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--pink), transparent); }
 
-        .card-heading {
-            font-size: 0.95rem;
-            font-weight: 600;
-            color: var(--text);
-        }
+        /* ── Realms view ───────────────────────────────────── */
+        .realms-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0.9rem; }
+        .realm-card { position: relative; cursor: pointer; padding: 1rem 1.1rem; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); transition: border-color 0.2s, transform 0.2s; overflow: hidden; }
+        .realm-card:hover { border-color: var(--rc); transform: translateY(-1px); }
+        .realm-card::after { content: ""; position: absolute; right: -40px; top: -40px; width: 120px; height: 120px; border-radius: 50%; background: radial-gradient(circle, var(--rc), transparent 70%); opacity: 0.16; }
+        .realm-card h3 { font-size: 0.95rem; font-weight: 600; margin-bottom: 0.15rem; padding-right: 1.5rem; word-break: break-word; }
+        .realm-card p { font-size: 0.75rem; color: var(--muted); }
+        .realm-card .big-num { font-size: 1.7rem; margin-top: 0.5rem; color: var(--rc); }
+        .realm-card .track { margin-top: 0.5rem; }
 
-        .card-realm {
-            font-size: 0.7rem;
-            padding: 0.15rem 0.5rem;
-            background: rgba(99, 102, 241, 0.15);
-            color: var(--accent);
-            border-radius: 99px;
-            white-space: nowrap;
-        }
+        /* ── Misc ──────────────────────────────────────────── */
+        .loading, .empty { text-align: center; padding: 2.5rem 1rem; color: var(--muted); font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.08em; }
+        .loading::before { content: ""; display: block; width: 26px; height: 26px; margin: 0 auto 0.8rem; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--pink); animation: spin 0.9s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .err { color: var(--red); }
 
-        .card-content {
-            font-size: 0.85rem;
-            color: var(--text-muted);
-            max-height: 120px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            margin-bottom: 0.75rem;
-            white-space: pre-wrap;
-        }
+        /* ticker */
+        .ticker { position: fixed; left: 0; right: 0; bottom: 0; z-index: 90; height: calc(var(--ticker-h) + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom); overflow: hidden; border-top: 1px solid var(--line); background: rgba(7, 6, 13, 0.92); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+        .ticker-track { display: inline-flex; align-items: center; height: var(--ticker-h); white-space: nowrap; animation: tick var(--tick-dur, 80s) linear infinite; will-change: transform; }
+        .ticker:hover .ticker-track { animation-play-state: paused; }
+        .ticker-item { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0 1.4rem; font-family: var(--mono); font-size: 0.68rem; color: var(--muted); letter-spacing: 0.04em; cursor: pointer; }
+        .ticker-item b { color: var(--text); font-weight: 500; }
+        .ticker-item.stat b { color: var(--pink); }
+        .ticker-item + .ticker-item::before { content: "◆"; color: var(--dim); font-size: 0.5rem; margin-right: 1.4rem; }
+        @keyframes tick { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
-        .card-footer {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-size: 0.75rem;
-            color: var(--text-muted);
-        }
-
-        .card-actions {
-            display: flex;
-            align-items: center;
-        }
-
-        .card-meta {
-            display: flex;
-            gap: 1rem;
-        }
-
-        .upvote-btn {
-            display: flex;
-            align-items: center;
-            gap: 0.25rem;
-            padding: 0.25rem 0.5rem;
-            background: transparent;
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            color: var(--text-muted);
-            cursor: pointer;
-            font-size: 0.75rem;
-        }
-
-        .upvote-btn:hover {
-            border-color: var(--green);
-            color: var(--green);
-        }
-
-        .upvote-btn.upvoted {
-            border-color: var(--green);
-            color: var(--green);
-            background: rgba(34, 197, 94, 0.1);
-        }
-
-        .downvote-btn {
-            display: flex;
-            align-items: center;
-            gap: 0.25rem;
-            padding: 0.25rem 0.5rem;
-            background: transparent;
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            color: var(--text-muted);
-            cursor: pointer;
-            font-size: 0.75rem;
-            margin-left: 0.25rem;
-        }
-
-        .downvote-btn:hover {
-            border-color: var(--red);
-            color: var(--red);
-            background: rgba(239, 68, 68, 0.1);
-        }
-
-        .downvote-btn.downvoted {
-            border-color: var(--red);
-            color: var(--red);
-            background: rgba(239, 68, 68, 0.1);
-        }
-
-        .delete-btn {
-            display: flex;
-            align-items: center;
-            gap: 0.25rem;
-            padding: 0.25rem 0.5rem;
-            background: transparent;
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            color: var(--text-muted);
-            cursor: pointer;
-            font-size: 0.75rem;
-            margin-left: 0.5rem;
-        }
-
-        .delete-btn:hover {
-            border-color: var(--red);
-            color: var(--red);
-            background: rgba(239, 68, 68, 0.1);
-        }
-
-        .importance-bar {
-            width: 60px;
-            height: 4px;
-            background: var(--border);
-            border-radius: 2px;
-            overflow: hidden;
-        }
-
-        .importance-fill {
-            height: 100%;
-            background: var(--accent);
-            border-radius: 2px;
-        }
-
-        /* Graph view */
-        #graph-container {
-            position: relative;
-            height: calc(100dvh - 120px);
-            min-height: 400px;
-            width: 100%;
-            overflow: hidden;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-        }
-
-        #graph-canvas {
-            position: absolute;
-            inset: 0;
-            width: 100%;
-            height: 100%;
-            cursor: grab;
-        }
-
-        #graph-canvas:active { cursor: grabbing; }
-
-        .graph-toolbar {
-            position: absolute;
-            top: 0.75rem;
-            left: 50%;
-            transform: translateX(-50%);
-            display: flex;
-            align-items: center;
-            gap: 0.25rem;
-            background: rgba(15, 15, 15, 0.9);
-            padding: 0.35rem 0.5rem;
-            border-radius: 8px;
-            border: 1px solid var(--border);
-            z-index: 10;
-        }
-
-        .graph-btn {
-            padding: 0.3rem 0.65rem;
-            background: transparent;
-            border: none;
-            color: var(--text-muted);
-            font-size: 0.75rem;
-            cursor: pointer;
-            border-radius: 5px;
-            transition: all 0.15s;
-        }
-
-        .graph-btn:hover { color: var(--text); background: var(--surface-hover); }
-        .graph-btn.active { color: var(--accent); background: rgba(99, 102, 241, 0.15); }
-        .graph-sep { width: 1px; height: 16px; background: var(--border); margin: 0 0.2rem; }
-
-        .graph-tooltip {
-            position: absolute;
-            background: rgba(15, 15, 15, 0.95);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 0.5rem 0.75rem;
-            font-size: 0.75rem;
-            color: var(--text);
-            pointer-events: none;
-            z-index: 20;
-            display: none;
-            max-width: 240px;
-            line-height: 1.4;
-        }
-
-        .graph-tooltip strong { color: var(--accent); display: block; margin-bottom: 0.2rem; }
-        .graph-tooltip small { color: var(--text-muted); }
-
-        .graph-hint {
-            position: absolute;
-            bottom: 0.75rem;
-            right: 1rem;
-            font-size: 0.7rem;
-            color: var(--text-muted);
-            opacity: 0.5;
-            z-index: 10;
-        }
-
-        .graph-legend {
-            position: absolute;
-            bottom: 1rem;
-            left: 1rem;
-            background: rgba(15, 15, 15, 0.9);
-            padding: 0.75rem 1rem;
-            border-radius: 6px;
-            border: 1px solid var(--border);
-            font-size: 0.75rem;
-            z-index: 10;
-        }
-
-        .legend-item {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            margin-bottom: 0.25rem;
-        }
-
-        .legend-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-        }
-
-        /* Realms view */
-        .realms-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-            gap: 1rem;
-        }
-
-        .realm-card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 1.25rem;
-        }
-
-        .realm-card h3 {
-            font-size: 1rem;
-            margin-bottom: 0.5rem;
-        }
-
-        .realm-card p {
-            font-size: 0.8rem;
-            color: var(--text-muted);
-        }
-
-        .realm-count {
-            display: inline-block;
-            background: rgba(99, 102, 241, 0.15);
-            color: var(--accent);
-            padding: 0.15rem 0.5rem;
-            border-radius: 99px;
-            font-size: 0.7rem;
-            margin-top: 0.5rem;
-        }
-
-        /* Loading */
-        .loading {
-            text-align: center;
-            padding: 3rem;
-            color: var(--text-muted);
-        }
-
-        /* Memory detail modal */
-        .modal-overlay {
-            display: none;
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0, 0, 0, 0.7);
-            z-index: 200;
-            justify-content: center;
-            align-items: center;
-        }
-
+        /* modal */
+        .modal-overlay { display: none; position: fixed; inset: 0; z-index: 200; padding: 1rem; background: rgba(3, 2, 8, 0.78); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); justify-content: center; align-items: center; }
         .modal-overlay.active { display: flex; }
+        .modal { position: relative; width: min(760px, 100%); max-height: 88dvh; overflow-y: auto; overflow-x: hidden; padding: 1.4rem 1.5rem 1.2rem; border-radius: 16px; border: 1px solid var(--line-strong); background: linear-gradient(180deg, rgba(255, 46, 136, 0.06), transparent 140px), var(--panel-solid); box-shadow: 0 30px 80px rgba(0, 0, 0, 0.7); animation: fadein 0.25s ease both; }
+        .modal-close { position: absolute; top: 0.9rem; right: 0.9rem; width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; font-size: 1rem; }
+        .modal-close:hover { color: var(--text); border-color: var(--line-strong); }
+        .modal-kicker { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.6rem; padding-right: 2.5rem; }
+        .modal h2 { font-size: 1.12rem; line-height: 1.35; margin-bottom: 0.9rem; padding-right: 2.5rem; }
+        .modal pre { font-family: var(--sans); background: rgba(0, 0, 0, 0.35); border: 1px solid var(--line); padding: 0.9rem 1rem; border-radius: 10px; font-size: 0.84rem; line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 340px; overflow-y: auto; }
+        .facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.6rem 1rem; margin: 1rem 0 0.2rem; }
+        .fact label { display: block; font-family: var(--mono); font-size: 0.58rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--dim); }
+        .fact b { display: block; font-family: var(--mono); font-size: 0.76rem; font-weight: 500; color: var(--text); word-break: break-word; }
+        .fact small { font-family: var(--mono); font-size: 0.64rem; color: var(--muted); }
+        .modal h3 { font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); margin: 1.2rem 0 0.5rem; font-weight: 500; }
+        .modal h3 + .subtle { margin: -0.3rem 0 0.6rem; }
+        .rel { display: grid; grid-template-columns: minmax(0, 1fr) 74px; gap: 0.8rem; align-items: center; padding: 0.45rem 0.55rem; border-radius: 8px; cursor: pointer; }
+        .rel > div { min-width: 0; }
+        .rel:hover { background: rgba(255, 255, 255, 0.04); }
+        .rel p { font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .rel .strength { font-family: var(--mono); font-size: 0.66rem; color: var(--cyan); text-align: right; }
+        .rel .strength .track { margin-top: 0.2rem; }
+        .modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1.2rem; padding-top: 0.9rem; border-top: 1px solid var(--line); flex-wrap: wrap; }
+        .modal-actions .act { height: 32px; padding: 0 0.9rem; font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.06em; }
 
-        .modal {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 1.5rem;
-            max-width: 700px;
-            width: 90%;
-            max-height: 80vh;
-            overflow-y: auto;
+        /* settings */
+        .field-label { display: block; margin: 1rem 0 0.4rem; font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); }
+        .field { width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--line-strong); border-radius: 9px; background: rgba(0, 0, 0, 0.35); color: var(--text); font-family: var(--mono); font-size: 0.8rem; }
+        .field:focus { outline: none; border-color: var(--pink); }
+        .primary-btn { padding: 0.5rem 1rem; border: 1px solid var(--pink); border-radius: 9px; background: rgba(255, 46, 136, 0.22); color: #fff; cursor: pointer; font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em; }
+        .primary-btn:hover { background: rgba(255, 46, 136, 0.38); }
+
+        /* toast */
+        .toast { position: fixed; left: 50%; bottom: calc(var(--ticker-h) + 1rem + env(safe-area-inset-bottom)); transform: translate(-50%, 20px); opacity: 0; z-index: 300; padding: 0.55rem 1rem; border-radius: 10px; border: 1px solid var(--line-strong); background: rgba(12, 10, 23, 0.96); font-family: var(--mono); font-size: 0.74rem; transition: opacity 0.2s, transform 0.2s; pointer-events: none; }
+        .toast.show { opacity: 1; transform: translate(-50%, 0); }
+        .toast.bad { border-color: var(--red); color: #ffd0d4; }
+
+        /* ── Responsive ────────────────────────────────────── */
+        @media (max-width: 1100px) {
+            .ov-hero { grid-column: span 12; grid-row: auto; }
+            .ov-side { grid-column: span 6; }
+            .ov-third { grid-column: span 6; }
+            .ov-third:last-child { grid-column: span 12; }
         }
-
-        .modal h2 {
-            font-size: 1.1rem;
-            margin-bottom: 1rem;
+        @media (max-width: 960px) {
+            .top { flex-direction: column; align-items: stretch; padding: 1rem 1rem 0.8rem; gap: 0.9rem; }
+            .kpis { justify-content: stretch; display: grid; grid-template-columns: repeat(4, 1fr); }
+            .kpi { min-width: 0; }
+            .bar { flex-wrap: wrap; padding: 0.5rem 1rem; gap: 0.5rem; }
+            .tabs { order: 2; width: 100%; }
+            .search-box { order: 1; max-width: none; margin-left: 0; }
+            .main { padding: 1rem; }
         }
-
-        .modal pre {
-            background: var(--bg);
-            padding: 1rem;
-            border-radius: 6px;
-            font-size: 0.85rem;
-            white-space: pre-wrap;
-            word-break: break-word;
-            max-height: 400px;
-            overflow-y: auto;
-        }
-
-        .modal-close {
-            float: right;
-            background: none;
-            border: none;
-            color: var(--text-muted);
-            cursor: pointer;
-            font-size: 1.25rem;
-        }
-
-        .modal-close:hover { color: var(--text); }
-
-        .modal-downvote-btn {
-            padding: 0.4rem 1rem;
-            background: transparent;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            color: var(--text-muted);
-            cursor: pointer;
-            font-size: 0.8rem;
-        }
-
-        .modal-downvote-btn:hover {
-            border-color: var(--red);
-            color: var(--red);
-            background: rgba(239, 68, 68, 0.1);
-        }
-
-        .modal-delete-btn {
-            padding: 0.4rem 1rem;
-            background: rgba(239, 68, 68, 0.1);
-            border: 1px solid var(--red);
-            border-radius: 6px;
-            color: var(--red);
-            cursor: pointer;
-            font-size: 0.8rem;
-        }
-
-        .modal-delete-btn:hover {
-            background: rgba(239, 68, 68, 0.2);
-        }
-
-        /* Responsive */
-        @media (max-width: 768px) {
-            .header { flex-direction: column; gap: 1rem; }
-            .search-box { margin: 0; max-width: none; }
+        @media (max-width: 760px) {
+            .kpi { padding: 0.4rem 0.55rem; }
+            .kpi b { font-size: 1.05rem; }
+            .kpi:nth-child(4) b { font-size: 0.85rem; }
+            .ov-side, .ov-third, .ov-third:last-child { grid-column: span 12; }
+            .ov-hero, .core-wrap { min-height: 420px; }
+            .hero-stats { gap: 0.9rem; }
+            .hero-stats b { font-size: 1.4rem; }
+            .hero-hint { display: none; }
             .cards { grid-template-columns: 1fr; }
+            .tl-item { grid-template-columns: 1fr; gap: 0.3rem; }
+            #graph-container { height: calc(100dvh - 230px); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition: none !important; }
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1><span>🧠</span> memex8</h1>
-        <div class="search-box">
-            <input type="text" id="search-input" placeholder="Search memories..." />
-            <button onclick="doSearch()">Search</button>
-        </div>
-        <div class="nav-tabs">
-            <button class="nav-tab active" data-view="cards">Cards</button>
-            <button class="nav-tab" data-view="graph">Graph</button>
-            <button class="nav-tab" data-view="realms">Realms</button>
-            <button class="nav-tab settings-btn" id="settings-btn" title="Settings" onclick="openSettings()">⚙</button>
-        </div>
-    </div>
-
-    <!-- Settings Modal (per-client API key) -->
-    <div class="modal-overlay" id="settings-overlay" style="display:none;" onclick="if(event.target===this) closeSettings()">
-        <div class="modal" style="max-width: 480px;">
-            <button class="modal-close" onclick="closeSettings()">×</button>
-            <h2 style="margin-top:0;">Settings</h2>
-            <p style="color: var(--muted-foreground); font-size: 13px;">
-                Per-device API key for memex8. Stored in <code>localStorage</code> — never sent anywhere except the local server.
-            </p>
-            <label style="display:block; margin: 16px 0 6px; font-weight: 600;">API Key</label>
-            <input type="password" id="settings-api-key" placeholder="paste key here" autocomplete="off"
-                   style="width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--foreground); font-family: monospace;" />
-            <div style="margin-top: 8px; font-size: 12px; color: var(--muted-foreground);">
-                Source: <span id="settings-key-source">checking…</span>
-            </div>
-            <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end;">
-                <button onclick="clearApiKey()" style="padding: 8px 14px; border: 1px solid var(--border); background: transparent; color: var(--foreground); border-radius: 6px; cursor: pointer;">Clear</button>
-                <button onclick="saveApiKey()" style="padding: 8px 14px; border: none; background: var(--accent); color: white; border-radius: 6px; cursor: pointer; font-weight: 600;">Save & Reload</button>
+    <header class="top">
+        <div class="brand">
+            <svg class="logo" viewBox="0 0 48 48" aria-hidden="true">
+                <defs>
+                    <radialGradient id="lg-core" cx="50%" cy="50%" r="50%">
+                        <stop offset="0" stop-color="#fff"/><stop offset="0.35" stop-color="#ff2e88"/><stop offset="1" stop-color="#ff2e88" stop-opacity="0"/>
+                    </radialGradient>
+                </defs>
+                <circle cx="24" cy="24" r="21" fill="none" stroke="rgba(170,150,255,0.35)" stroke-dasharray="1.5 3"/>
+                <ellipse cx="24" cy="24" rx="21" ry="8" fill="none" stroke="rgba(45,226,230,0.55)" transform="rotate(-24 24 24)"/>
+                <ellipse cx="24" cy="24" rx="21" ry="8" fill="none" stroke="rgba(255,138,61,0.45)" transform="rotate(36 24 24)"/>
+                <circle cx="24" cy="24" r="11" fill="url(#lg-core)"/>
+            </svg>
+            <div style="min-width:0">
+                <div class="brand-title">memex8<em>// second brain</em></div>
+                <div class="brand-sub" id="brand-sub">self-hosted memory · connecting…</div>
             </div>
         </div>
-    </div>
+        <div class="kpis">
+            <div class="kpi"><label>Memories</label><b id="stat-memories">—</b></div>
+            <div class="kpi"><label>Realms</label><b id="stat-realms">—</b></div>
+            <div class="kpi"><label>Verified</label><b id="stat-verified">—</b></div>
+            <div class="kpi"><label>Slumber</label><b id="stat-slumber">—</b></div>
+        </div>
+    </header>
 
-    <div class="stats-bar" id="stats-bar">
-        Memories: <span id="stat-memories">—</span>
-        Realms: <span id="stat-realms">—</span>
-        Provider: <span id="stat-provider">—</span>
-        Slumber: <span id="stat-slumber">—</span>
-    </div>
+    <nav class="bar">
+        <div class="tabs" role="tablist">
+            <button class="nav-tab active" data-view="overview" role="tab">Overview</button>
+            <button class="nav-tab" data-view="cards" role="tab">Memories</button>
+            <button class="nav-tab" data-view="graph" role="tab">Graph</button>
+            <button class="nav-tab" data-view="timeline" role="tab">Timeline</button>
+            <button class="nav-tab" data-view="realms" role="tab">Realms</button>
+        </div>
+        <form class="search-box" id="search-form" role="search">
+            <input type="text" id="search-input" placeholder="Search memories…  ( / )" autocomplete="off" />
+            <button type="submit">Search</button>
+        </form>
+        <button class="icon-btn" id="settings-btn" title="Settings" onclick="openSettings()">⚙</button>
+    </nav>
 
-    <div class="main">
-        <!-- Cards View -->
-        <div class="view active" id="view-cards">
+    <main class="main">
+        <!-- Overview -->
+        <section class="view active" id="view-overview">
+            <div class="ov-grid">
+                <article class="panel ov-hero">
+                    <div class="panel-head">
+                        <span class="ttl"><span class="num">01</span><i class="dot" style="color:var(--pink)"></i>Memory core</span>
+                        <span class="aside" id="hero-aside">realms on the shell · top memories inside · cyan = associations</span>
+                    </div>
+                    <div class="core-wrap" id="core-wrap">
+                        <canvas id="core-canvas"></canvas>
+                        <div class="float-tip" id="core-tip"></div>
+                    </div>
+                    <div class="hero-stats">
+                        <div><b id="hero-memories">—</b><label>memories</label></div>
+                        <div><b id="hero-links">—</b><label>links shown</label></div>
+                        <div><b id="hero-realms">—</b><label>realms</label></div>
+                    </div>
+                    <div class="hero-hint">drag to rotate · click a realm or memory</div>
+                </article>
+
+                <article class="panel ov-side" id="p-verify">
+                    <div class="panel-head"><span class="ttl"><span class="num">02</span><i class="dot" style="color:var(--lime)"></i>Verification</span><span class="aside">nightly truth sweep</span></div>
+                    <div id="verify-body"><div class="loading">Loading</div></div>
+                </article>
+
+                <article class="panel ov-side" id="p-slumber">
+                    <div class="panel-head"><span class="ttl"><span class="num">03</span><i class="dot" style="color:var(--cyan)"></i>Slumber</span><span class="aside" id="slumber-aside">last cycle</span></div>
+                    <div id="slumber-body"><div class="loading">Loading</div></div>
+                </article>
+
+                <article class="panel ov-third decay" id="p-decay">
+                    <div class="panel-head"><span class="ttl"><span class="num">04</span><i class="dot" style="color:var(--orange)"></i>Forgetting curves</span><span class="aside">Weibull · per type</span></div>
+                    <div id="decay-body"></div>
+                </article>
+
+                <article class="panel ov-third" id="p-realms">
+                    <div class="panel-head"><span class="ttl"><span class="num">05</span><i class="dot" style="color:var(--violet)"></i>Largest realms</span><span class="aside" id="realms-aside"></span></div>
+                    <div id="realm-bars"><div class="loading">Loading</div></div>
+                </article>
+
+                <article class="panel ov-third" id="p-recent">
+                    <div class="panel-head"><span class="ttl"><span class="num">06</span><i class="dot" style="color:var(--pink)"></i>Just remembered</span><button class="ghost-btn" style="padding:0.15rem 0.5rem" onclick="showView('timeline')">Timeline →</button></div>
+                    <div class="recent" id="recent-list"><div class="loading">Loading</div></div>
+                </article>
+            </div>
+        </section>
+
+        <!-- Memories (cards) -->
+        <section class="view" id="view-cards">
+            <div class="list-head">
+                <h2 id="list-title">Top memories<small id="list-sub"></small></h2>
+                <button class="ghost-btn" id="list-reset" style="display:none" onclick="resetList()">✕ Clear filter</button>
+            </div>
+            <div id="list-coverage"></div>
             <div class="cards" id="cards-container">
-                <div class="loading">Loading memories...</div>
+                <div class="loading">Loading memories</div>
             </div>
-        </div>
+        </section>
 
-        <!-- Graph View -->
-        <div class="view" id="view-graph">
-            <div id="graph-container" style="position: relative;">
+        <!-- Graph -->
+        <section class="view" id="view-graph">
+            <div id="graph-container">
                 <canvas id="graph-canvas"></canvas>
                 <div class="graph-toolbar" id="graph-toolbar">
                     <button class="graph-btn active" data-filter="all" onclick="setGraphFilter('all')">All</button>
                     <button class="graph-btn" data-filter="realms" onclick="setGraphFilter('realms')">Realms</button>
                     <span class="graph-sep"></span>
                     <button class="graph-btn" onclick="resetGraphView()" title="Reset view">⌖</button>
-                    <button class="graph-btn" onclick="toggleGraphLabels()" id="graph-labels-btn" title="Toggle labels">Aa</button>
+                    <button class="graph-btn active" onclick="toggleGraphLabels()" id="graph-labels-btn" title="Toggle labels">Aa</button>
+                    <button class="graph-btn" onclick="toggleGraphLegend()" id="graph-legend-btn" title="Toggle realm legend">≡</button>
                 </div>
                 <div class="graph-legend" id="graph-legend"></div>
-                <div class="graph-tooltip" id="graph-tooltip"></div>
-                <div class="graph-hint" id="graph-hint">Scroll to zoom · Drag to pan · Click node to select</div>
+                <div class="float-tip" id="graph-tooltip"></div>
+                <div class="graph-hint" id="graph-hint">scroll to zoom · drag to pan · hover to see why things link</div>
             </div>
-        </div>
+        </section>
 
-        <!-- Realms View -->
-        <div class="view" id="view-realms">
+        <!-- Timeline -->
+        <section class="view" id="view-timeline">
+            <article class="panel tl-panel">
+                <div class="panel-head"><span class="ttl"><i class="dot" style="color:var(--pink)"></i>Timeline</span><span class="aside" id="tl-aside">scrub to any moment · 10 memories either side</span></div>
+                <div class="tl-readout">
+                    <div class="big-num" id="tl-date">—</div>
+                    <div class="subtle" id="tl-rel"></div>
+                </div>
+                <input type="range" class="scrub" id="tl-slider" min="0" max="1000" value="1000" aria-label="Timeline position" />
+                <div class="tl-axis" id="tl-axis"><span>—</span><span>now</span></div>
+                <div class="tl-steps">
+                    <button class="ghost-btn" data-step="-604800">−1 wk</button>
+                    <button class="ghost-btn" data-step="-86400">−1 day</button>
+                    <button class="ghost-btn" data-step="-3600">−1 h</button>
+                    <button class="ghost-btn" data-step="3600">+1 h</button>
+                    <button class="ghost-btn" data-step="86400">+1 day</button>
+                    <button class="ghost-btn" data-step="604800">+1 wk</button>
+                    <button class="ghost-btn" data-step="now">Now</button>
+                </div>
+            </article>
+            <div class="tl-list" id="tl-list"><div class="loading">Loading</div></div>
+        </section>
+
+        <!-- Realms -->
+        <section class="view" id="view-realms">
+            <div class="list-head"><h2>Realms<small id="realms-sub"></small></h2></div>
             <div class="realms-grid" id="realms-container">
-                <div class="loading">Loading realms...</div>
+                <div class="loading">Loading realms</div>
+            </div>
+        </section>
+    </main>
+
+    <div class="ticker" id="ticker"><div class="ticker-track" id="ticker-track"></div></div>
+    <div class="toast" id="toast"></div>
+
+    <!-- Settings Modal (per-client API key) -->
+    <div class="modal-overlay" id="settings-overlay" onclick="if(event.target===this) closeSettings()">
+        <div class="modal" style="max-width: 480px;">
+            <button class="modal-close" onclick="closeSettings()">✕</button>
+            <h2>Settings</h2>
+            <p class="subtle" style="line-height:1.6">
+                Per-device API key for memex8. Stored in <code>localStorage</code> and sent only to this server.
+            </p>
+            <label class="field-label" for="settings-api-key">API key</label>
+            <input type="password" id="settings-api-key" class="field" placeholder="paste key here" autocomplete="off" />
+            <div class="subtle" style="margin-top: 0.5rem;">Source: <span id="settings-key-source">checking…</span></div>
+            <div style="margin-top: 1.3rem; display: flex; gap: 0.6rem; justify-content: flex-end;">
+                <button class="ghost-btn" onclick="clearApiKey()">Clear</button>
+                <button class="primary-btn" onclick="saveApiKey()">Save &amp; reload</button>
             </div>
         </div>
     </div>
 
     <!-- Memory Detail Modal -->
     <div class="modal-overlay" id="modal-overlay">
-        <div class="modal">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
             <button class="modal-close" onclick="closeModal()">✕</button>
+            <div class="modal-kicker" id="modal-kicker"></div>
             <h2 id="modal-title"></h2>
             <pre id="modal-content"></pre>
-            <div id="modal-meta" style="margin-top: 1rem; font-size: 0.8rem; color: var(--text-muted);"></div>
-            <div style="margin-top: 1rem; display: flex; justify-content: flex-end; gap: 0.5rem;">
-                <button class="modal-downvote-btn" id="modal-downvote-btn" style="display: none;">
-                    ▼ Downvote
-                </button>
-                <button class="modal-delete-btn" id="modal-delete-btn" style="display: none;">
-                    🗑 Delete this memory
-                </button>
+            <div class="facts" id="modal-meta"></div>
+            <div id="modal-related"></div>
+            <div class="modal-actions">
+                <button class="act up" id="modal-upvote-btn">▲ Upvote</button>
+                <button class="act down" id="modal-downvote-btn">▼ Downvote</button>
+                <button class="act del" id="modal-delete-btn">🗑 Delete</button>
             </div>
         </div>
     </div>
@@ -615,46 +616,156 @@
             return { key: '', source: 'none: open Settings and paste your key' };
         }
         let { key: API_KEY, source: KEY_SOURCE } = resolveApiKey();
+        const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
         // ─── State ────────────────────────────────────────────────
-        let allMemories = [];
+        let stats = null;
+        let allMemories = [];          // top-N recall set (drives core + graph)
         let allRealms = [];
-        let voteEnabled = !!API_KEY;
+        const memCache = new Map();    // id → best-known memory payload
+        let listState = { kind: 'top', ids: [] };
         let currentMemoryId = null;
 
-        // ─── Navigation ──────────────────────────────────────────
-        document.querySelectorAll('.nav-tab').forEach(tab => {
-            tab.addEventListener('click', () => {
-                document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-                document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-                tab.classList.add('active');
-                document.getElementById(`view-${tab.dataset.view}`).classList.add('active');
+        // Neon palette shared by every view so a realm keeps one colour everywhere.
+        const PALETTE = ['#ff2e88', '#2de2e6', '#ff8a3d', '#9b5cff', '#b6ff5c', '#ffc53d', '#5c8bff', '#ff5cf0', '#3dffb0', '#ff6b4a', '#c7b3ff', '#00b3ff'];
+        const realmColorMap = new Map();
+        function indexRealmColors() {
+            realmColorMap.clear();
+            realmBaseCount.clear();
+            allRealms.forEach(r => { const b = realmBase(r.name); realmBaseCount.set(b, (realmBaseCount.get(b) || 0) + 1); });
+            [...allRealms]
+                .sort((a, b) => (b.memory_count || 0) - (a.memory_count || 0) || String(a.name).localeCompare(String(b.name)))
+                .forEach((r, i) => {
+                    const c = PALETTE[i % PALETTE.length];
+                    if (r.name) realmColorMap.set(r.name, c);
+                    if (r.id) realmColorMap.set(r.id, c);
+                });
+        }
+        function realmColor(nameOrId) { return realmColorMap.get(nameOrId) || '#8f88aa'; }
 
-                if (tab.dataset.view === 'graph') {
-                    // Defer initGraph until the view is actually visible and laid out.
-                    // Without this, container.clientWidth is 0 on mobile (display:none → block
-                    // happens synchronously but style resolution lags a frame), so the canvas
-                    // renders at 0×0 and the graph never appears. requestAnimationFrame
-                    // + a 150ms fallback guarantees we measure after the next paint.
-                    requestAnimationFrame(() => {
-                        if (initGraph()) return;
-                        // First attempt measured 0×0 — the container hasn't been laid out
-                        // yet (mobile + display:none → block is often slower than a frame).
-                        // Retry once after layout has had time to commit.
-                        setTimeout(() => initGraph(), 150);
-                    });
-                }
+        // Mirror of src/engine/decay.rs::weibull_params() — (shape k, scale η hours).
+        // Keep in sync when the Rust table changes.
+        const WEIBULL = {
+            profile: [0.30, 8760], preference: [0.40, 4380], relationship: [0.35, 8760], learning: [0.70, 1440],
+            fact: [0.80, 720], entity: [0.50, 4380], setup: [0.60, 2160], pattern: [0.60, 1680],
+            context: [0.85, 360], observation: [0.90, 480], artifact: [0.75, 2160], project: [0.85, 1080],
+            goal: [0.90, 720], decision: [1.00, 336], commitment: [1.00, 240], event: [1.20, 168],
+            instruction: [0.90, 480], error: [1.10, 336], issue: [1.10, 336], request: [1.50, 72],
+            general: [1.00, 168],
+        };
+        function weibull(type, hours) {
+            const [k, eta] = WEIBULL[type] || WEIBULL.general;
+            return Math.exp(-Math.pow(Math.max(hours, 1 / 60) / eta, k));
+        }
+
+        // ─── Utilities ───────────────────────────────────────────
+        // Escapes for both text and attribute contexts (quotes included).
+        function escapeHtml(str) {
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+        const fmtNum = n => (n === null || n === undefined || Number.isNaN(n)) ? '—' : Number(n).toLocaleString();
+        function parseTime(iso) { const t = Date.parse(iso); return Number.isFinite(t) ? t : null; }
+        function timeAgo(iso) {
+            const t = typeof iso === 'number' ? iso : parseTime(iso);
+            if (t === null) return '—';
+            let s = (Date.now() - t) / 1000;
+            const future = s < 0; s = Math.abs(s);
+            const u = s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h`
+                : s < 86400 * 14 ? `${Math.floor(s / 86400)}d` : s < 86400 * 60 ? `${Math.floor(s / 604800)}w`
+                : s < 86400 * 730 ? `${Math.floor(s / 2592000)}mo` : `${Math.floor(s / 31536000)}y`;
+            if (u === 'just now') return u;
+            return future ? `in ${u}` : `${u} ago`;
+        }
+        function fmtDate(iso, withTime = true) {
+            const t = typeof iso === 'number' ? iso : parseTime(iso);
+            if (t === null) return '—';
+            const d = new Date(t);
+            const opts = { month: 'short', day: 'numeric', year: 'numeric' };
+            if (withTime) Object.assign(opts, { hour: '2-digit', minute: '2-digit' });
+            return d.toLocaleString(undefined, opts);
+        }
+        // Slumber's realm splitter appends -a/-b suffixes; trim them for display only.
+        // When two realms share a base name, keep a compact suffix so they stay distinct.
+        const realmBaseCount = new Map();
+        const realmBase = name => String(name || 'Unnamed').replace(/(-[a-z])+$/i, '');
+        function cleanRealm(name) {
+            const base = realmBase(name);
+            if ((realmBaseCount.get(base) || 0) < 2) return base;
+            const suffix = String(name || '').slice(base.length).replace(/-/g, '');
+            return suffix ? `${base} ·${suffix}` : base;
+        }
+        function snippet(content, n = 140) {
+            let s = String(content || '')
+                .replace(/^\s*#+\s*Conversation Summary\s*/i, '')
+                .replace(/^\s*#+\s*/gm, '')
+                .replace(/\*\*|__|`/g, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            return s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s;
+        }
+        function titleOf(m) { return m.heading || snippet(m.content, 90) || 'Memory'; }
+        function vClass(status) { return 'v-' + (['verified', 'certified', 'stale', 'contradicted'].includes(status) ? status : 'unverified'); }
+        function realmChip(name) {
+            if (!name) return '';
+            return `<span class="chip" style="color:${realmColor(name)}" title="${escapeHtml(name)}">${escapeHtml(cleanRealm(name))}</span>`;
+        }
+        function typeChip(t) { return t ? `<span class="chip flat">${escapeHtml(t)}</span>` : ''; }
+        function verifyChip(s) { return s ? `<span class="chip flat"><i class="vdot ${vClass(s)}"></i>${escapeHtml(s)}</span>` : ''; }
+
+        let toastTimer = null;
+        function toast(msg, bad = false) {
+            const el = document.getElementById('toast');
+            el.textContent = msg;
+            el.classList.toggle('bad', bad);
+            el.classList.add('show');
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+        }
+        function remember(m) {
+            if (!m || !m.id) return m;
+            const prev = memCache.get(m.id) || {};
+            const merged = { ...prev, ...m };
+            // A search/recall score is context-specific; keep whichever caller set it.
+            if (m.score === undefined && prev.score !== undefined) merged.score = prev.score;
+            memCache.set(m.id, merged);
+            return merged;
+        }
+
+        // ─── Navigation ──────────────────────────────────────────
+        function showView(name) {
+            document.querySelectorAll('.nav-tab').forEach(t => {
+                const on = t.dataset.view === name;
+                t.classList.toggle('active', on);
+                t.setAttribute('aria-selected', on ? 'true' : 'false');
             });
-        });
+            document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `view-${name}`));
+
+            if (name === 'overview') startCore(); else stopCore();
+            if (name === 'graph') {
+                // Defer initGraph until the view is actually visible and laid out.
+                // Without this, container.clientWidth is 0 on mobile (display:none → block
+                // happens synchronously but layout lags a frame), so the canvas renders at
+                // 0×0. requestAnimationFrame + a 150ms fallback measures after paint.
+                requestAnimationFrame(() => {
+                    if (initGraph()) return;
+                    setTimeout(() => initGraph(), 150);
+                });
+            } else {
+                stopGraphLoop();
+            }
+            if (name === 'timeline') initTimeline();
+        }
+        document.querySelectorAll('.nav-tab').forEach(tab => tab.addEventListener('click', () => showView(tab.dataset.view)));
 
         // ─── Settings (per-device API key) ───────────────────────
         function openSettings() {
             document.getElementById('settings-api-key').value = API_KEY || '';
             document.getElementById('settings-key-source').textContent = KEY_SOURCE;
-            document.getElementById('settings-overlay').style.display = 'flex';
+            document.getElementById('settings-overlay').classList.add('active');
         }
         function closeSettings() {
-            document.getElementById('settings-overlay').style.display = 'none';
+            document.getElementById('settings-overlay').classList.remove('active');
         }
         function saveApiKey() {
             const v = document.getElementById('settings-api-key').value.trim();
@@ -662,10 +773,10 @@
                 if (v) localStorage.setItem('memex8_api_key', v);
                 else localStorage.removeItem('memex8_api_key');
             } catch (e) {
-                alert('Could not save to localStorage: ' + e.message);
+                toast('Could not save to localStorage: ' + e.message, true);
                 return;
             }
-            // Reload so all derived state (voteEnabled, etc.) rebuilds cleanly.
+            // Reload so all derived state rebuilds cleanly.
             window.location.reload();
         }
         function clearApiKey() {
@@ -679,265 +790,707 @@
             if (API_KEY) headers['Authorization'] = `Bearer ${API_KEY}`;
             if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
             const fetchOpts = { ...options, headers };
-            // Strip undefined body/method so fetch uses sensible defaults (GET, no body)
             if (!fetchOpts.body) delete fetchOpts.body;
             const resp = await fetch(`${BASE_URL}/api/v1${path}`, fetchOpts);
-            if (resp.status === 401 && !API_KEY) { openSettings(); }
+            if (resp.status === 401) {
+                if (!API_KEY) openSettings();
+                else toast('API key rejected: check Settings', true);
+            }
             if (!resp.ok) throw new Error(`API error: ${resp.status} ${resp.statusText}`);
             return resp.json();
+        }
+        // POST /memories/batch-get accepts 1–50 ids per call.
+        async function fetchMany(ids) {
+            const out = [];
+            const uniq = [...new Set(ids.filter(Boolean))];
+            for (let i = 0; i < uniq.length; i += 50) {
+                const res = await api('/memories/batch-get', { method: 'POST', body: JSON.stringify({ ids: uniq.slice(i, i + 50) }) });
+                (res.memories || []).forEach(m => out.push(remember(m)));
+            }
+            return out;
         }
 
         // ─── Load Data ───────────────────────────────────────────
         async function loadAll() {
-            try {
-                // Load stats
-                stats = await api('/stats');
-                document.getElementById('stat-memories').textContent = stats.total_memories || 0;
-                document.getElementById('stat-realms').textContent = stats.total_realms || 0;
-                document.getElementById('stat-provider').textContent = stats.embedding_provider || '—';
-                document.getElementById('stat-slumber').textContent = stats.slumber_state || '—';
+            const nowIso = new Date().toISOString();
+            const [st, rc, rl, vf, sl, tl] = await Promise.allSettled([
+                api('/stats'),
+                api('/memories/recall?limit=100'),
+                api('/realms'),
+                api('/memories/verification-summary'),
+                api('/slumber/status'),
+                api(`/memories/timeline?at=${encodeURIComponent(nowIso)}&before=10&after=0`),
+            ]);
 
-                // Load memories (recall top 100 by importance)
-                const recallData = await api('/memories/recall?limit=100');
-                allMemories = recallData.results || [];
-                renderCards(allMemories);
-
-                // Load realms
-                allRealms = await api('/realms');
-                renderRealms(allRealms);
-
-                // Render graph if visible
-                if (document.getElementById('view-graph').classList.contains('active')) {
-                    initGraph();
-                }
-            } catch (e) {
-                console.error('Failed to load data:', e);
-                document.getElementById('cards-container').innerHTML =
-                    `<div class="loading" style="color: var(--red);">Failed to connect to memex8 server.<br><small>${e.message}</small></div>`;
+            if (st.status === 'rejected' && rc.status === 'rejected') {
+                const msg = `<div class="loading err" style="animation:none">Failed to connect to memex8 server.<br><small>${escapeHtml(st.reason.message)}</small></div>`;
+                ['cards-container', 'verify-body', 'slumber-body', 'realm-bars', 'recent-list'].forEach(id => document.getElementById(id).innerHTML = msg);
+                document.getElementById('brand-sub').textContent = 'self-hosted memory · offline';
+                return;
             }
+
+            stats = st.status === 'fulfilled' ? st.value : null;
+            allRealms = rl.status === 'fulfilled' && Array.isArray(rl.value) ? rl.value : [];
+            indexRealmColors();
+            allMemories = rc.status === 'fulfilled' ? (rc.value.results || []).map(remember) : [];
+            const verification = vf.status === 'fulfilled' ? vf.value : null;
+            const slumber = sl.status === 'fulfilled' ? sl.value : null;
+            const recent = tl.status === 'fulfilled' ? (tl.value.results || []).slice().reverse() : null;
+
+            renderHeader(stats, verification, slumber);
+            renderVerification(verification);
+            renderSlumber(slumber);
+            renderDecay();
+            renderRealmBars(allRealms);
+            renderRecent(recent);
+            renderTicker(recent, stats, slumber);
+            renderRealms(allRealms);
+
+            listState = { kind: 'top', ids: allMemories.map(m => m.id) };
+            renderList();
+            // Recall rows omit type/verification/timestamps; enrich in the background.
+            fetchMany(listState.ids).then(() => { if (listState.kind === 'top') renderList(); }).catch(() => {});
+
+            buildCore();
+            if (document.getElementById('view-overview').classList.contains('active')) startCore();
+            if (gInited) rebuildGraph();
+            if (document.getElementById('view-graph').classList.contains('active')) initGraph();
+        }
+
+        // ─── Header / Overview panels ────────────────────────────
+        function renderHeader(s, v, sl) {
+            document.getElementById('stat-memories').textContent = fmtNum(s?.total_memories);
+            document.getElementById('stat-realms').textContent = fmtNum(s?.total_realms ?? allRealms.length);
+            document.getElementById('hero-memories').textContent = fmtNum(s?.total_memories);
+            document.getElementById('hero-realms').textContent = fmtNum(s?.total_realms ?? allRealms.length);
+            if (v) {
+                const total = Object.values(v).reduce((a, b) => a + (Number(b) || 0), 0);
+                const ok = (v.verified || 0) + (v.certified || 0);
+                document.getElementById('stat-verified').textContent = total ? `${Math.round(ok / total * 100)}%` : '—';
+            }
+            const state = sl?.state || s?.slumber_state || '—';
+            document.getElementById('stat-slumber').textContent = state;
+            const sub = document.getElementById('brand-sub');
+            const model = s ? `<b>${escapeHtml(s.embedding_provider || '?')}</b> / ${escapeHtml(s.embedding_model || '?')} · ${escapeHtml(s.embedding_dimensions || '?')}d` : 'stats unavailable';
+            sub.innerHTML = `self-hosted memory · ${model}`;
+        }
+
+        const V_ORDER = [
+            ['certified', 'var(--cyan)', 'certified by you'],
+            ['verified', 'var(--lime)', 'still true'],
+            ['stale', 'var(--amber)', 'probably outdated'],
+            ['contradicted', 'var(--red)', 'conflicts with newer facts'],
+            ['unverified', 'var(--dim)', 'not yet checked'],
+        ];
+        function renderVerification(v) {
+            const el = document.getElementById('verify-body');
+            if (!v) { el.innerHTML = '<div class="empty">Verification summary not available on this server.</div>'; return; }
+            const total = V_ORDER.reduce((a, [k]) => a + (v[k] || 0), 0) || 1;
+            const ok = (v.verified || 0) + (v.certified || 0);
+            el.innerHTML = `
+                <div class="big-num" style="color:var(--lime)">${Math.round(ok / total * 100)}%<small>verified or certified</small></div>
+                <div class="seg">${V_ORDER.map(([k, c]) => `<span style="width:${(v[k] || 0) / total * 100}%;background:${c}" title="${k}: ${fmtNum(v[k] || 0)}"></span>`).join('')}</div>
+                <div class="rows">${V_ORDER.map(([k, c, d]) => `
+                    <div class="row"><i class="vdot" style="background:${c}"></i><span><b>${k}</b> · ${d}</span><b>${fmtNum(v[k] || 0)}</b><em>${((v[k] || 0) / total * 100).toFixed(1)}%</em></div>`).join('')}
+                </div>`;
+        }
+
+        function renderSlumber(sl) {
+            const el = document.getElementById('slumber-body');
+            if (!sl) { el.innerHTML = '<div class="empty">Slumber status not available.</div>'; return; }
+            const r = sl.last_report || {};
+            const running = sl.state && sl.state !== 'idle';
+            const color = running ? 'var(--pink)' : 'var(--cyan)';
+            document.getElementById('slumber-aside').textContent = sl.last_run ? `last run ${timeAgo(sl.last_run)}` : 'never run';
+            const vc = r.verification_counts || {};
+            const items = [
+                ['scanned', r.memories_scanned], ['decayed', r.decayed],
+                ['associated', r.associated], ['flagged to prune', r.flagged_for_prune],
+                ['consolidated', r.memories_consolidated], ['dedup candidates', r.dedup_candidates],
+                ['realms updated', r.realms_updated], ['verified this run', r.memories_verified],
+            ];
+            el.innerHTML = `
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:0.6rem;flex-wrap:wrap">
+                    <span class="state-badge ${running ? 'running' : ''}" style="color:${color}"><i class="dot"></i>${escapeHtml(sl.state || 'unknown')}</span>
+                    <span class="subtle">${sl.last_run ? fmtDate(sl.last_run) : ''}</span>
+                </div>
+                <div class="counters">${items.map(([k, n]) => `<div class="counter"><span>${k}</span><b>${fmtNum(n ?? 0)}</b></div>`).join('')}</div>
+                ${r.memories_verified ? `<div class="subtle" style="margin-top:0.7rem">sweep: ${fmtNum(vc.verified || 0)} verified · ${fmtNum(vc.stale || 0)} stale · ${fmtNum(vc.contradicted || 0)} contradicted</div>` : ''}
+                ${r.dedup_dry_run ? '<div class="subtle" style="margin-top:0.3rem">dedup is in dry-run mode</div>' : ''}`;
+        }
+
+        // Survival curves exp(-(t/η)^k) on a log time axis (1 hour → 2 years).
+        const DECAY_SHOW = [
+            ['profile', '#2de2e6'], ['preference', '#9b5cff'], ['fact', '#b6ff5c'],
+            ['project', '#ffc53d'], ['general', '#ff8a3d'], ['event', '#ff2e88'], ['request', '#ff4d5e'],
+        ];
+        function renderDecay() {
+            const W = 320, H = 150, L = 26, B = 18, T = 6;
+            const tMin = 1, tMax = 24 * 730;
+            const lx = h => L + (Math.log(h) - Math.log(tMin)) / (Math.log(tMax) - Math.log(tMin)) * (W - L - 4);
+            const ly = v => T + (1 - v) * (H - T - B);
+            const ticks = [[1, '1h'], [24, '1d'], [168, '1w'], [720, '1mo'], [4380, '6mo'], [17520, '2y']];
+            const grid = ticks.map(([h, lbl]) => `
+                <line x1="${lx(h)}" x2="${lx(h)}" y1="${T}" y2="${H - B}" stroke="rgba(170,150,255,0.09)"/>
+                <text x="${lx(h)}" y="${H - 4}" fill="#5d5878" font-size="8" font-family="ui-monospace,monospace" text-anchor="middle">${lbl}</text>`).join('');
+            const ygrid = [0, 0.5, 1].map(v => `
+                <line x1="${L}" x2="${W - 4}" y1="${ly(v)}" y2="${ly(v)}" stroke="rgba(170,150,255,0.09)"/>
+                <text x="${L - 5}" y="${ly(v) + 3}" fill="#5d5878" font-size="8" font-family="ui-monospace,monospace" text-anchor="end">${v}</text>`).join('');
+            const curves = DECAY_SHOW.map(([type, c]) => {
+                let d = '';
+                for (let i = 0; i <= 90; i++) {
+                    const h = Math.exp(Math.log(tMin) + (Math.log(tMax) - Math.log(tMin)) * i / 90);
+                    d += `${i ? 'L' : 'M'}${lx(h).toFixed(1)},${ly(weibull(type, h)).toFixed(1)}`;
+                }
+                return `<path class="curve" data-type="${type}" d="${d}" stroke="${c}" style="filter:drop-shadow(0 0 3px ${c}88)"/>`;
+            }).join('');
+            const prune = `<line x1="${L}" x2="${W - 4}" y1="${ly(0.1)}" y2="${ly(0.1)}" stroke="#ff4d5e" stroke-dasharray="3 3" opacity="0.55"/>
+                <text x="${W - 6}" y="${ly(0.1) - 3}" fill="#ff4d5e" opacity="0.8" font-size="7.5" font-family="ui-monospace,monospace" text-anchor="end">prune line 0.1</text>`;
+            document.getElementById('decay-body').innerHTML = `
+                <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Weibull forgetting curves by memory type">${grid}${ygrid}${prune}${curves}</svg>
+                <div class="legend">${DECAY_SHOW.map(([t, c]) => {
+                    const [k, eta] = WEIBULL[t];
+                    return `<span data-type="${t}" title="k=${k} · η=${eta}h"><i style="background:${c}"></i>${t}</span>`;
+                }).join('')}</div>
+                <div class="subtle" style="margin-top:0.5rem;font-size:0.64rem">Retention multiplier since last access. Recall and pruning both use it.</div>`;
+            const panel = document.getElementById('p-decay');
+            panel.querySelectorAll('.legend span').forEach(s => {
+                s.addEventListener('mouseenter', () => {
+                    panel.classList.add('focus');
+                    panel.querySelectorAll('.curve').forEach(p => p.classList.toggle('on', p.dataset.type === s.dataset.type));
+                });
+                s.addEventListener('mouseleave', () => panel.classList.remove('focus'));
+            });
+        }
+
+        function renderRealmBars(realms) {
+            const el = document.getElementById('realm-bars');
+            if (!realms.length) { el.innerHTML = '<div class="empty">No realms yet.</div>'; return; }
+            const top = [...realms].sort((a, b) => (b.memory_count || 0) - (a.memory_count || 0)).slice(0, 7);
+            const max = top[0].memory_count || 1;
+            const total = realms.reduce((a, r) => a + (r.memory_count || 0), 0);
+            document.getElementById('realms-aside').textContent = `${realms.length} total`;
+            el.innerHTML = `<div class="bars">${top.map(r => `
+                <div class="bar-row" data-realm="${escapeHtml(r.name)}" title="${escapeHtml(r.name)}">
+                    <div class="lbl"><span>${escapeHtml(cleanRealm(r.name))}</span><b>${fmtNum(r.memory_count || 0)} · ${total ? Math.round((r.memory_count || 0) / total * 100) : 0}%</b></div>
+                    <div class="track"><i style="width:${(r.memory_count || 0) / max * 100}%;background:${realmColor(r.name)};box-shadow:0 0 8px ${realmColor(r.name)}"></i></div>
+                </div>`).join('')}</div>`;
+        }
+
+        function renderRecent(items) {
+            const el = document.getElementById('recent-list');
+            if (items === null) { el.innerHTML = '<div class="empty">Timeline endpoint not available on this server.</div>'; return; }
+            if (!items.length) { el.innerHTML = '<div class="empty">Nothing stored yet.</div>'; return; }
+            el.innerHTML = items.slice(0, 6).map(m => `
+                <div class="recent-item" data-id="${escapeHtml(m.id)}">
+                    <time>${timeAgo(m.ingested_at)}</time>
+                    <div>
+                        <p>${escapeHtml(snippet(m.snippet || m.content, 160))}</p>
+                        <div class="meta">${realmChip(m.realm_name)}${typeChip(m.memory_type)}</div>
+                    </div>
+                </div>`).join('');
+        }
+
+        function renderTicker(items, s, sl) {
+            const track = document.getElementById('ticker-track');
+            const parts = [];
+            if (s) parts.push(`<span class="ticker-item stat"><b>${fmtNum(s.total_memories)}</b> memories</span>`);
+            if (s) parts.push(`<span class="ticker-item stat"><b>${fmtNum(s.total_realms)}</b> realms</span>`);
+            if (sl?.last_run) parts.push(`<span class="ticker-item stat">slumber <b>${escapeHtml(sl.state)}</b> · last cycle ${timeAgo(sl.last_run)}</span>`);
+            (items || []).forEach(m => parts.push(
+                `<span class="ticker-item" data-id="${escapeHtml(m.id)}"><span style="color:${realmColor(m.realm_name)}">●</span><b>${timeAgo(m.ingested_at)}</b>${escapeHtml(snippet(m.snippet || m.content, 70))}</span>`));
+            parts.push('<span class="ticker-item">your agent remembers · nothing leaves this box</span>');
+            const html = parts.join('');
+            track.innerHTML = html + html; // duplicated for a seamless -50% loop
+            track.style.setProperty('--tick-dur', `${Math.max(40, parts.length * 7)}s`);
+        }
+
+        // ─── Memory core (rotating sphere) ───────────────────────
+        const core = { nodes: [], parts: [], edges: [], lattice: [], yaw: 0.7, pitch: -0.32, raf: null, drag: null,
+            hover: null, w: 0, h: 0, dpr: 1, t: 0, resumeAt: 0, observed: false, proj: [] };
+
+        function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+        function buildCore() {
+            const realms = [...allRealms].sort((a, b) => (b.memory_count || 0) - (a.memory_count || 0));
+            const n = Math.max(realms.length, 1);
+            const maxCount = Math.max(1, ...realms.map(r => r.memory_count || 0));
+            core.nodes = realms.map((r, i) => {
+                const y = 1 - 2 * (i + 0.5) / n;          // Fibonacci sphere
+                const rad = Math.sqrt(1 - y * y);
+                const th = i * 2.399963229728653;
+                return { kind: 'realm', id: r.id, name: r.name || 'Unnamed', count: r.memory_count || 0,
+                    x: Math.cos(th) * rad, y, z: Math.sin(th) * rad, color: realmColor(r.name),
+                    size: 3.2 + Math.sqrt((r.memory_count || 0) / maxCount) * 7 };
+            });
+            const byName = new Map(core.nodes.map(nd => [nd.name, nd]));
+            const rng = mulberry32(80085);
+            core.parts = allMemories.map(m => {
+                const home = byName.get(m.realm_name);
+                let dx, dy, dz;
+                if (home) { dx = home.x + (rng() - 0.5) * 0.7; dy = home.y + (rng() - 0.5) * 0.7; dz = home.z + (rng() - 0.5) * 0.7; }
+                else { dx = rng() - 0.5; dy = rng() - 0.5; dz = rng() - 0.5; }
+                const len = Math.hypot(dx, dy, dz) || 1, r = 0.38 + rng() * 0.5;
+                return { kind: 'memory', id: m.id, m, x: dx / len * r, y: dy / len * r, z: dz / len * r,
+                    color: home ? home.color : '#8f88aa', size: 1.3 + (m.importance || 0) * 2.2, links: 0 };
+            });
+            const idx = new Map(core.parts.map(p => [p.id, p]));
+            const seen = new Set();
+            core.edges = [];
+            allMemories.forEach(m => (m.related_memory_ids || []).forEach((t, k) => {
+                if (!idx.has(t) || t === m.id) return;
+                const key = m.id < t ? `${m.id}|${t}` : `${t}|${m.id}`;
+                if (seen.has(key)) return;
+                seen.add(key);
+                const a = idx.get(m.id), b = idx.get(t);
+                a.links++; b.links++;
+                core.edges.push({ a, b, s: (m.association_strengths || [])[k] ?? 0.5 });
+            }));
+            document.getElementById('hero-links').textContent = fmtNum(core.edges.length);
+            core.lattice = [];
+            for (let lat = -75; lat <= 75; lat += 15) {
+                const phi = lat * Math.PI / 180, cnt = Math.max(10, Math.round(72 * Math.cos(phi)));
+                for (let j = 0; j < cnt; j++) { const th = j / cnt * Math.PI * 2; core.lattice.push({ x: Math.cos(phi) * Math.cos(th), y: Math.sin(phi), z: Math.cos(phi) * Math.sin(th) }); }
+            }
+            for (let lon = 0; lon < 180; lon += 30) {
+                const th = lon * Math.PI / 180;
+                for (let j = 0; j < 60; j++) { const phi = j / 60 * Math.PI * 2; core.lattice.push({ x: Math.cos(phi) * Math.cos(th), y: Math.sin(phi), z: Math.cos(phi) * Math.sin(th) }); }
+            }
+        }
+
+        function sizeCore() {
+            const wrap = document.getElementById('core-wrap');
+            const c = document.getElementById('core-canvas');
+            const w = wrap.clientWidth, h = wrap.clientHeight;
+            if (!w || !h) return false;
+            core.dpr = window.devicePixelRatio || 1;
+            core.w = w; core.h = h;
+            c.width = Math.round(w * core.dpr); c.height = Math.round(h * core.dpr);
+            // HTML overlays the labels must not collide with (header + stat block).
+            const cr = c.getBoundingClientRect();
+            core.obstacles = ['#core-wrap ~ .hero-stats', '.ov-hero .panel-head .ttl'].map(sel => {
+                const el = document.querySelector(sel);
+                if (!el) return null;
+                const r = el.getBoundingClientRect();
+                return { x: r.left - cr.left - 6, y: r.top - cr.top - 6, w: r.width + 12, h: r.height + 12 };
+            }).filter(Boolean);
+            return true;
+        }
+
+        function drawCore() {
+            const c = document.getElementById('core-canvas');
+            const ctx = c.getContext('2d');
+            const W = core.w, H = core.h;
+            if (!W || !H) return;
+            ctx.setTransform(core.dpr, 0, 0, core.dpr, 0, 0);
+            ctx.clearRect(0, 0, W, H);
+            const cx = W * 0.5, cy = H * 0.5, R = Math.min(W * (W < 600 ? 0.29 : 0.36), H * 0.37);
+            const cyw = Math.cos(core.yaw), syw = Math.sin(core.yaw), cp = Math.cos(core.pitch), sp = Math.sin(core.pitch);
+            const F = 3.4;
+            const P = (p, r = 1) => {
+                const x = p.x * cyw + p.z * syw, z0 = -p.x * syw + p.z * cyw;
+                const y = p.y * cp - z0 * sp, z = p.y * sp + z0 * cp;
+                const s = F / (F - z * r);
+                return { x: cx + x * R * r * s, y: cy + y * R * r * s, z: z, s };
+            };
+
+            // lattice (back + front, depth-shaded)
+            for (const p of core.lattice) {
+                const q = P(p);
+                const a = 0.05 + 0.22 * (q.z + 1) / 2;
+                ctx.fillStyle = `rgba(190,170,255,${a})`;
+                ctx.fillRect(q.x - 0.6, q.y - 0.6, 1.2, 1.2);
+            }
+            // core glow
+            const pulse = REDUCED_MOTION ? 1 : 0.9 + 0.1 * Math.sin(core.t * 0.035);
+            let g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 1.2);
+            g.addColorStop(0, 'rgba(255,235,245,0.95)');
+            g.addColorStop(0.04 * pulse, 'rgba(255,90,160,0.9)');
+            g.addColorStop(0.16 * pulse, 'rgba(255,46,136,0.38)');
+            g.addColorStop(0.45, 'rgba(155,92,255,0.08)');
+            g.addColorStop(1, 'rgba(155,92,255,0)');
+            ctx.fillStyle = g;
+            ctx.beginPath(); ctx.arc(cx, cy, R * 1.2, 0, Math.PI * 2); ctx.fill();
+            // orbit ring
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255,138,61,0.22)'; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.ellipse(cx, cy, R * 1.12, R * 0.3, -0.35, 0, Math.PI * 2); ctx.stroke();
+            ctx.strokeStyle = 'rgba(45,226,230,0.16)';
+            ctx.beginPath(); ctx.ellipse(cx, cy, R * 1.2, R * 0.42, 0.5, 0, Math.PI * 2); ctx.stroke();
+            ctx.restore();
+
+            // project everything once
+            const proj = [];
+            core.parts.forEach(p => { p.q = P(p); proj.push(p); });
+            core.nodes.forEach(nd => { nd.q = P(nd); proj.push(nd); });
+            core.proj = proj;
+            const hov = core.hover;
+
+            // association edges
+            for (const e of core.edges) {
+                const hot = hov && (e.a === hov || e.b === hov);
+                const depth = ((e.a.q.z + e.b.q.z) / 2 + 1) / 2;
+                const a = hot ? 0.9 : (0.04 + 0.22 * depth) * Math.max(0.3, (e.s - 0.6) / 0.4);
+                ctx.strokeStyle = hot ? 'rgba(45,226,230,0.95)' : `rgba(45,226,230,${a})`;
+                ctx.lineWidth = hot ? 1.4 : 0.7;
+                ctx.beginPath(); ctx.moveTo(e.a.q.x, e.a.q.y); ctx.lineTo(e.b.q.x, e.b.q.y); ctx.stroke();
+                if (hot) {
+                    const other = e.a === hov ? e.b : e.a;
+                    ctx.font = '600 9px ui-monospace, monospace';
+                    ctx.fillStyle = '#2de2e6';
+                    ctx.fillText(e.s.toFixed(2), (e.a.q.x + e.b.q.x) / 2 + 3, (e.a.q.y + e.b.q.y) / 2 - 3);
+                    other._hot = true;
+                }
+            }
+            // depth-sorted nodes
+            proj.sort((a, b) => a.q.z - b.q.z);
+            for (const p of proj) {
+                const depth = (p.q.z + 1) / 2;
+                const r = p.size * p.q.s;
+                const isHov = p === hov;
+                if (p.kind === 'realm') {
+                    const halo = ctx.createRadialGradient(p.q.x, p.q.y, 0, p.q.x, p.q.y, r * 3.2);
+                    halo.addColorStop(0, p.color + (isHov ? 'aa' : '55'));
+                    halo.addColorStop(1, p.color + '00');
+                    ctx.fillStyle = halo;
+                    ctx.beginPath(); ctx.arc(p.q.x, p.q.y, r * 3.2, 0, Math.PI * 2); ctx.fill();
+                    ctx.globalAlpha = 0.35 + 0.65 * depth;
+                    ctx.fillStyle = p.color;
+                    ctx.beginPath(); ctx.arc(p.q.x, p.q.y, r, 0, Math.PI * 2); ctx.fill();
+                    ctx.strokeStyle = isHov ? '#fff' : 'rgba(255,255,255,0.35)'; ctx.lineWidth = isHov ? 1.6 : 0.8;
+                    ctx.beginPath(); ctx.arc(p.q.x, p.q.y, r + 2.5, 0, Math.PI * 2); ctx.stroke();
+                    ctx.globalAlpha = 1;
+                } else {
+                    ctx.globalAlpha = (0.25 + 0.75 * depth) * (p._hot || isHov ? 1 : 0.85);
+                    ctx.fillStyle = isHov || p._hot ? '#fff' : p.color;
+                    ctx.beginPath(); ctx.arc(p.q.x, p.q.y, Math.max(0.8, r * (isHov ? 1.8 : 1)), 0, Math.PI * 2); ctx.fill();
+                    ctx.globalAlpha = 1;
+                }
+                p._hot = false;
+            }
+            // realm labels (front hemisphere, biggest first) with leader lines
+            ctx.font = '500 10px ui-monospace, "JetBrains Mono", Menlo, monospace';
+            ctx.textBaseline = 'middle';
+            const labelled = core.nodes.filter(nd => nd.q.z > -0.15 || nd === hov).slice(0, 14);
+            const placed = [...(core.obstacles || [])];
+            for (const nd of labelled) {
+                let dx = nd.q.x - cx, dy = nd.q.y - cy; const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len;
+                const r = nd.size * nd.q.s;
+                const ax = nd.q.x + dx * (r + 8), ay = nd.q.y + dy * (r + 8);
+                const lx = ax + (dx >= 0 ? 14 : -14);
+                // Fit the label between the leader line and the canvas edge;
+                // shorten with an ellipsis, drop it if there is no useful room.
+                const room = dx >= 0 ? W - 6 - (lx + 3) : (lx - 3) - 6;
+                const tail = `  ${nd.count}`;
+                let name = cleanRealm(nd.name).toUpperCase().slice(0, 24);
+                let text = name + tail;
+                while (name.length > 3 && ctx.measureText(text).width > room) { name = name.slice(0, -1); text = name.trimEnd() + '…' + tail; }
+                if (ctx.measureText(text).width > room) continue;
+                const tw = ctx.measureText(text).width;
+                const box = { x: dx >= 0 ? lx + 3 : lx - 3 - tw, y: ay - 7, w: tw, h: 14 };
+                if (nd !== hov && placed.some(b => box.x < b.x + b.w && box.x + box.w > b.x && box.y < b.y + b.h && box.y + box.h > b.y)) continue;
+                placed.push(box);
+                const alpha = nd === hov ? 1 : 0.35 + 0.6 * (nd.q.z + 1) / 2;
+                ctx.globalAlpha = alpha;
+                ctx.strokeStyle = nd.color; ctx.lineWidth = 0.8;
+                ctx.beginPath(); ctx.moveTo(nd.q.x + dx * (r + 2), nd.q.y + dy * (r + 2)); ctx.lineTo(ax, ay); ctx.lineTo(lx, ay); ctx.stroke();
+                ctx.fillStyle = nd === hov ? '#fff' : nd.color;
+                ctx.textAlign = dx >= 0 ? 'left' : 'right';
+                ctx.fillText(text, dx >= 0 ? lx + 3 : lx - 3, ay);
+                ctx.globalAlpha = 1;
+            }
+            ctx.textAlign = 'left';
+        }
+
+        function coreLoop() {
+            core.raf = null;
+            if (!document.getElementById('view-overview').classList.contains('active')) return;
+            core.t++;
+            if (!core.drag && !REDUCED_MOTION && performance.now() > core.resumeAt) core.yaw += 0.0022;
+            drawCore();
+            if (!document.hidden) core.raf = requestAnimationFrame(coreLoop);
+        }
+        function startCore() {
+            requestAnimationFrame(() => {
+                if (!sizeCore()) { setTimeout(startCore, 150); return; }
+                attachCoreEvents();
+                if (REDUCED_MOTION) { drawCore(); return; }
+                if (!core.raf) core.raf = requestAnimationFrame(coreLoop);
+            });
+        }
+        function stopCore() { if (core.raf) cancelAnimationFrame(core.raf); core.raf = null; }
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && document.getElementById('view-overview').classList.contains('active')) startCore();
+            if (!document.hidden && document.getElementById('view-graph').classList.contains('active') && gInited) startGraphLoop();
+        });
+
+        function corePick(x, y) {
+            let best = null, bd = Infinity;
+            for (const p of core.proj) {
+                if (!p.q) continue;
+                const hit = p.kind === 'realm' ? p.size * p.q.s + 6 : 7;
+                const d = Math.hypot(p.q.x - x, p.q.y - y);
+                // realms win ties so they stay clickable inside dense clusters
+                const score = d - (p.kind === 'realm' ? 3 : 0) - p.q.z * 2;
+                if (d < hit && score < bd) { bd = score; best = p; }
+            }
+            return best;
+        }
+        function attachCoreEvents() {
+            if (core.observed) return;
+            core.observed = true;
+            const c = document.getElementById('core-canvas');
+            const tip = document.getElementById('core-tip');
+            new ResizeObserver(() => { if (sizeCore()) drawCore(); }).observe(document.getElementById('core-wrap'));
+            const pos = e => { const r = c.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+            c.addEventListener('pointerdown', e => {
+                const p = pos(e);
+                core.drag = { x: p.x, y: p.y, yaw: core.yaw, pitch: core.pitch, moved: false, touch: e.pointerType === 'touch' };
+                c.classList.add('dragging');
+            });
+            window.addEventListener('pointerup', () => {
+                if (core.drag) { core.resumeAt = performance.now() + 2500; }
+                core.drag = null; c.classList.remove('dragging');
+            });
+            c.addEventListener('pointermove', e => {
+                const p = pos(e);
+                if (core.drag) {
+                    const dx = p.x - core.drag.x, dy = p.y - core.drag.y;
+                    if (Math.abs(dx) + Math.abs(dy) > 3) core.drag.moved = true;
+                    core.yaw = core.drag.yaw + dx * 0.006;
+                    if (!core.drag.touch) core.pitch = Math.max(-1.2, Math.min(1.2, core.drag.pitch + dy * 0.005));
+                    if (REDUCED_MOTION) drawCore();
+                    tip.style.display = 'none';
+                    return;
+                }
+                const hit = corePick(p.x, p.y);
+                if (hit !== core.hover) { core.hover = hit; if (REDUCED_MOTION) drawCore(); }
+                c.style.cursor = hit ? 'pointer' : 'grab';
+                if (hit) {
+                    tip.innerHTML = hit.kind === 'realm'
+                        ? `<strong style="color:${hit.color}">${escapeHtml(hit.name)}</strong><small>realm · ${fmtNum(hit.count)} memories · click to open</small>`
+                        : `<strong style="color:${hit.color}">${escapeHtml(cleanRealm(hit.m.realm_name || 'memory'))}</strong>${escapeHtml(snippet(hit.m.content, 120))}<br><small>importance ${(hit.m.importance || 0).toFixed(2)} · ${hit.links} link${hit.links === 1 ? '' : 's'} in view</small>`;
+                    tip.style.display = 'block';
+                    const tw = tip.offsetWidth;
+                    tip.style.left = Math.min(p.x + 14, core.w - tw - 8) + 'px';
+                    tip.style.top = (p.y + 14) + 'px';
+                } else tip.style.display = 'none';
+            });
+            c.addEventListener('pointerleave', () => { core.hover = null; tip.style.display = 'none'; });
+            c.addEventListener('click', e => {
+                if (core.dragMovedRecently) return;
+                const p = pos(e);
+                const hit = corePick(p.x, p.y);
+                if (!hit) return;
+                if (hit.kind === 'realm') filterByRealm(hit.name);
+                else openMemory(hit.id);
+            });
+            // suppress the click that ends a rotate-drag
+            c.addEventListener('pointerup', () => {
+                core.dragMovedRecently = !!(core.drag && core.drag.moved);
+                setTimeout(() => core.dragMovedRecently = false, 0);
+            });
         }
 
         // ─── Cards ───────────────────────────────────────────────
         function renderCards(memories) {
             const container = document.getElementById('cards-container');
-
             if (!memories || memories.length === 0) {
-                container.innerHTML = '<div class="loading">No memories found.</div>';
+                container.innerHTML = '<div class="empty">No memories found.</div>';
                 return;
             }
-
-            container.innerHTML = memories.map(m => `
-                <div class="card" onclick="showMemory('${m.id}')">
+            const showMatch = listState.kind === 'search';
+            container.innerHTML = memories.map(m => {
+                const c = realmColor(m.realm_name);
+                const scoreTxt = showMatch && typeof m.score === 'number' ? `match ${m.score.toFixed(2)}` : `${fmtNum(m.access_count || 0)} hits`;
+                return `
+                <div class="card" data-id="${escapeHtml(m.id)}" style="--rc:${c}">
                     <div class="card-header">
-                        <div class="card-heading">${escapeHtml(m.heading || m.content.substring(0, 60))}</div>
-                        <div class="card-realm">${escapeHtml(m.realm_name || 'general')}</div>
+                        <div class="card-heading">${escapeHtml(titleOf(m))}</div>
+                        <div class="card-realm">${realmChip(m.realm_name || 'general')}</div>
                     </div>
-                    <div class="card-content">${escapeHtml(m.content)}</div>
+                    <div class="card-content">${escapeHtml(String(m.content || '').slice(0, 600))}</div>
+                    <div class="card-badges">${typeChip(m.memory_type)}${verifyChip(m.verification_status)}${m.ingested_at ? `<span class="chip flat">${timeAgo(m.ingested_at)}</span>` : ''}</div>
                     <div class="card-footer">
                         <div class="card-meta">
-                            <span>↑ ${m.upvotes || 0}</span>
-                            <span>score: ${(m.score || m.importance || 0).toFixed(2)}</span>
-                            <div class="importance-bar">
-                                <div class="importance-fill" style="width: ${(m.importance || 0) * 100}%"></div>
-                            </div>
+                            <span title="importance">${(m.importance || 0).toFixed(2)}</span>
+                            <div class="importance-bar"><div class="importance-fill" style="width:${Math.min(1, m.importance || 0) * 100}%"></div></div>
+                            <span>${scoreTxt}</span>
                         </div>
                         <div class="card-actions">
-                            <button class="upvote-btn ${m.upvotes > 0 ? 'upvoted' : ''}"
-                                    onclick="event.stopPropagation(); upvote('${m.id}', this)">
-                                ▲ Upvote
-                            </button>
-                            <button class="downvote-btn ${m.downvotes > 0 ? 'downvoted' : ''}"
-                                    onclick="event.stopPropagation(); downvote('${m.id}', this)">
-                                ▼ Downvote
-                            </button>
-                            <button class="delete-btn"
-                                    onclick="event.stopPropagation(); deleteMemory('${m.id}', this)">
-                                🗑 Delete
-                            </button>
+                            <button class="act up ${m.upvotes > 0 ? 'on' : ''}" data-act="up" title="Upvote">▲${m.upvotes ? ' ' + m.upvotes : ''}</button>
+                            <button class="act down" data-act="down" title="Downvote">▼</button>
+                            <button class="act del" data-act="del" title="Delete">🗑</button>
                         </div>
                     </div>
-                </div>
-            `).join('');
+                </div>`;
+            }).join('');
         }
+        function renderList() {
+            const s = listState;
+            const mems = s.ids.map(id => memCache.get(id)).filter(Boolean);
+            const title = document.getElementById('list-title');
+            const reset = document.getElementById('list-reset');
+            const cov = document.getElementById('list-coverage');
+            cov.innerHTML = '';
+            if (s.kind === 'top') {
+                title.innerHTML = `Top memories<small>${mems.length} highest by recall score</small>`;
+                reset.style.display = 'none';
+            } else if (s.kind === 'search') {
+                title.innerHTML = `Search<small>“${escapeHtml(s.query)}” · ${mems.length} result${mems.length === 1 ? '' : 's'}</small>`;
+                reset.style.display = '';
+                if (s.coverage) {
+                    const c = s.coverage;
+                    cov.innerHTML = `<div class="coverage"><b>${escapeHtml(c.level || '')}</b> coverage${typeof c.best_score === 'number' ? ` · best ${c.best_score.toFixed(2)}` : ''} · ${fmtNum(c.results_above_min)} above threshold${c.hint ? ` · ${escapeHtml(c.hint)}` : ''}</div>`;
+                }
+            } else if (s.kind === 'realm') {
+                title.innerHTML = `<span style="color:${realmColor(s.realm)}">${escapeHtml(cleanRealm(s.realm))}</span><small>showing ${mems.length} of ${fmtNum(s.total)} · by importance</small>`;
+                reset.style.display = '';
+            }
+            if (s.loading) { document.getElementById('cards-container').innerHTML = '<div class="loading">Loading</div>'; return; }
+            renderCards(mems);
+        }
+        function resetList() {
+            document.getElementById('search-input').value = '';
+            listState = { kind: 'top', ids: allMemories.map(m => m.id) };
+            renderList();
+        }
+        // Event delegation: ids and realm names travel in escaped data-attributes,
+        // never interpolated into inline JS.
+        document.getElementById('cards-container').addEventListener('click', e => {
+            const card = e.target.closest('.card');
+            if (!card) return;
+            const id = card.dataset.id;
+            const btn = e.target.closest('[data-act]');
+            if (btn) {
+                e.stopPropagation();
+                if (btn.dataset.act === 'up') upvote(id, btn);
+                else if (btn.dataset.act === 'down') downvote(id, btn);
+                else if (btn.dataset.act === 'del') deleteMemory(id);
+                return;
+            }
+            openMemory(id);
+        });
+        document.addEventListener('click', e => {
+            const r = e.target.closest('[data-realm]');
+            if (r) { filterByRealm(r.dataset.realm); return; }
+            const m = e.target.closest('.recent-item[data-id], .ticker-item[data-id], .tl-item[data-id]');
+            if (m) openMemory(m.dataset.id);
+        });
 
-        // ─── Upvote ──────────────────────────────────────────────
+        // ─── Votes / delete ──────────────────────────────────────
+        async function refreshMemory(id) {
+            try { return remember(await api(`/memories/${id}`)); } catch { return memCache.get(id); }
+        }
         async function upvote(id, btn) {
+            if (btn) btn.disabled = true;
             try {
-                await api(`/memories/${id}/upvote`);
-                btn.classList.add('upvoted');
-                btn.textContent = '▲ Upvoted';
-
-                // Update local state
-                const mem = allMemories.find(m => m.id === id);
-                if (mem) {
-                    mem.upvotes = (mem.upvotes || 0) + 1;
-                    mem.downvotes = (mem.downvotes || 0);
-                    mem.importance = Math.min((mem.importance || 0) + 0.1, 1.0);
-                    // Reset downvote display if it was active
-                    const downBtn = btn.parentElement?.querySelector('.downvote-btn');
-                    if (downBtn) {
-                        downBtn.classList.remove('downvoted');
-                        downBtn.textContent = '▼ Downvote';
-                    }
-                }
+                await api(`/memories/${id}/upvote`, { method: 'POST' });
+                const m = await refreshMemory(id);
+                toast(`Upvoted · importance ${(m?.importance ?? 0).toFixed(2)}`);
+                renderList();
+                if (currentMemoryId === id) openMemory(id, { keepRelated: true });
             } catch (e) {
-                console.error('Upvote failed:', e);
-            }
+                toast('Upvote failed: ' + e.message, true);
+            } finally { if (btn) btn.disabled = false; }
         }
-
-        // ─── Downvote ──────────────────────────────────────────────
         async function downvote(id, btn) {
+            if (btn) btn.disabled = true;
             try {
-                await api(`/memories/${id}/downvote`);
-                btn.classList.add('downvoted');
-                btn.textContent = '▼ Downvoted';
-
-                // Update local state
-                const mem = allMemories.find(m => m.id === id);
-                if (mem) {
-                    mem.downvotes = (mem.downvotes || 0) + 1;
-                    mem.importance = Math.max((mem.importance || 0) - 0.1, 0.01);
-                    // Reset upvote display if it was active
-                    const upBtn = btn.parentElement?.querySelector('.upvote-btn');
-                    if (upBtn) {
-                        upBtn.classList.remove('upvoted');
-                        upBtn.textContent = '▲ Upvote';
-                    }
-                }
+                await api(`/memories/${id}/downvote`, { method: 'POST' });
+                const m = await refreshMemory(id);
+                toast(`Downvoted · importance ${(m?.importance ?? 0).toFixed(2)}`);
+                renderList();
+                if (currentMemoryId === id) openMemory(id, { keepRelated: true });
             } catch (e) {
-                console.error('Downvote failed:', e);
-            }
+                toast('Downvote failed: ' + e.message, true);
+            } finally { if (btn) btn.disabled = false; }
         }
-
-        // ─── Delete ──────────────────────────────────────────────
-        async function deleteMemory(id, btn) {
+        async function deleteMemory(id) {
             if (!confirm('Delete this memory? This cannot be undone.')) return;
             try {
                 await api(`/memories/${id}`, { method: 'DELETE' });
-
-                // Remove from local state and re-render
+                memCache.delete(id);
                 allMemories = allMemories.filter(m => m.id !== id);
-                renderCards(allMemories);
-
-                // Close modal if open
+                listState.ids = listState.ids.filter(x => x !== id);
+                renderList();
+                buildCore();
+                gInited && rebuildGraph();
                 closeModal();
+                toast('Memory deleted');
             } catch (e) {
-                console.error('Delete failed:', e);
-                alert('Failed to delete memory: ' + e.message);
+                toast('Failed to delete memory: ' + e.message, true);
             }
         }
 
         // ─── Search ──────────────────────────────────────────────
         async function doSearch() {
             const query = document.getElementById('search-input').value.trim();
-            if (!query) {
-                renderCards(allMemories);
-                return;
-            }
-
+            if (!query) { resetList(); return; }
+            listState = { kind: 'search', query, ids: [], loading: true };
+            showView('cards');
+            renderList();
             try {
-                const results = await api('/memories/search', {
-                    method: 'POST',
-                    headers: API_KEY ? { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ query, limit: 50 })
-                });
-
-                // Switch to cards view
-                document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-                document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-                document.querySelector('[data-view="cards"]').classList.add('active');
-                document.getElementById('view-cards').classList.add('active');
-
-                renderCards(results.results || []);
+                const results = await api('/memories/search', { method: 'POST', body: JSON.stringify({ query, limit: 50 }) });
+                const ids = (results.results || []).map(m => remember(m).id);
+                if (listState.query !== query) return;
+                listState = { kind: 'search', query, ids, coverage: results.coverage };
+                renderList();
+                fetchMany(ids).then(() => { if (listState.query === query) renderList(); }).catch(() => {});
             } catch (e) {
-                console.error('Search failed:', e);
+                document.getElementById('cards-container').innerHTML = `<div class="empty err">Search failed: ${escapeHtml(e.message)}</div>`;
             }
         }
-
-        document.getElementById('search-input').addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') doSearch();
-        });
-
-        // ─── Memory Detail ───────────────────────────────────────
-        function showMemory(id) {
-            const mem = allMemories.find(m => m.id === id);
-            if (!mem) return;
-
-            document.getElementById('modal-title').textContent = mem.heading || 'Memory';
-            document.getElementById('modal-content').textContent = mem.content;
-            document.getElementById('modal-meta').innerHTML = `
-                <strong>Realm:</strong> ${mem.realm_name || 'general'} ·
-                <strong>Importance:</strong> ${(mem.importance || 0).toFixed(2)} ·
-                <strong>Upvotes:</strong> ${mem.upvotes || 0} ·
-                <strong>Ingested:</strong> ${mem.ingested_at || '—'}
-            `;
-            document.getElementById('modal-overlay').classList.add('active');
-
-            // Wire up modal buttons
-            const deleteBtn = document.getElementById('modal-delete-btn');
-            deleteBtn.style.display = 'inline-flex';
-            deleteBtn.onclick = () => deleteMemory(id, deleteBtn);
-
-            const downBtn = document.getElementById('modal-downvote-btn');
-            downBtn.style.display = 'inline-flex';
-            downBtn.textContent = '▼ Downvote';
-            downBtn.onclick = () => {
-                downvote(id, downBtn);
-                downBtn.textContent = '▼ Downvoted';
-            };
-        }
-
-        function closeModal() {
-            document.getElementById('modal-delete-btn').style.display = 'none';
-            document.getElementById('modal-downvote-btn').style.display = 'none';
-            document.getElementById('modal-overlay').classList.remove('active');
-        }
-
-        document.getElementById('modal-overlay').addEventListener('click', (e) => {
-            if (e.target === e.currentTarget) closeModal();
+        document.getElementById('search-form').addEventListener('submit', e => { e.preventDefault(); doSearch(); });
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') { closeModal(); closeSettings(); }
+            if (e.key === '/' && !/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)) { e.preventDefault(); document.getElementById('search-input').focus(); }
         });
 
         // ─── Realms ──────────────────────────────────────────────
         function renderRealms(realms) {
             const container = document.getElementById('realms-container');
-
             if (!realms || realms.length === 0) {
-                container.innerHTML = '<div class="loading">No realms found.</div>';
+                container.innerHTML = '<div class="empty">No realms found.</div>';
                 return;
             }
-
-            const colors = ['#6366f1', '#22c55e', '#eab308', '#ef4444', '#3b82f6', '#f97316', '#a855f7', '#06b6d4'];
-
-            container.innerHTML = realms.map((r, i) => `
-                <div class="realm-card" onclick="filterByRealm('${r.name || r.id}')">
-                    <h3 style="border-left: 3px solid ${colors[i % colors.length]}; padding-left: 0.5rem;">
-                        ${escapeHtml(r.name || 'Unnamed')}
-                    </h3>
-                    ${r.description ? `<p>${escapeHtml(r.description)}</p>` : ''}
-                    <div class="realm-count">${r.memory_count || 0} memories</div>
+            const sorted = [...realms].sort((a, b) => (b.memory_count || 0) - (a.memory_count || 0));
+            const max = sorted[0].memory_count || 1;
+            const total = realms.reduce((a, r) => a + (r.memory_count || 0), 0);
+            document.getElementById('realms-sub').textContent = `${realms.length} realms · ${fmtNum(total)} memories · formed and merged during slumber`;
+            container.innerHTML = sorted.map(r => `
+                <div class="realm-card" data-realm="${escapeHtml(r.name || '')}" style="--rc:${realmColor(r.name)}">
+                    <h3>${escapeHtml(cleanRealm(r.name || 'Unnamed'))}</h3>
+                    ${r.description ? `<p>${escapeHtml(r.description)}</p>` : (cleanRealm(r.name) !== r.name ? `<p>${escapeHtml(r.name)}</p>` : '')}
+                    <div class="big-num">${fmtNum(r.memory_count || 0)}<small>memories${r.is_user_pinned ? ' · pinned' : ''}</small></div>
+                    <div class="track"><i style="width:${(r.memory_count || 0) / max * 100}%;background:var(--rc)"></i></div>
                 </div>
             `).join('');
         }
 
-        function filterByRealm(realmName) {
-            const filtered = allMemories.filter(m => m.realm_name === realmName);
-            renderCards(filtered);
-
-            // Switch to cards view
-            document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-            document.querySelector('[data-view="cards"]').classList.add('active');
-            document.getElementById('view-cards').classList.add('active');
+        async function filterByRealm(realmName) {
+            if (!realmName) return;
+            listState = { kind: 'realm', realm: realmName, ids: [], total: 0, loading: true };
+            showView('cards');
+            renderList();
+            try {
+                const res = await api(`/memories?realm=${encodeURIComponent(realmName)}&sort=importance&limit=100`);
+                if (listState.realm !== realmName) return;
+                const ids = (res.memories || []).map(m => remember(m).id);
+                listState = { kind: 'realm', realm: realmName, ids, total: res.total ?? ids.length };
+                renderList();
+            } catch (e) {
+                document.getElementById('cards-container').innerHTML = `<div class="empty err">Could not load realm: ${escapeHtml(e.message)}</div>`;
+            }
         }
 
-        // ─── Graph View (Obsidian-style force-directed) ─────────────
-        // State
+        // ─── Graph View (force-directed) ─────────────────────────
         let gNodes = [];           // { id, label, type: 'memory'|'realm', x, y, vx, vy, radius, color, data }
-        let gEdges = [];           // { source, target, strength }
+        let gEdges = [];           // { source, target, strength, kind: 'realm'|'assoc', a, b }
+        let gById = new Map();
         let gTransform = { x: 0, y: 0, scale: 1 };
-        let gDrag = null;          // currently dragged node
-        let gDragOffset = { x: 0, y: 0 }; // offset from node center at drag start
-        let gWasDragged = false;   // true if mouse moved while dragging (prevents click)
+        let gDrag = null;
+        let gWasDragged = false;
         let gHovered = null;
         let gSelected = null;
         let gPanning = false;
@@ -945,110 +1498,47 @@
         let gAnimFrame = null;
         let gShowLabels = true;
         let gFilter = 'all';
-        let gDpr = window.devicePixelRatio || 1;
+        let gW = 0, gH = 0, gDpr = window.devicePixelRatio || 1;
+        let gInited = false;
 
-        const REALM_COLORS = ['#6366f1', '#22c55e', '#eab308', '#ef4444', '#3b82f6', '#f97316', '#a855f7', '#06b6d4'];
-
-        function getRealmColor(realmId, realms) {
-            const idx = realms.findIndex(r => r.id === realmId);
-            return REALM_COLORS[(idx >= 0 ? idx : 0) % REALM_COLORS.length];
-        }
-
-        // Lighten a hex color by a percentage (0-100)
-        function lightenColor(hex, amount) {
-            const num = parseInt(hex.replace('#', ''), 16);
-            const r = Math.min(255, (num >> 16) + amount);
-            const g = Math.min(255, ((num >> 8) & 0x00FF) + amount);
-            const b = Math.min(255, (num & 0x0000FF) + amount);
-            return `rgb(${r},${g},${b})`;
-        }
-
-        // Build graph data from memories + realms
         function buildGraphData(memories, realms) {
-            const realmById = {};
-            const realmByName = {};
-            realms.forEach((r, i) => {
-                realmById[r.id] = r;
-                realmByName[r.name] = r;
-            });
-
             gNodes = [];
             gEdges = [];
-
-            // Realm nodes (bigger, center)
-            realms.forEach((r, i) => {
-                const color = REALM_COLORS[i % REALM_COLORS.length];
-                gNodes.push({
-                    id: r.id,
-                    label: r.name || 'Unnamed',
-                    type: 'realm',
-                    x: (Math.random() - 0.5) * 400,
-                    y: (Math.random() - 0.5) * 400,
-                    vx: 0, vy: 0,
-                    radius: 8 + Math.min((r.memory_count || 0) * 0.6, 14),
-                    color,
-                    data: r
-                });
+            realms.forEach(r => {
+                gNodes.push({ id: r.id, label: cleanRealm(r.name), type: 'realm',
+                    x: (Math.random() - 0.5) * 400, y: (Math.random() - 0.5) * 400, vx: 0, vy: 0,
+                    radius: 8 + Math.min((r.memory_count || 0) * 0.04, 14), color: realmColor(r.name), data: r });
             });
-
-            // Memory nodes (smaller, orbit their realm)
-            memories.forEach((m) => {
-                // Memories have realm_name (string like "realm-28da6a75"), realms have name
-                const realmNode = gNodes.find(n => n.label === m.realm_name);
-                const color = realmNode ? realmNode.color : '#555';
-
-                const spread = realmNode ? 100 : 200;
+            const realmByName = new Map(gNodes.map(n => [n.data.name, n]));
+            memories.forEach(m => {
+                const realmNode = realmByName.get(m.realm_name);
                 const angle = Math.random() * Math.PI * 2;
-                const dist = 60 + Math.random() * spread;
-
-                gNodes.push({
-                    id: m.id,
-                    label: (m.content || '').substring(0, 40).replace(/\n/g, ' '),
-                    type: 'memory',
+                const dist = 60 + Math.random() * (realmNode ? 100 : 200);
+                gNodes.push({ id: m.id, label: snippet(m.content, 40), type: 'memory',
                     x: (realmNode ? realmNode.x : 0) + Math.cos(angle) * dist,
                     y: (realmNode ? realmNode.y : 0) + Math.sin(angle) * dist,
-                    vx: 0, vy: 0,
-                    radius: 3 + (m.importance || 0.5) * 4,
-                    color,
-                    data: m
-                });
-
-                // Connect memory to its realm
-                if (realmNode) {
-                    gEdges.push({ source: m.id, target: realmNode.id, strength: 1 });
-                }
+                    vx: 0, vy: 0, radius: 3 + (m.importance || 0.5) * 4, color: realmNode ? realmNode.color : '#8f88aa', data: m });
+                if (realmNode) gEdges.push({ source: m.id, target: realmNode.id, strength: 1, kind: 'realm' });
             });
-
-            // Memory-to-memory edges from Phase 9 associations
-            // Each memory has related_memory_ids and association_strengths arrays (same order)
+            // Memory↔memory edges from slumber associations (embedding nearest neighbours).
             const memoryIds = new Set(memories.map(m => m.id));
-            let associationEdgeCount = 0;
-            memories.forEach((m) => {
-                const related = m.related_memory_ids || [];
-                const strengths = m.association_strengths || [];
-                related.forEach((targetId, idx) => {
-                    // Only create edge if target memory is actually loaded
-                    if (memoryIds.has(targetId)) {
-                        const strength = strengths[idx] || 0.5;
-                        // Only add if source < target to avoid duplicate edges
-                        if (m.id < targetId) {
-                            gEdges.push({ source: m.id, target: targetId, strength: strength });
-                            associationEdgeCount++;
-                        }
-                    }
-                });
-            });
-            console.log(`Graph: ${gNodes.length} nodes, ${gEdges.length} edges (${associationEdgeCount} associations)`);
+            const seen = new Set();
+            memories.forEach(m => (m.related_memory_ids || []).forEach((t, k) => {
+                if (!memoryIds.has(t) || t === m.id) return;
+                const key = m.id < t ? `${m.id}|${t}` : `${t}|${m.id}`;
+                if (seen.has(key)) return;
+                seen.add(key);
+                gEdges.push({ source: m.id, target: t, strength: (m.association_strengths || [])[k] ?? 0.5, kind: 'assoc' });
+            }));
+            gById = new Map(gNodes.map(n => [n.id, n]));
+            gEdges.forEach(e => { e.a = gById.get(e.source); e.b = gById.get(e.target); });
+            gEdges = gEdges.filter(e => e.a && e.b);
         }
 
-        // Physics: run N steps of force simulation (Obsidian-style gentle forces)
         function simulateGraph(steps = 80) {
             const nodes = gNodes;
-
             for (let s = 0; s < steps; s++) {
                 const progress = s / steps;
-
-                // Repulsion between all pairs (gentle, Obsidian-style)
                 for (let i = 0; i < nodes.length; i++) {
                     for (let j = i + 1; j < nodes.length; j++) {
                         const a = nodes[i], b = nodes[j];
@@ -1058,528 +1548,492 @@
                         const minD = a.radius + b.radius + 30;
                         if (dist < minD * 3) {
                             const force = 500 / dist2;
-                            const fx = dx / dist * force;
-                            const fy = dy / dist * force;
-                            a.vx -= fx; a.vy -= fy;
-                            b.vx += fx; b.vy += fy;
+                            const fx = dx / dist * force, fy = dy / dist * force;
+                            a.vx -= fx; a.vy -= fy; b.vx += fx; b.vy += fy;
                         }
                     }
                 }
-
-                // Attraction along edges (spring force)
-                gEdges.forEach(e => {
-                    const a = nodes.find(n => n.id === e.source);
-                    const b = nodes.find(n => n.id === e.target);
-                    if (!a || !b) return;
+                for (const e of gEdges) {
+                    const a = e.a, b = e.b;
                     const dx = b.x - a.x, dy = b.y - a.y;
                     const dist = Math.sqrt(dx * dx + dy * dy) + 0.01;
-                    const ideal = a.type === 'realm' || b.type === 'realm' ? 100 : 50;
+                    const ideal = e.kind === 'realm' ? 100 : 50;
                     const force = (dist - ideal) * 0.02 * (e.strength || 0.5);
-                    const fx = dx / dist * force;
-                    const fy = dy / dist * force;
-                    a.vx += fx; a.vy += fy;
-                    b.vx -= fx; b.vy -= fy;
-                });
-
-                // Gentle centering gravity (keeps graph centered)
-                nodes.forEach(n => {
-                    n.vx -= n.x * 0.001;
-                    n.vy -= n.y * 0.001;
-                });
-
-                // Progressive damping - more damping as we settle
+                    const fx = dx / dist * force, fy = dy / dist * force;
+                    a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+                }
+                for (const n of nodes) { n.vx -= n.x * 0.001; n.vy -= n.y * 0.001; }
                 const damp = 0.85 + progress * 0.12;
-                nodes.forEach(n => {
-                    // Don't damp dragged nodes
-                    if (n !== gDrag) {
-                        n.vx *= damp;
-                        n.vy *= damp;
-                        n.x += n.vx;
-                        n.y += n.vy;
-                    }
-                });
+                for (const n of nodes) {
+                    if (n !== gDrag) { n.vx *= damp; n.vy *= damp; n.x += n.vx; n.y += n.vy; }
+                }
             }
         }
 
-        // Canvas coordinate transforms
-        function screenToGraph(sx, sy) {
-            return {
-                x: (sx - gTransform.x) / gTransform.scale,
-                y: (sy - gTransform.y) / gTransform.scale
-            };
-        }
-
-        function graphToScreen(gx, gy) {
-            return {
-                x: gx * gTransform.scale + gTransform.x,
-                y: gy * gTransform.scale + gTransform.y
-            };
-        }
-
-        // Hit-test: find node under screen point
+        function screenToGraph(sx, sy) { return { x: (sx - gTransform.x) / gTransform.scale, y: (sy - gTransform.y) / gTransform.scale }; }
+        function graphToScreen(gx, gy) { return { x: gx * gTransform.scale + gTransform.x, y: gy * gTransform.scale + gTransform.y }; }
         function nodeAt(sx, sy) {
             const g = screenToGraph(sx, sy);
-            // Reverse so top-rendered nodes are picked first
             for (let i = gNodes.length - 1; i >= 0; i--) {
                 const n = gNodes[i];
+                if (gFilter === 'realms' && n.type === 'memory') continue;
                 const dx = n.x - g.x, dy = n.y - g.y;
-                if (dx * dx + dy * dy < n.radius * n.radius) return n;
+                const r = n.radius + 3 / gTransform.scale;
+                if (dx * dx + dy * dy < r * r) return n;
             }
             return null;
         }
 
-        // Draw the graph
         function drawGraph() {
             const canvas = document.getElementById('graph-canvas');
             const ctx = canvas.getContext('2d');
-            const W = canvas.width, H = canvas.height;
-            const s = gTransform.scale;
-            const tx = gTransform.x, ty = gTransform.y;
-
+            // Work in CSS pixels: the DPR scale lives in the transform, so layout
+            // maths (fit, hit-tests) never mixes device and CSS pixels.
+            ctx.setTransform(gDpr, 0, 0, gDpr, 0, 0);
+            const W = gW, H = gH, s = gTransform.scale, tx = gTransform.x, ty = gTransform.y;
             ctx.clearRect(0, 0, W, H);
 
-            // Background
-            ctx.fillStyle = '#0f0f0f';
-            ctx.fillRect(0, 0, W, H);
-
-            // Subtle grid dots
             const gridSpacing = 40 * s;
             if (s > 0.3) {
                 const offsetX = (tx % gridSpacing + gridSpacing) % gridSpacing;
                 const offsetY = (ty % gridSpacing + gridSpacing) % gridSpacing;
-                ctx.fillStyle = 'rgba(255,255,255,0.04)';
-                for (let x = offsetX; x < W; x += gridSpacing) {
-                    for (let y = offsetY; y < H; y += gridSpacing) {
-                        ctx.beginPath();
-                        ctx.arc(x, y, 1, 0, Math.PI * 2);
-                        ctx.fill();
-                    }
+                ctx.fillStyle = 'rgba(190,170,255,0.07)';
+                for (let x = offsetX; x < W; x += gridSpacing)
+                    for (let y = offsetY; y < H; y += gridSpacing) ctx.fillRect(x - 0.6, y - 0.6, 1.2, 1.2);
+            }
+            const sx = gx => gx * s + tx, sy = gy => gy * s + ty;
+            const focus = gHovered || gSelected;
+
+            for (const e of gEdges) {
+                if (gFilter === 'realms') break;
+                const hot = focus && (e.a === focus || e.b === focus);
+                const assoc = e.kind === 'assoc';
+                let stroke, width;
+                if (hot) { stroke = assoc ? 'rgba(45,226,230,0.95)' : 'rgba(255,255,255,0.45)'; width = assoc ? 1.6 : 1; }
+                else if (assoc) { stroke = `rgba(45,226,230,${(0.08 + 0.3 * Math.max(0, (e.strength - 0.6) / 0.4)) * (focus ? 0.35 : 1)})`; width = 0.7; }
+                else { stroke = `rgba(170,150,255,${focus ? 0.05 : 0.1})`; width = 0.6; }
+                ctx.beginPath(); ctx.moveTo(sx(e.a.x), sy(e.a.y)); ctx.lineTo(sx(e.b.x), sy(e.b.y));
+                ctx.strokeStyle = stroke; ctx.lineWidth = width; ctx.stroke();
+                if (hot && assoc) {
+                    const mx = (sx(e.a.x) + sx(e.b.x)) / 2, my = (sy(e.a.y) + sy(e.b.y)) / 2;
+                    const label = e.strength.toFixed(2);
+                    ctx.font = '600 10px ui-monospace, monospace';
+                    const tw = ctx.measureText(label).width;
+                    ctx.fillStyle = 'rgba(7,6,13,0.9)'; ctx.fillRect(mx - tw / 2 - 3, my - 7, tw + 6, 14);
+                    ctx.fillStyle = '#2de2e6'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, mx, my);
                 }
             }
+            const neighbours = new Set();
+            if (focus) gEdges.forEach(e => { if (e.a === focus) neighbours.add(e.b); else if (e.b === focus) neighbours.add(e.a); });
 
-            // Transform helper
-            const sx = (gx) => gx * s + tx;
-            const sy = (gy) => gy * s + ty;
-
-            // Draw edges - thin, subtle like Obsidian
-            gEdges.forEach(e => {
-                if (gFilter === 'realms') return;
-                const a = gNodes.find(n => n.id === e.source);
-                const b = gNodes.find(n => n.id === e.target);
-                if (!a || !b) return;
-                if (a.type === 'memory' && b.type === 'memory' && gFilter === 'all') {
-                    if (a.data && a.data.hidden) return;
-                    if (b.data && b.data.hidden) return;
-                }
-
-                const ax = sx(a.x), ay = sy(a.y);
-                const bx = sx(b.x), by = sy(b.y);
-
-                // Obsidian-style: very thin, subtle edges
-                const isRealmEdge = a.type === 'realm' || b.type === 'realm';
-                const alpha = isRealmEdge ? 0.12 : 0.06;
-                const width = isRealmEdge ? 0.8 : 0.4;
-
-                ctx.beginPath();
-                ctx.moveTo(ax, ay);
-                ctx.lineTo(bx, by);
-                ctx.strokeStyle = `rgba(160,160,160,${alpha})`;
-                ctx.lineWidth = width;
-                ctx.stroke();
-            });
-
-            // Draw nodes - soft, glowy like Obsidian
-            gNodes.forEach(n => {
-                if (n.type === 'realm' && gFilter === 'realms') {
-                    // Only realms visible
-                } else if (n.type === 'memory' && gFilter === 'realms') return;
-
-                const ns = n.radius * s;
-                const nxs = sx(n.x), nys = sy(n.y);
-                const isHovered = n === gHovered;
-                const isSelected = n === gSelected;
-
-                // Outer glow for hovered/selected nodes (Obsidian-style halo)
-                if (isHovered || isSelected) {
-                    const glowRadius = ns * 3;
-                    const gradient = ctx.createRadialGradient(nxs, nys, ns * 0.5, nxs, nys, glowRadius);
-                    gradient.addColorStop(0, n.color + '33');
+            for (const n of gNodes) {
+                if (n.type === 'memory' && gFilter === 'realms') continue;
+                const ns = n.radius * s, x = sx(n.x), y = sy(n.y);
+                const isHovered = n === gHovered, isSelected = n === gSelected;
+                const dimmed = focus && n !== focus && !neighbours.has(n);
+                if (isHovered || isSelected || n.type === 'realm') {
+                    const glowRadius = ns * (n.type === 'realm' ? 3 : 3.5);
+                    const gradient = ctx.createRadialGradient(x, y, ns * 0.4, x, y, glowRadius);
+                    gradient.addColorStop(0, n.color + (isHovered || isSelected ? '66' : '33'));
                     gradient.addColorStop(1, n.color + '00');
-                    ctx.beginPath();
-                    ctx.arc(nxs, nys, glowRadius, 0, Math.PI * 2);
-                    ctx.fillStyle = gradient;
-                    ctx.fill();
+                    ctx.beginPath(); ctx.arc(x, y, glowRadius, 0, Math.PI * 2); ctx.fillStyle = gradient; ctx.fill();
                 }
-
-                // Node circle with subtle gradient (Obsidian-style soft nodes)
-                const nodeGrad = ctx.createRadialGradient(nxs - ns * 0.3, nys - ns * 0.3, 0, nxs, nys, ns);
-                const baseAlpha = n.type === 'realm' ? 0.95 : 0.8;
-                nodeGrad.addColorStop(0, lightenColor(n.color, isHovered ? 40 : 15));
-                nodeGrad.addColorStop(1, n.color);
-
-                ctx.beginPath();
-                ctx.arc(nxs, nys, ns, 0, Math.PI * 2);
-                ctx.fillStyle = nodeGrad;
-                ctx.globalAlpha = baseAlpha;
-                ctx.fill();
-                ctx.globalAlpha = 1;
-
-                // Subtle border for realm nodes
+                ctx.globalAlpha = dimmed ? 0.25 : (n.type === 'realm' ? 1 : 0.9);
+                ctx.beginPath(); ctx.arc(x, y, ns, 0, Math.PI * 2);
+                ctx.fillStyle = isHovered ? '#fff' : n.color; ctx.fill();
                 if (n.type === 'realm') {
-                    ctx.strokeStyle = isSelected ? '#fff' : 'rgba(255,255,255,0.15)';
+                    ctx.strokeStyle = isSelected ? '#fff' : 'rgba(255,255,255,0.3)';
                     ctx.lineWidth = isSelected ? 2 : 1;
-                    ctx.stroke();
+                    ctx.beginPath(); ctx.arc(x, y, ns + 3, 0, Math.PI * 2); ctx.stroke();
                 }
-
-                // Label - show on hover for memories, always for realms
-                const showLabel = gShowLabels || n.type === 'realm' || isHovered || isSelected;
+                ctx.globalAlpha = 1;
+                // Memory labels only once zoomed in enough to read them; realms always.
+                const showLabel = (gShowLabels && !dimmed && (n.type === 'realm' || s >= 0.8)) || n.type === 'realm' || isHovered || isSelected || (focus && neighbours.has(n));
                 if (showLabel) {
-                    const labelSize = n.type === 'realm'
-                        ? Math.max(11, 12 * s)
-                        : Math.max(9, 10 * s);
-                    ctx.font = `${n.type === 'realm' ? '600' : '400'} ${labelSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'top';
-                    const labelY = nys + ns + 4;
-
-                    // Subtle text shadow
-                    ctx.fillStyle = 'rgba(0,0,0,0.85)';
-                    ctx.fillText(n.label, nxs + 1, labelY + 1);
-
-                    const textColor = isSelected ? '#fff'
-                        : isHovered ? '#fff'
-                        : n.type === 'realm' ? n.color : 'rgba(200,200,200,0.8)';
-                    ctx.fillStyle = textColor;
-                    ctx.fillText(n.label, nxs, labelY);
+                    const labelSize = n.type === 'realm' ? Math.max(10, 11 * s) : Math.max(9, 10 * s);
+                    ctx.font = `${n.type === 'realm' ? '600' : '400'} ${labelSize}px ui-monospace, "JetBrains Mono", Menlo, monospace`;
+                    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+                    const labelY = y + ns + 4;
+                    ctx.fillStyle = 'rgba(0,0,0,0.85)'; ctx.fillText(n.label, x + 1, labelY + 1);
+                    ctx.globalAlpha = dimmed ? 0.3 : 1;
+                    ctx.fillStyle = isSelected || isHovered ? '#fff' : n.type === 'realm' ? n.color : 'rgba(220,214,240,0.75)';
+                    ctx.fillText(n.label, x, labelY);
+                    ctx.globalAlpha = 1;
                 }
-            });
+            }
         }
 
-        // Animate the graph to settle
-        function settleGraph() {
-            if (gAnimFrame) cancelAnimationFrame(gAnimFrame);
-
+        function startGraphLoop() {
+            if (gAnimFrame) return;
+            let ticks = 0;
             function step() {
-                simulateGraph(3);
+                gAnimFrame = null;
+                if (!document.getElementById('view-graph').classList.contains('active') || document.hidden) return;
+                // Simulate while settling or while the user is dragging, then idle.
+                if (ticks < 600 || gDrag) simulateGraph(2);
+                ticks++;
                 drawGraph();
                 gAnimFrame = requestAnimationFrame(step);
             }
-            step();
+            gAnimFrame = requestAnimationFrame(step);
         }
+        function stopGraphLoop() { if (gAnimFrame) cancelAnimationFrame(gAnimFrame); gAnimFrame = null; }
 
-        // Center + fit the graph
         function resetGraphView() {
-            const canvas = document.getElementById('graph-canvas');
-            if (!canvas || gNodes.length === 0) return;
-
+            if (!gW || gNodes.length === 0) return;
             let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
             gNodes.forEach(n => {
-                minX = Math.min(minX, n.x - n.radius);
-                maxX = Math.max(maxX, n.x + n.radius);
-                minY = Math.min(minY, n.y - n.radius);
-                maxY = Math.max(maxY, n.y + n.radius);
+                minX = Math.min(minX, n.x - n.radius); maxX = Math.max(maxX, n.x + n.radius);
+                minY = Math.min(minY, n.y - n.radius); maxY = Math.max(maxY, n.y + n.radius);
             });
-
-            const W = canvas.width, H = canvas.height;
-            const pad = 80;
-            const scaleX = (W - pad * 2) / (maxX - minX + 1);
-            const scaleY = (H - pad * 2) / (maxY - minY + 1);
-            gTransform.scale = Math.min(scaleX, scaleY, 1.5);
-            gTransform.x = (W - (maxX + minX) * gTransform.scale) / 2;
-            gTransform.y = (H - (maxY + minY) * gTransform.scale) / 2;
+            const pad = 60;
+            const scaleX = (gW - pad * 2) / (maxX - minX + 1);
+            const scaleY = (gH - pad * 2) / (maxY - minY + 1);
+            gTransform.scale = Math.max(0.1, Math.min(scaleX, scaleY, 1.5));
+            gTransform.x = (gW - (maxX + minX) * gTransform.scale) / 2;
+            gTransform.y = (gH - (maxY + minY) * gTransform.scale) / 2;
             drawGraph();
         }
-
         function toggleGraphLabels() {
             gShowLabels = !gShowLabels;
-            const btn = document.getElementById('graph-labels-btn');
-            btn.classList.toggle('active', gShowLabels);
+            document.getElementById('graph-labels-btn').classList.toggle('active', gShowLabels);
             drawGraph();
         }
-
+        function toggleGraphLegend(force) {
+            const legend = document.getElementById('graph-legend');
+            const show = typeof force === 'boolean' ? force : legend.hidden;
+            legend.hidden = !show;
+            document.getElementById('graph-legend-btn').classList.toggle('active', show);
+        }
+        // Legend starts open on wide screens, collapsed on phones.
+        toggleGraphLegend(!window.matchMedia('(max-width: 760px)').matches);
         function setGraphFilter(f) {
             gFilter = f;
-            document.querySelectorAll('.graph-btn[data-filter]').forEach(b => {
-                b.classList.toggle('active', b.dataset.filter === f);
-            });
+            document.querySelectorAll('.graph-btn[data-filter]').forEach(b => b.classList.toggle('active', b.dataset.filter === f));
             drawGraph();
         }
+        function rebuildGraph() {
+            buildGraphData(allMemories, allRealms);
+            simulateGraph(200);
+            resetGraphView();
+            buildLegend();
+        }
 
-        // Initialize the graph canvas.
-        // Returns false (and bails) if the container has no width yet — on mobile,
-        // the view starts hidden (display:none) so clientWidth is 0 until layout
-        // settles after the tab-switch. The caller is responsible for retrying.
+        // Initialize the graph canvas. Returns false (and bails) if the container
+        // has no size yet — on mobile the view starts hidden (display:none) so
+        // clientWidth is 0 until layout settles. The caller retries.
         function initGraph() {
-            if (gAnimFrame) return true; // already running — treat as success
-
             const canvas = document.getElementById('graph-canvas');
             const container = document.getElementById('graph-container');
+            if (container.clientWidth === 0 || container.clientHeight === 0) return false;
 
-            // Bail if the container has not been laid out yet. Caller retries.
-            if (container.clientWidth === 0 || container.clientHeight === 0) {
-                return false;
-            }
-
-            // Size canvas to container.
-            // Guard against zero-width (parent is display:none / not yet laid out)
-            // — on mobile the Graph view starts hidden, so the first measurement
-            // can legitimately be 0×0 until the tab is switched. Math.max(1, ...)
-            // prevents the canvas from collapsing to nothing in that window.
             function resize() {
-                const dpr = window.devicePixelRatio || 1;
-                const w = Math.max(1, container.clientWidth);
-                const h = Math.max(1, container.clientHeight);
-                canvas.width = w * dpr;
-                canvas.height = h * dpr;
-                canvas.style.width = w + 'px';
-                canvas.style.height = h + 'px';
-                const ctx = canvas.getContext('2d');
-                ctx.scale(dpr, dpr);
-                gDpr = dpr;
+                gDpr = window.devicePixelRatio || 1;
+                gW = Math.max(1, container.clientWidth);
+                gH = Math.max(1, container.clientHeight);
+                canvas.width = Math.round(gW * gDpr);
+                canvas.height = Math.round(gH * gDpr);
                 if (gNodes.length > 0) drawGraph();
             }
 
-            resize();
-            new ResizeObserver(resize).observe(container);
-
-            // Build + simulate (initial layout)
-            buildGraphData(allMemories, allRealms);
-            simulateGraph(200); // more initial steps for better layout
-            resetGraphView();
-
-            // Start continuous simulation (like Obsidian - never fully stops)
-            settleGraph();
-
+            if (!gInited) {
+                gInited = true;
+                resize();
+                new ResizeObserver(resize).observe(container);
+                attachGraphEvents(canvas);
+                rebuildGraph();
+            } else {
+                resize();
+            }
+            startGraphLoop();
             return true;
+        }
 
-            // ─── Mouse interactions ────────────────────────────────
+        function attachGraphEvents(canvas) {
+            const tip = document.getElementById('graph-tooltip');
+            const rel = e => { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+            function showTip(hit, p) {
+                if (!hit) { tip.style.display = 'none'; return; }
+                if (hit.type === 'realm') {
+                    tip.innerHTML = `<strong style="color:${hit.color}">${escapeHtml(hit.data.name)}</strong><small>realm · ${fmtNum(hit.data.memory_count || 0)} memories · click to open</small>`;
+                } else {
+                    const links = gEdges.filter(e => e.kind === 'assoc' && (e.a === hit || e.b === hit));
+                    const best = links.reduce((m, e) => Math.max(m, e.strength), 0);
+                    tip.innerHTML = `<strong style="color:${hit.color}">${escapeHtml(cleanRealm(hit.data.realm_name || 'memory'))}</strong>${escapeHtml(snippet(hit.data.content, 120))}<br><small>importance ${(hit.data.importance || 0).toFixed(2)} · ${links.length} association${links.length === 1 ? '' : 's'}${links.length ? ` · strongest ${best.toFixed(2)}` : ''}</small>`;
+                }
+                tip.style.display = 'block';
+                tip.style.left = Math.min(p.x + 14, gW - tip.offsetWidth - 8) + 'px';
+                tip.style.top = (p.y + 14) + 'px';
+            }
 
             canvas.addEventListener('mousedown', e => {
-                const rect = canvas.getBoundingClientRect();
-                const sx = e.clientX - rect.left;
-                const sy = e.clientY - rect.top;
-                const hit = nodeAt(sx, sy);
-                if (hit) {
-                    gDrag = hit;
-                    gSelected = hit;
-                    gDragOffset = { x: sx, y: sy };
-                    canvas.style.cursor = 'grabbing';
-                } else {
-                    gPanning = true;
-                    gPanStart = { x: e.clientX - gTransform.x, y: e.clientY - gTransform.y };
-                    canvas.style.cursor = 'grabbing';
-                }
+                const p = rel(e);
+                const hit = nodeAt(p.x, p.y);
+                gWasDragged = false;
+                if (hit) { gDrag = hit; gSelected = hit; }
+                else { gPanning = true; gPanStart = { x: e.clientX - gTransform.x, y: e.clientY - gTransform.y }; gSelected = null; }
+                canvas.style.cursor = 'grabbing';
                 drawGraph();
             });
-
             canvas.addEventListener('mousemove', e => {
-                const rect = canvas.getBoundingClientRect();
-                const sx = e.clientX - rect.left;
-                const sy = e.clientY - rect.top;
-
+                const p = rel(e);
                 if (gDrag) {
-                    // Move the dragged node in graph coordinates
-                    const pos = screenToGraph(sx, sy);
-                    gDrag.x = pos.x;
-                    gDrag.y = pos.y;
-                    gDrag.vx = 0;
-                    gDrag.vy = 0;
-                    gWasDragged = true;
-                    drawGraph();
+                    const pos = screenToGraph(p.x, p.y);
+                    gDrag.x = pos.x; gDrag.y = pos.y; gDrag.vx = 0; gDrag.vy = 0;
+                    gWasDragged = true; tip.style.display = 'none';
+                    startGraphLoop(); drawGraph();
                     return;
                 }
-
                 if (gPanning) {
-                    gTransform.x = e.clientX - gPanStart.x;
-                    gTransform.y = e.clientY - gPanStart.y;
-                    drawGraph();
+                    gTransform.x = e.clientX - gPanStart.x; gTransform.y = e.clientY - gPanStart.y;
+                    gWasDragged = true; drawGraph();
                     return;
                 }
-
-                // Hover detection
-                const hit = nodeAt(sx, sy);
-                if (hit !== gHovered) {
-                    gHovered = hit;
-                    canvas.style.cursor = hit ? 'pointer' : 'grab';
-                    drawGraph();
-
-                    // Tooltip
-                    const tip = document.getElementById('graph-tooltip');
-                    if (hit) {
-                        const imp = hit.data ? (hit.data.importance || 0) : 0;
-                        tip.innerHTML = `<strong>${escapeHtml(hit.label)}</strong>
-                            <small>${hit.type === 'realm' ? 'Realm · ' + (hit.data.memory_count || 0) + ' memories' : 'Memory · importance ' + imp.toFixed(2)}</small>`;
-                        tip.style.display = 'block';
-                        tip.style.left = (e.clientX - rect.left + 12) + 'px';
-                        tip.style.top = (e.clientY - rect.top - 10) + 'px';
-                    } else {
-                        tip.style.display = 'none';
-                    }
-                } else if (hit) {
-                    const tip = document.getElementById('graph-tooltip');
-                    tip.style.left = (e.clientX - rect.left + 12) + 'px';
-                    tip.style.top = (e.clientY - rect.top - 10) + 'px';
-                }
+                const hit = nodeAt(p.x, p.y);
+                if (hit !== gHovered) { gHovered = hit; canvas.style.cursor = hit ? 'pointer' : 'grab'; drawGraph(); }
+                showTip(hit, p);
             });
+            window.addEventListener('mouseup', () => { gDrag = null; gPanning = false; canvas.style.cursor = 'grab'; });
+            canvas.addEventListener('mouseleave', () => { gHovered = null; tip.style.display = 'none'; drawGraph(); });
 
-            canvas.addEventListener('mouseup', () => {
-                gDrag = null;
-                gPanning = false;
-                gWasDragged = false;
-                canvas.style.cursor = 'grab';
-            });
-
-            canvas.addEventListener('mouseleave', () => {
-                gHovered = null;
-                gDrag = null;
-                gPanning = false;
-                gWasDragged = false;
-                document.getElementById('graph-tooltip').style.display = 'none';
-                drawGraph();
-            });
-
-            // ─── Touch interactions (mobile) ──────────────────────
+            // Touch: one finger drags a node or pans; two fingers pinch-zoom.
+            let pinch = null;
             canvas.addEventListener('touchstart', e => {
                 e.preventDefault();
-                const touch = e.touches[0];
-                const rect = canvas.getBoundingClientRect();
-                const sx = touch.clientX - rect.left;
-                const sy = touch.clientY - rect.top;
-                const hit = nodeAt(sx, sy);
-                if (hit) {
-                    gDrag = hit;
-                    gSelected = hit;
-                    gDragOffset = { x: sx, y: sy };
-                } else {
-                    gPanning = true;
-                    gPanStart = { x: touch.clientX - gTransform.x, y: touch.clientY - gTransform.y };
+                if (e.touches.length === 2) {
+                    const [a, b] = e.touches;
+                    pinch = { d: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), scale: gTransform.scale };
+                    gDrag = null; gPanning = false;
+                    return;
                 }
+                const t = e.touches[0];
+                const p = rel(t);
+                const hit = nodeAt(p.x, p.y);
+                gWasDragged = false;
+                if (hit) { gDrag = hit; gSelected = hit; showTip(hit, p); }
+                else { gPanning = true; gPanStart = { x: t.clientX - gTransform.x, y: t.clientY - gTransform.y }; }
                 drawGraph();
             }, { passive: false });
-
             canvas.addEventListener('touchmove', e => {
                 e.preventDefault();
-                const touch = e.touches[0];
-                const rect = canvas.getBoundingClientRect();
-                const sx = touch.clientX - rect.left;
-                const sy = touch.clientY - rect.top;
-
-                if (gDrag) {
-                    const pos = screenToGraph(sx, sy);
-                    gDrag.x = pos.x;
-                    gDrag.y = pos.y;
-                    gDrag.vx = 0;
-                    gDrag.vy = 0;
-                    gWasDragged = true;
+                if (pinch && e.touches.length === 2) {
+                    const [a, b] = e.touches;
+                    const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+                    const r = canvas.getBoundingClientRect();
+                    const mx = (a.clientX + b.clientX) / 2 - r.left, my = (a.clientY + b.clientY) / 2 - r.top;
+                    const newScale = Math.max(0.1, Math.min(5, pinch.scale * d / pinch.d));
+                    gTransform.x = mx - (mx - gTransform.x) * (newScale / gTransform.scale);
+                    gTransform.y = my - (my - gTransform.y) * (newScale / gTransform.scale);
+                    gTransform.scale = newScale;
                     drawGraph();
                     return;
                 }
-
-                if (gPanning) {
-                    gTransform.x = touch.clientX - gPanStart.x;
-                    gTransform.y = touch.clientY - gPanStart.y;
-                    drawGraph();
-                    return;
+                const t = e.touches[0];
+                const p = rel(t);
+                if (gDrag) {
+                    const pos = screenToGraph(p.x, p.y);
+                    gDrag.x = pos.x; gDrag.y = pos.y; gDrag.vx = 0; gDrag.vy = 0;
+                    gWasDragged = true; tip.style.display = 'none';
+                    startGraphLoop(); drawGraph();
+                } else if (gPanning) {
+                    gTransform.x = t.clientX - gPanStart.x; gTransform.y = t.clientY - gPanStart.y;
+                    gWasDragged = true; drawGraph();
                 }
             }, { passive: false });
-
-            canvas.addEventListener('touchend', () => {
-                gDrag = null;
-                gPanning = false;
-                gWasDragged = false;
+            canvas.addEventListener('touchend', e => {
+                if (e.touches.length < 2) pinch = null;
+                if (e.touches.length) return;
+                const tapped = gDrag && !gWasDragged ? gDrag : null;
+                gDrag = null; gPanning = false;
+                if (tapped) {
+                    if (tapped.type === 'memory') openMemory(tapped.id);
+                    else filterByRealm(tapped.data.name);
+                    tip.style.display = 'none';
+                }
                 drawGraph();
             });
 
-            // Zoom with wheel
             canvas.addEventListener('wheel', e => {
                 e.preventDefault();
-                const rect = canvas.getBoundingClientRect();
-                const mx = e.clientX - rect.left;
-                const my = e.clientY - rect.top;
-
+                const p = rel(e);
                 const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
                 const newScale = Math.max(0.1, Math.min(5, gTransform.scale * zoomFactor));
-
-                // Zoom toward cursor
-                gTransform.x = mx - (mx - gTransform.x) * (newScale / gTransform.scale);
-                gTransform.y = my - (my - gTransform.y) * (newScale / gTransform.scale);
+                gTransform.x = p.x - (p.x - gTransform.x) * (newScale / gTransform.scale);
+                gTransform.y = p.y - (p.y - gTransform.y) * (newScale / gTransform.scale);
                 gTransform.scale = newScale;
-
                 drawGraph();
             }, { passive: false });
 
-            // Click to open memory
             canvas.addEventListener('click', e => {
-                if (gWasDragged) { gWasDragged = false; return; } // Don't open if we were dragging
-                const rect = canvas.getBoundingClientRect();
-                const sx = e.clientX - rect.left;
-                const sy = e.clientY - rect.top;
-                const hit = nodeAt(sx, sy);
-                if (hit && hit.type === 'memory' && hit.data) {
-                    openMemoryModal(hit.data);
-                }
+                if (gWasDragged) { gWasDragged = false; return; }
+                const p = rel(e);
+                const hit = nodeAt(p.x, p.y);
+                if (!hit) return;
+                if (hit.type === 'memory') openMemory(hit.id);
+                else filterByRealm(hit.data.name);
             });
-
-            // Build legend
-            buildLegend();
         }
 
         function buildLegend() {
             const legend = document.getElementById('graph-legend');
-            if (!legend) return;
-            legend.innerHTML = allRealms.map((r, i) => `
-                <div class="legend-item">
-                    <div class="legend-dot" style="background: ${REALM_COLORS[i % REALM_COLORS.length]}"></div>
-                    <span>${escapeHtml(r.name || 'Unnamed')}</span>
-                </div>
-            `).join('');
+            const sorted = [...allRealms].sort((a, b) => (b.memory_count || 0) - (a.memory_count || 0));
+            legend.innerHTML = sorted.map(r => `
+                <div class="legend-item" data-realm="${escapeHtml(r.name || '')}" title="${escapeHtml(r.name || '')}">
+                    <div class="legend-dot" style="background:${realmColor(r.name)};box-shadow:0 0 6px ${realmColor(r.name)}"></div>
+                    <span>${escapeHtml(cleanRealm(r.name))}</span>
+                </div>`).join('') +
+                `<div class="legend-item" style="margin-top:0.4rem;cursor:default"><div class="legend-dot" style="background:var(--cyan)"></div><span>association · hover shows strength</span></div>`;
         }
 
-        function openMemoryModal(memoryData) {
-            if (!memoryData) return;
-            const title = document.getElementById('modal-title');
-            const content = document.getElementById('modal-content');
-            const meta = document.getElementById('modal-meta');
-
-            title.textContent = memoryData.realm_name || 'Memory';
-            content.textContent = (memoryData.content || '').substring(0, 1000);
-
-            const imp = memoryData.importance || 0;
-            const realm = memoryData.realm_name || '—';
-            const realmColor = memoryData.realm_id ? getRealmColor(memoryData.realm_id, allRealms) : '#888';
-            meta.innerHTML = `importance: <strong style="color:${realmColor}">${imp.toFixed(3)}</strong> · realm: <strong style="color:${realmColor}">${escapeHtml(realm)}</strong>`;
-
-            // Show upvote/downvote/delete buttons
-            const upvoteBtn = document.getElementById('modal-upvote-btn');
-            const downvoteBtn = document.getElementById('modal-downvote-btn');
-            const deleteBtn = document.getElementById('modal-delete-btn');
-            if (upvoteBtn) {
-                upvoteBtn.style.display = 'inline-block';
-                upvoteBtn.onclick = () => { upvote(memoryData.id, upvoteBtn); closeModal(); };
+        // ─── Timeline ────────────────────────────────────────────
+        const tl = { start: null, end: null, at: null, timer: null, seq: 0, inited: false };
+        function tlPos(t) { return Math.round((t - tl.start) / Math.max(1, tl.end - tl.start) * 1000); }
+        function tlTime(pos) { return tl.start + (tl.end - tl.start) * pos / 1000; }
+        async function initTimeline() {
+            if (tl.inited) return;
+            tl.inited = true;
+            tl.end = Date.now();
+            try {
+                // Earliest memory = first row after the epoch (indexed range query,
+                // no full-corpus scroll).
+                const res = await api('/memories/timeline?at=1970-01-01T00:00:00Z&before=0&after=1');
+                tl.start = parseTime(res.results?.[0]?.ingested_at) ?? tl.end - 86400e3 * 180;
+            } catch { tl.start = tl.end - 86400e3 * 180; }
+            document.getElementById('tl-axis').innerHTML = [0, 0.25, 0.5, 0.75, 1].map(f =>
+                `<span>${f === 1 ? 'now' : fmtDate(tl.start + (tl.end - tl.start) * f, false)}</span>`).join('');
+            const slider = document.getElementById('tl-slider');
+            slider.addEventListener('input', () => setTimelineAt(tlTime(+slider.value), true));
+            document.querySelectorAll('.tl-steps [data-step]').forEach(b => b.addEventListener('click', () => {
+                const step = b.dataset.step;
+                setTimelineAt(step === 'now' ? Date.now() : (tl.at || Date.now()) + Number(step) * 1000);
+            }));
+            setTimelineAt(tl.end);
+        }
+        function setTimelineAt(t, debounce = false) {
+            tl.end = Math.max(tl.end, Date.now());
+            tl.at = Math.max(tl.start, Math.min(Date.now(), t));
+            document.getElementById('tl-slider').value = tlPos(tl.at);
+            document.getElementById('tl-date').textContent = fmtDate(tl.at);
+            document.getElementById('tl-rel').textContent = timeAgo(tl.at);
+            clearTimeout(tl.timer);
+            tl.timer = setTimeout(loadTimeline, debounce ? 180 : 0);
+        }
+        async function loadTimeline() {
+            const seq = ++tl.seq;
+            const at = new Date(tl.at).toISOString();
+            const list = document.getElementById('tl-list');
+            try {
+                const res = await api(`/memories/timeline?at=${encodeURIComponent(at)}&before=10&after=10`);
+                if (seq !== tl.seq) return;
+                const rows = res.results || [];
+                rows.forEach(m => remember({ id: m.id, realm_name: m.realm_name, memory_type: m.memory_type, verification_status: m.verification_status, ingested_at: m.ingested_at }));
+                const atMs = tl.at;
+                let cursorDone = false;
+                let html = '';
+                const cursor = `<div class="tl-cursor">◂ ${escapeHtml(fmtDate(atMs))}</div>`;
+                for (const m of rows) {
+                    if (!cursorDone && (parseTime(m.ingested_at) ?? 0) >= atMs) { html += cursor; cursorDone = true; }
+                    html += `
+                        <div class="tl-item" data-id="${escapeHtml(m.id)}" style="--rc:${realmColor(m.realm_name)}">
+                            <time><b>${escapeHtml(fmtDate(m.ingested_at))}</b>${timeAgo(m.ingested_at)}</time>
+                            <div>
+                                <p>${escapeHtml(snippet(m.snippet, 260))}</p>
+                                <div class="meta">${realmChip(m.realm_name)}${typeChip(m.memory_type)}${verifyChip(m.verification_status)}</div>
+                            </div>
+                        </div>`;
+                }
+                if (!cursorDone) html += cursor;
+                if (res.truncated) html += '<div class="subtle">Partial result: the server hit its scan budget for this window.</div>';
+                list.innerHTML = rows.length ? html : '<div class="empty">No memories around this moment.</div>';
+                document.getElementById('tl-aside').textContent = `${rows.length} memories around this moment`;
+            } catch (e) {
+                if (seq !== tl.seq) return;
+                list.innerHTML = `<div class="empty err">Timeline unavailable: ${escapeHtml(e.message)}</div>`;
             }
-            if (downvoteBtn) {
-                downvoteBtn.style.display = 'inline-block';
-                downvoteBtn.onclick = () => { downvote(memoryData.id, downvoteBtn); closeModal(); };
-            }
-            if (deleteBtn) {
-                deleteBtn.style.display = 'inline-block';
-                deleteBtn.onclick = () => { if (confirm('Delete this memory?')) { deleteMemory(memoryData.id); closeModal(); } };
-            }
+        }
 
+        // ─── Memory Detail ───────────────────────────────────────
+        function showMemory(id) { openMemory(id); }
+        function openMemoryModal(memoryData) { if (memoryData) { remember(memoryData); openMemory(memoryData.id); } }
+
+        async function openMemory(id, opts = {}) {
+            if (!id) return;
+            currentMemoryId = id;
+            const cached = memCache.get(id);
+            renderModal(cached || { id, content: 'Loading…' }, opts.keepRelated);
             document.getElementById('modal-overlay').classList.add('active');
-            currentMemoryId = memoryData.id;
+            const full = cached && cached.ingested_at && cached.content !== undefined && cached.memory_type ? cached : await refreshMemory(id);
+            if (currentMemoryId !== id || !full) return;
+            renderModal(full, opts.keepRelated);
+            if (!opts.keepRelated) renderRelated(full);
         }
 
-        // ─── Utilities ───────────────────────────────────────────
-        function escapeHtml(str) {
-            if (!str) return '';
-            const div = document.createElement('div');
-            div.textContent = str;
-            return div.innerHTML;
+        function renderModal(m, keepRelated) {
+            const color = realmColor(m.realm_name);
+            document.getElementById('modal-kicker').innerHTML = `${realmChip(m.realm_name)}${typeChip(m.memory_type)}${verifyChip(m.verification_status)}${m.visibility ? `<span class="chip flat">${escapeHtml(m.visibility)}</span>` : ''}${m.certified_at ? '<span class="chip" style="color:var(--cyan)">certified</span>' : ''}`;
+            document.getElementById('modal-title').textContent = titleOf(m);
+            document.getElementById('modal-content').textContent = m.content || '';
+            const facts = [];
+            const fact = (label, value, sub) => facts.push(`<div class="fact"><label>${label}</label><b>${value}</b>${sub ? `<small>${sub}</small>` : ''}</div>`);
+            fact('Importance', (m.importance ?? 0).toFixed(3), m.upvotes ? `${m.upvotes} upvote${m.upvotes === 1 ? '' : 's'}` : '');
+            if (m.ingested_at) fact('Stored', escapeHtml(fmtDate(m.ingested_at)), timeAgo(m.ingested_at));
+            if (m.last_accessed) fact('Last recalled', escapeHtml(fmtDate(m.last_accessed)), `${fmtNum(m.access_count || 0)} recalls total`);
+            if (m.last_accessed) {
+                const type = m.memory_type || 'general';
+                const hrs = (Date.now() - (parseTime(m.last_accessed) ?? Date.now())) / 3600e3;
+                const [k, eta] = WEIBULL[type] || WEIBULL.general;
+                const boost = weibull(type, hrs);
+                fact('Retention now', `<span style="color:${boost < 0.1 ? 'var(--red)' : boost < 0.4 ? 'var(--amber)' : 'var(--lime)'}">${boost.toFixed(3)}</span>`, `${escapeHtml(type)} curve · k=${k} η=${eta}h`);
+            }
+            if (m.verification_status) fact('Verification', escapeHtml(m.verification_status), m.last_verified ? `${typeof m.verification_confidence === 'number' ? `conf ${m.verification_confidence.toFixed(2)} · ` : ''}${timeAgo(m.last_verified)}` : '');
+            if (m.source_file) fact('Source', escapeHtml(m.source_file), m.chunk_type ? escapeHtml(m.chunk_type) : '');
+            if (m.consolidated_from && m.consolidated_from.length) fact('Consolidated', `${m.consolidated_from.length} memories`, m.consolidated_at ? timeAgo(m.consolidated_at) : '');
+            if (m.tags && m.tags.length) fact('Tags', m.tags.map(escapeHtml).join(', '));
+            document.getElementById('modal-meta').innerHTML = facts.join('');
+            if (!keepRelated) document.getElementById('modal-related').innerHTML = (m.related_memory_ids || []).length ? '<h3>Why it’s linked</h3><div class="loading" style="padding:1rem">Loading</div>' : '';
+
+            const up = document.getElementById('modal-upvote-btn');
+            const down = document.getElementById('modal-downvote-btn');
+            const del = document.getElementById('modal-delete-btn');
+            up.onclick = () => upvote(m.id, up);
+            down.onclick = () => downvote(m.id, down);
+            del.onclick = () => deleteMemory(m.id);
+            document.querySelector('#modal-overlay .modal').style.setProperty('--rc', color);
         }
+
+        async function renderRelated(m) {
+            const box = document.getElementById('modal-related');
+            const ids = (m.related_memory_ids || []).slice(0, 8);
+            if (!ids.length) { box.innerHTML = ''; return; }
+            const strengths = m.association_strengths || [];
+            let rows = ids.map(id => memCache.get(id));
+            const missing = ids.filter((id, i) => !rows[i] || rows[i].content === undefined);
+            if (missing.length) { try { await fetchMany(missing); } catch {} }
+            if (currentMemoryId !== m.id) return;
+            rows = ids.map(id => memCache.get(id));
+            box.innerHTML = `<h3>Why it’s linked</h3>
+                <div class="subtle">Slumber links each memory to its nearest neighbours by embedding similarity. 1.00 = near-identical.</div>
+                ${ids.map((id, i) => {
+                    const r = rows[i];
+                    const s = strengths[i] ?? 0;
+                    const label = r ? escapeHtml(snippet(r.content, 110)) : '<span class="subtle">no longer stored</span>';
+                    return `<div class="rel" ${r ? `data-rel="${escapeHtml(id)}"` : ''}>
+                        <div><p>${label}</p>${r ? `<div class="meta" style="display:flex;gap:0.35rem;margin-top:0.2rem">${realmChip(r.realm_name)}${typeChip(r.memory_type)}</div>` : ''}</div>
+                        <div class="strength">${s.toFixed(2)}<div class="track"><i style="width:${Math.max(0, Math.min(1, s)) * 100}%;background:var(--cyan)"></i></div></div>
+                    </div>`;
+                }).join('')}`;
+            box.querySelectorAll('[data-rel]').forEach(el => el.addEventListener('click', () => openMemory(el.dataset.rel)));
+        }
+
+        function closeModal() {
+            currentMemoryId = null;
+            document.getElementById('modal-overlay').classList.remove('active');
+        }
+        document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target === e.currentTarget) closeModal(); });
 
         // ─── Init ────────────────────────────────────────────────
         loadAll();
+        if (!REDUCED_MOTION) startCore();
     </script>
 </body>
 </html>

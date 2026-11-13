@@ -257,7 +257,7 @@ http://localhost:8080
 > `--allow-no-api-key` to start the server without it — the warning logs
 > will be loud on purpose. See [#11](../../issues/11) for context.
 
-**Web UI features:** Cards view, semantic search, interactive 3D graph, realm filtering, memory detail modal with delete.
+**Web UI features:** an Overview dashboard (rotating memory-core sphere of realms, top memories and association links; verification breakdown; last slumber report; per-type Weibull forgetting curves; largest realms; just-remembered feed and live ticker), a Timeline scrubber built on `/api/v1/memories/timeline`, semantic search with the coverage verdict, realm filtering, a force-directed association graph that shows link strength on hover, and a memory detail view with retention-now, verification, "why it's linked" neighbours, upvote/downvote and delete. The page is a single self-contained file with no external fonts or CDNs.
 
 ---
 
