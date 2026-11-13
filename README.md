@@ -37,6 +37,8 @@ A self-hosted memory system that models how **human memory actually works**: mem
 
 <sub>Taken from a real instance on a phone; memory text and realm names are redacted.</sub>
 
+**Jump to:** [Quick Start](#quick-start) · [Signing in](#signing-in) · [Settings editor](#settings-editor) · [Network exposure](#network-exposure) · [Hermes integration](#hermes-agent-integration) · [REST API](#rest-api) · [Troubleshooting](#troubleshooting)
+
 ## Shared memory for Hermes, Claude Code, and Codex
 
 Use one memex8 server from **Hermes Agent, Claude Code, and Codex**, on the same
@@ -51,7 +53,7 @@ the same authenticated REST API and share the same memory database.
 - **Obsidian:** optional read-only vault search and note references let agents
   consult the current Markdown source alongside stored memories.
 
-For example, run memex8 once at `http://192.168.1.3:8080`, then connect Hermes
+For example, run memex8 once at `http://192.168.1.50:8080`, then connect Hermes
 on your desktop, Claude Code on a laptop, and Codex on another computer using
 the same API key. Use matching project IDs across bridge clients. Each computer
 needs its own bridge installation; Obsidian lookup needs a local or mounted
@@ -181,8 +183,9 @@ Nightly "sleep" pipeline (13 phases): deduplicate → **TurboQuant compression**
 
 ### Prerequisites
 
-- Docker & Docker Compose
-- OpenAI API key *(or Ollama for fully local embeddings)*
+- Docker & Docker Compose v2 (`docker compose`, not `docker-compose`)
+- OpenAI API key *(or Ollama for fully local embeddings, see [Local embeddings](#local-embeddings-ollama))*
+- A few GB of free disk and a few minutes: there is no prebuilt image, so the first `docker compose up` compiles the Rust binary inside Docker
 - **Your user must be able to talk to the Docker daemon.** Either:
   - Add yourself to the `docker` group: `sudo usermod -aG docker $USER`, then log
     out and back in (or `newgrp docker` for the current shell), **or**
@@ -209,6 +212,17 @@ chmod 600 .env.memex8
 $EDITOR .env.memex8
 ```
 
+Copy the config template too. `docker-compose.yml` mounts `./config.toml`
+read-only, and it is not in the repo (it is git-ignored so your edits stay local):
+
+```bash
+cp config.example.toml config.toml
+```
+
+> **Skipping this breaks startup.** If `./config.toml` does not exist, Docker
+> creates a *directory* with that name and memex8 then fails to read its
+> config. If that already happened: `rm -rf config.toml && cp config.example.toml config.toml`.
+
 Generate a strong `MEMEX8_API_KEY` with:
 
 ```bash
@@ -233,7 +247,33 @@ OPENAI_API_KEY=sk-...        # or leave empty + set EMBEDDING_PROVIDER=ollama
 
 ```bash
 docker compose up -d
+docker compose ps        # wait until memex8 shows "healthy" (the first run builds the image: a few minutes)
 ```
+
+Memories and the search index live in Docker volumes (`qdrant_data`,
+`memex8_data`), and a daily digest is written to `~/.memex8/` on the host.
+
+#### Local embeddings (Ollama)
+
+To avoid sending text to OpenAI, run Ollama alongside memex8. In
+`.env.memex8` set:
+
+```bash
+EMBEDDING_PROVIDER=ollama
+EMBEDDING_MODEL=nomic-embed-text
+EMBEDDING_DIMENSIONS=768
+OLLAMA_URL=http://ollama:11434
+```
+
+then start with the `local-embeddings` profile and pull the model once:
+
+```bash
+docker compose --profile local-embeddings up -d
+docker compose exec ollama ollama pull nomic-embed-text
+```
+
+Choose your embedding model *before* storing memories: vectors from different
+models or dimensions are not interchangeable.
 
 ### 4. Verify
 
@@ -494,19 +534,19 @@ memex8 stats         # System statistics
 
 ### Reactions & Associations
 
-|| Method | Endpoint | Description |
+| Method | Endpoint | Description |
 |--------|----------|-------------|
-|| `POST` | `/api/v1/memories/{id}/react` | Upvote or downvote a memory |
-|| `GET`  | `/api/v1/memories/{id}/associations` | Get semantic links for a memory |
+| `POST` | `/api/v1/memories/{id}/react` | Upvote or downvote a memory |
+| `GET`  | `/api/v1/memories/{id}/associations` | Get semantic links for a memory |
 
 ### Proactive Inference
 
-|| Method | Endpoint | Description |
+| Method | Endpoint | Description |
 |--------|----------|-------------|
-|| `GET`  | `/api/v1/inference/gaps` | List open knowledge gaps |
-|| `POST` | `/api/v1/inference/suggest` | Get gap suggestions for a topic |
-|| `POST` | `/api/v1/inference/gaps/{id}/resolve` | Mark a gap as resolved |
-|| `POST` | `/api/v1/inference/gaps/{id}/dismiss` | Dismiss a gap |
+| `GET`  | `/api/v1/inference/gaps` | List open knowledge gaps |
+| `POST` | `/api/v1/inference/suggest` | Get gap suggestions for a topic |
+| `POST` | `/api/v1/inference/gaps/{id}/resolve` | Mark a gap as resolved |
+| `POST` | `/api/v1/inference/gaps/{id}/dismiss` | Dismiss a gap |
 
 ### Certified memories
 
@@ -607,6 +647,36 @@ The disposable long-body fixture measured 12,399 bytes for full search versus
 1,575 bytes for compact search (12.7%) at the same result count. This measures
 serialized UTF-8 JSON bytes, not tokens; savings depend on body and summary lengths.
 No configuration changes or data migration are required.
+
+### Memory timeline
+
+Use `memex8_timeline(id="…", before=5, after=5)` to see what happened around a
+memory, then `memex8_get(ids=[…])` for selected full bodies. Rust MCP and Hermes
+also accept `query="…"` or `at="2026-11-08T00:00:00Z"`; pass exactly one anchor.
+REST exposes the same parameters through `GET /api/v1/memories/timeline`.
+
+`before` and `after` default to 5, each accepts 0–50, and optional `realm` and
+`visibility` (`private` or `public`) scope both the anchor and its neighbors.
+Query mode uses the top search hit with the existing 0.3 minimum score; a miss
+returns `no_match=true`, no anchor, and an empty results list. Missing or
+out-of-scope ID anchors return 404; a legacy anchor with an invalid stored
+timestamp returns 409.
+
+Responses contain `anchor_id`, `anchor_at`, `results`, `no_match`, and
+`truncated`. Rows use the shared compact shape, UTC RFC3339 timestamps, and
+`score=0` (chronological ordering). ID/query mode includes the anchor, even with
+zero neighbors. Timestamp mode has no synthetic anchor: before is strictly
+earlier, after includes memories at the specified time. Results sort by parsed
+timestamp then ID, and return fewer rows at dataset edges.
+
+Startup creates a Qdrant datetime index on `ingested_at`, including existing
+collections. Timeline uses ordered range queries and paginated equal-time
+buckets, with a fixed 10,000 fetched-row budget per request (boundary rereads
+count). `truncated=true` means a partial result; nearest-neighbor completeness
+is not guaranteed in that case. Legacy timestamps are normalized on output,
+without rewriting stored payloads. Reads are best effort during concurrent
+edits, rather than a database snapshot. ID/time anchors need no model calls;
+query mode embeds once. No new configuration keys or prefetch changes.
 
 ### Search coverage
 
@@ -758,7 +828,9 @@ memex8/
 │   ├── mcp/          # MCP server (JSON-RPC 2.0)
 │   └── web/          # Embedded web UI
 ├── scripts/          # One-shot maintenance scripts
-│   └── classify_memory_types.py  # Retroactive keyword+LLM classifier
+│   ├── classify_memory_types.py  # Retroactive keyword+LLM classifier
+│   ├── docker_backup.py          # Cold, verified backup + backup-gated upgrade
+│   └── set-bind.sh               # Localhost-only vs all-interfaces (MEMEX8_BIND_ADDR)
 ├── plugins/memex8/   # Hermes plugin
 ├── docker-compose.yml
 ├── Dockerfile        # Multi-stage Rust build
@@ -815,6 +887,20 @@ Session Review → Prune Empty Realms → Memory Verification
 docker compose logs memex8
 ```
 
+**`config.toml` is a directory / "Is a directory" on startup:**
+You ran `docker compose up` before creating `config.toml`, so Docker made a directory in its place.
+```bash
+docker compose down
+rm -rf config.toml && cp config.example.toml config.toml
+docker compose up -d
+```
+
+**Can't reach the UI from another machine (or it is reachable from places you did not intend):**
+The published ports follow `MEMEX8_BIND_ADDR` (default `0.0.0.0`, all interfaces). See [Network exposure](#network-exposure).
+
+**Sign-in always says "invalid username or password":**
+Check the hash survived. `docker exec <container> sh -c 'echo $MEMEX8_WEB_PASSWORD_HASH'` must print a full `$argon2id$v=19$...` string. In `.env.memex8` wrap it in single quotes; in any Compose override file write each `$` as `$$`, or Compose will blank out parts of it. See [Signing in](#signing-in).
+
 **Unauthorized errors:**
 ```bash
 curl -H "Authorization: Bearer $MEMEX8_API_KEY" http://localhost:8080/api/v1/memories
@@ -854,33 +940,3 @@ MIT
 Personal project shared for reference. No guarantees, no SLA, no support. Fork it, adapt it, build on the ideas.
 
 See [TODO.md](TODO.md) and [PLAN.md](PLAN.md) for the roadmap.
-
-### Memory timeline
-
-Use `memex8_timeline(id="…", before=5, after=5)` to see what happened around a
-memory, then `memex8_get(ids=[…])` for selected full bodies. Rust MCP and Hermes
-also accept `query="…"` or `at="2026-11-08T00:00:00Z"`; pass exactly one anchor.
-REST exposes the same parameters through `GET /api/v1/memories/timeline`.
-
-`before` and `after` default to 5, each accepts 0–50, and optional `realm` and
-`visibility` (`private` or `public`) scope both the anchor and its neighbors.
-Query mode uses the top search hit with the existing 0.3 minimum score; a miss
-returns `no_match=true`, no anchor, and an empty results list. Missing or
-out-of-scope ID anchors return 404; a legacy anchor with an invalid stored
-timestamp returns 409.
-
-Responses contain `anchor_id`, `anchor_at`, `results`, `no_match`, and
-`truncated`. Rows use the shared compact shape, UTC RFC3339 timestamps, and
-`score=0` (chronological ordering). ID/query mode includes the anchor, even with
-zero neighbors. Timestamp mode has no synthetic anchor: before is strictly
-earlier, after includes memories at the specified time. Results sort by parsed
-timestamp then ID, and return fewer rows at dataset edges.
-
-Startup creates a Qdrant datetime index on `ingested_at`, including existing
-collections. Timeline uses ordered range queries and paginated equal-time
-buckets, with a fixed 10,000 fetched-row budget per request (boundary rereads
-count). `truncated=true` means a partial result; nearest-neighbor completeness
-is not guaranteed in that case. Legacy timestamps are normalized on output,
-without rewriting stored payloads. Reads are best effort during concurrent
-edits, rather than a database snapshot. ID/time anchors need no model calls;
-query mode embeds once. No new configuration keys or prefetch changes.
