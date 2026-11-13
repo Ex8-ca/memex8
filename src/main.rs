@@ -35,6 +35,9 @@ enum Commands {
     /// Show current configuration
     ConfigShow,
 
+    /// Hash a web-login password (reads it from stdin) for MEMEX8_WEB_PASSWORD_HASH
+    HashPassword,
+
     /// Ingest a .md file or directory
     Ingest {
         /// Path to file or directory
@@ -330,6 +333,17 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    // Needs no config: read a password from stdin, print its argon2 hash.
+    if matches!(cli.command, Commands::HashPassword) {
+        use std::io::Read;
+        let mut pw = String::new();
+        std::io::stdin().read_to_string(&mut pw)?;
+        let pw = pw.trim_end_matches(['\n', '\r']);
+        anyhow::ensure!(pw.len() >= 8, "password must be at least 8 characters");
+        println!("{}", api::session::hash_password(pw)?);
+        return Ok(());
+    }
+
     // Load config
     let config = config::AppConfig::load(&cli.config)?;
 
@@ -339,6 +353,7 @@ async fn main() -> anyhow::Result<()> {
             // TODO: interactive wizard
             println!("Configuration written to {}", cli.config);
         }
+        Commands::HashPassword => unreachable!("handled before config load"),
         Commands::ConfigShow => {
             println!("{}", toml::to_string_pretty(&config)?);
         }

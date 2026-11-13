@@ -576,6 +576,21 @@
     <div class="toast" id="toast"></div>
 
     <!-- Settings Modal (per-client API key) -->
+    <div class="modal-overlay" id="login-overlay" style="z-index: 300; background: rgba(3, 2, 8, 0.94);">
+        <form class="modal" style="max-width: 380px;" onsubmit="submitLogin(event)">
+            <h2>Sign in</h2>
+            <p class="subtle" style="line-height:1.6">memex8 · associative memory</p>
+            <label class="field-label" for="login-user">Username</label>
+            <input type="text" id="login-user" class="field" autocomplete="username" autocapitalize="off" spellcheck="false" required />
+            <label class="field-label" for="login-pass">Password</label>
+            <input type="password" id="login-pass" class="field" autocomplete="current-password" required />
+            <div id="login-error" class="subtle" style="margin-top: 0.7rem; min-height: 1.2em; color: var(--red);"></div>
+            <div style="margin-top: 1rem; display: flex; justify-content: flex-end;">
+                <button class="primary-btn" type="submit" id="login-btn">Sign in</button>
+            </div>
+        </form>
+    </div>
+
     <div class="modal-overlay" id="settings-overlay" onclick="if(event.target===this) closeSettings()">
         <div class="modal" style="max-width: 480px;">
             <button class="modal-close" onclick="closeSettings()">✕</button>
@@ -587,6 +602,7 @@
             <input type="password" id="settings-api-key" class="field" placeholder="paste key here" autocomplete="off" />
             <div class="subtle" style="margin-top: 0.5rem;">Source: <span id="settings-key-source">checking…</span></div>
             <div style="margin-top: 1.3rem; display: flex; gap: 0.6rem; justify-content: flex-end;">
+                <button class="ghost-btn" id="logout-btn" style="display:none" onclick="logout()">Sign out</button>
                 <button class="ghost-btn" onclick="clearApiKey()">Clear</button>
                 <button class="primary-btn" onclick="saveApiKey()">Save &amp; reload</button>
             </div>
@@ -790,6 +806,49 @@
             window.location.reload();
         }
 
+        // ─── Password login (optional; enabled server-side) ──────
+        let LOGIN_ENABLED = false;
+        async function maybeShowLogin() {
+            try {
+                const r = await fetch(`${BASE_URL}/auth/me`, { credentials: 'same-origin' });
+                const j = await r.json();
+                LOGIN_ENABLED = !!j.login_enabled;
+                if (j.login_enabled && !j.authenticated) {
+                    document.getElementById('login-overlay').classList.add('active');
+                    return true;
+                }
+            } catch {}
+            return false;
+        }
+        async function submitLogin(ev) {
+            ev.preventDefault();
+            const btn = document.getElementById('login-btn');
+            const err = document.getElementById('login-error');
+            err.textContent = ''; btn.disabled = true;
+            try {
+                const r = await fetch(`${BASE_URL}/auth/login`, {
+                    method: 'POST', credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: document.getElementById('login-user').value,
+                        password: document.getElementById('login-pass').value,
+                    }),
+                });
+                if (r.ok) { window.location.reload(); return; }
+                err.textContent = r.status === 429 ? 'Too many attempts: wait a minute.' : 'Invalid username or password.';
+            } catch (e) {
+                err.textContent = 'Could not reach the server.';
+            }
+            btn.disabled = false;
+        }
+        async function logout() {
+            try { await fetch(`${BASE_URL}/auth/logout`, { method: 'POST', credentials: 'same-origin' }); } catch {}
+            window.location.reload();
+        }
+        fetch(`${BASE_URL}/auth/me`, { credentials: 'same-origin' }).then(r => r.json()).then(j => {
+            if (j.login_enabled && j.authenticated) document.getElementById('logout-btn').style.display = '';
+        }).catch(() => {});
+
         // ─── API Helpers ─────────────────────────────────────────
         async function api(path, options = {}) {
             const headers = { ...(options.headers || {}) };
@@ -799,7 +858,8 @@
             if (!fetchOpts.body) delete fetchOpts.body;
             const resp = await fetch(`${BASE_URL}/api/v1${path}`, fetchOpts);
             if (resp.status === 401) {
-                if (!API_KEY) openSettings();
+                if (await maybeShowLogin()) { /* password login takes over */ }
+                else if (!API_KEY) openSettings();
                 else toast('API key rejected: check Settings', true);
             }
             if (!resp.ok) throw new Error(`API error: ${resp.status} ${resp.statusText}`);

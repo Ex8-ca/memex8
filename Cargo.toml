@@ -93,6 +93,10 @@ include_dir = "0.7"
 # SHA hashing (for file change detection)
 sha2 = "0.10"
 
+# Web UI password login (argon2 hashes + HMAC-signed session cookie)
+argon2 = "0.5"
+hmac = "0.12"
+
 # TOML config with merge
 config = "0.14"
 regex = "1.12.3"

@@ -28,6 +28,11 @@ pub async fn auth_middleware(
         return Err((StatusCode::UNAUTHORIZED, "API key not configured"));
     };
 
+    // A valid password-login session cookie is accepted in place of the key.
+    if crate::api::session::request_has_session(req.headers()) {
+        return Ok(next.run(req).await);
+    }
+
     // Extract Bearer token
     let auth_header = req
         .headers()

@@ -87,6 +87,15 @@ pub async fn run_with_engine(
             axum::routing::post(crate::api::routes::webhook::skill_executed),
         )
         .route("/health", axum::routing::get(health))
+        .route(
+            "/auth/login",
+            axum::routing::post(crate::api::session::login),
+        )
+        .route(
+            "/auth/logout",
+            axum::routing::post(crate::api::session::logout),
+        )
+        .route("/auth/me", axum::routing::get(crate::api::session::me))
         .route("/mcp", axum::routing::get(crate::mcp::http::sse_handler))
         .route("/", axum::routing::get(crate::web::serve_root))
         // Wildcard route for static assets + SPA fallback. Note: this must be
