@@ -375,6 +375,13 @@
         .modal-actions .act { height: 32px; padding: 0 0.9rem; font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.06em; }
 
         /* settings */
+        .set-grp { margin-top: 1.1rem; }
+        .set-grp h3 { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--cyan); margin-bottom: 0.4rem; }
+        .set-row { display: grid; grid-template-columns: 1fr 120px; gap: 0.2rem 1rem; align-items: center; padding: 0.55rem 0; border-top: 1px solid var(--line); }
+        .set-row .nm { font-size: 0.86rem; }
+        .set-row .hp { grid-column: 1; font-size: 0.72rem; color: var(--muted); line-height: 1.4; }
+        .set-row .pend { grid-column: 1 / -1; font-family: var(--mono); font-size: 0.68rem; color: var(--amber); }
+        .set-row input[type=checkbox] { justify-self: end; width: 1.1rem; height: 1.1rem; accent-color: var(--pink); }
         .field-label { display: block; margin: 1rem 0 0.4rem; font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); }
         .field { width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--line-strong); border-radius: 9px; background: rgba(0, 0, 0, 0.35); color: var(--text); font-family: var(--mono); font-size: 0.8rem; }
         .field:focus { outline: none; border-color: var(--pink); }
@@ -592,20 +599,30 @@
     </div>
 
     <div class="modal-overlay" id="settings-overlay" onclick="if(event.target===this) closeSettings()">
-        <div class="modal" style="max-width: 480px;">
+        <div class="modal" style="max-width: 660px; max-height: 88vh; overflow-y: auto;">
             <button class="modal-close" onclick="closeSettings()">✕</button>
             <h2>Settings</h2>
-            <p class="subtle" style="line-height:1.6">
-                Per-device API key for memex8. Stored in <code>localStorage</code> and sent only to this server.
-            </p>
-            <label class="field-label" for="settings-api-key">API key</label>
-            <input type="password" id="settings-api-key" class="field" placeholder="paste key here" autocomplete="off" />
-            <div class="subtle" style="margin-top: 0.5rem;">Source: <span id="settings-key-source">checking…</span></div>
-            <div style="margin-top: 1.3rem; display: flex; gap: 0.6rem; justify-content: flex-end;">
-                <button class="ghost-btn" id="logout-btn" style="display:none" onclick="logout()">Sign out</button>
-                <button class="ghost-btn" onclick="clearApiKey()">Clear</button>
-                <button class="primary-btn" onclick="saveApiKey()">Save &amp; reload</button>
+            <div id="restart-banner" style="display:none; margin: 0.8rem 0; padding: 0.7rem 0.9rem; border: 1px solid var(--amber); border-radius: 10px; background: rgba(255,197,61,0.08);">
+                <span class="subtle" style="color: var(--amber);">Saved changes apply after a restart.</span>
+                <button class="primary-btn" style="margin-left: 0.8rem;" onclick="restartServer()">Restart now</button>
             </div>
+            <div id="srv-settings"><div class="loading">Loading</div></div>
+            <div style="margin-top: 1.2rem; display: flex; gap: 0.6rem; justify-content: flex-end; flex-wrap: wrap;">
+                <button class="ghost-btn" id="logout-btn" style="display:none" onclick="logout()">Sign out</button>
+                <button class="ghost-btn" onclick="resetServerSettings()">Reset to config.toml</button>
+                <button class="primary-btn" onclick="saveServerSettings()">Save</button>
+            </div>
+            <details id="apikey-details" style="margin-top: 1.4rem;">
+                <summary class="subtle" style="cursor: pointer;">Advanced: API key for this device</summary>
+                <p class="subtle" style="line-height:1.6; margin-top: 0.6rem;">Only needed if password login is off. Stored in <code>localStorage</code> and sent only to this server.</p>
+                <label class="field-label" for="settings-api-key">API key</label>
+                <input type="password" id="settings-api-key" class="field" placeholder="paste key here" autocomplete="off" />
+                <div class="subtle" style="margin-top: 0.5rem;">Source: <span id="settings-key-source">checking…</span></div>
+                <div style="margin-top: 0.8rem; display: flex; gap: 0.6rem; justify-content: flex-end;">
+                    <button class="ghost-btn" onclick="clearApiKey()">Clear</button>
+                    <button class="primary-btn" onclick="saveApiKey()">Save &amp; reload</button>
+                </div>
+            </details>
         </div>
     </div>
 
@@ -785,6 +802,7 @@
             document.getElementById('settings-api-key').value = API_KEY || '';
             document.getElementById('settings-key-source').textContent = KEY_SOURCE;
             document.getElementById('settings-overlay').classList.add('active');
+            loadServerSettings();
         }
         function closeSettings() {
             document.getElementById('settings-overlay').classList.remove('active');
@@ -846,8 +864,69 @@
             window.location.reload();
         }
         fetch(`${BASE_URL}/auth/me`, { credentials: 'same-origin' }).then(r => r.json()).then(j => {
+            LOGIN_ENABLED = !!j.login_enabled;
             if (j.login_enabled && j.authenticated) document.getElementById('logout-btn').style.display = '';
         }).catch(() => {});
+
+
+        // ─── Server settings (behind login / API key) ────────────
+        let SETTINGS = null;
+        async function loadServerSettings() {
+            const box = document.getElementById('srv-settings');
+            box.innerHTML = '<div class="loading">Loading</div>';
+            try {
+                SETTINGS = await api('/settings');
+                renderServerSettings();
+            } catch (e) {
+                box.innerHTML = `<div class="empty">Server settings unavailable: ${escapeHtml(e.message)}. Sign in (or set an API key) first.</div>`;
+            }
+            document.getElementById('apikey-details').style.display = LOGIN_ENABLED ? 'none' : '';
+        }
+        function renderServerSettings() {
+            const groups = {};
+            SETTINGS.fields.forEach(f => (groups[f.group] ||= []).push(f));
+            document.getElementById('srv-settings').innerHTML = Object.entries(groups).map(([g, fs]) => `
+                <div class="set-grp"><h3>${escapeHtml(g)}</h3>${fs.map(f => {
+                    const cur = f.pending ?? f.value;
+                    const input = f.type === 'bool'
+                        ? `<input type="checkbox" data-key="${f.key}" ${cur ? 'checked' : ''}>`
+                        : `<input class="field" type="number" data-key="${f.key}" value="${cur}" min="${f.min}" max="${f.max}" step="${f.type === 'int' ? 1 : 0.01}">`;
+                    const pend = f.changed ? `<div class="pend">running ${escapeHtml(String(f.value))}, restart to apply ${escapeHtml(String(f.pending))}</div>` : '';
+                    return `<div class="set-row"><div class="nm">${escapeHtml(f.label)}</div>${input}<div class="hp">${escapeHtml(f.help)}</div>${pend}</div>`;
+                }).join('')}</div>`).join('');
+            document.getElementById('restart-banner').style.display = SETTINGS.restart_required ? '' : 'none';
+        }
+        async function saveServerSettings() {
+            if (!SETTINGS) return;
+            const values = {};
+            document.querySelectorAll('#srv-settings [data-key]').forEach(el => {
+                const f = SETTINGS.fields.find(x => x.key === el.dataset.key);
+                const cur = f.pending ?? f.value;
+                const v = f.type === 'bool' ? el.checked : Number(el.value);
+                if (f.type === 'bool' ? v !== cur : Math.abs(v - cur) > 1e-9) values[f.key] = v;
+            });
+            if (!Object.keys(values).length) { toast('No changes to save'); return; }
+            try {
+                await api('/settings', { method: 'PUT', body: JSON.stringify({ values }) });
+                toast('Saved. Restart to apply.');
+                await loadServerSettings();
+            } catch (e) { toast(e.message, true); }
+        }
+        async function resetServerSettings() {
+            if (!confirm('Discard all saved changes and go back to config.toml values (applies after restart)?')) return;
+            try { await api('/settings', { method: 'DELETE' }); toast('Reset. Restart to apply.'); await loadServerSettings(); }
+            catch (e) { toast(e.message, true); }
+        }
+        async function restartServer() {
+            const st = stats?.slumber_state;
+            if (st && st !== 'idle' && !confirm(`Slumber is "${st}". Restarting now interrupts it. Continue?`)) return;
+            if (!confirm('Restart memex8 now? The page reloads when it is back (about 30 seconds).')) return;
+            try { await api('/settings/restart', { method: 'POST' }); } catch (e) { toast(e.message, true); return; }
+            toast('Restarting…');
+            const wait = (n) => fetch(`${BASE_URL}/health`).then(r => { if (r.ok) location.reload(); else throw 0; })
+                .catch(() => { if (n < 90) setTimeout(() => wait(n + 1), 2000); });
+            setTimeout(() => wait(0), 4000);
+        }
 
         // ─── API Helpers ─────────────────────────────────────────
         async function api(path, options = {}) {
@@ -862,7 +941,11 @@
                 else if (!API_KEY) openSettings();
                 else toast('API key rejected: check Settings', true);
             }
-            if (!resp.ok) throw new Error(`API error: ${resp.status} ${resp.statusText}`);
+            if (!resp.ok) {
+                let msg = '';
+                try { msg = (await resp.clone().json()).error || ''; } catch {}
+                throw new Error(msg || `API error: ${resp.status} ${resp.statusText}`);
+            }
             return resp.json();
         }
         // POST /memories/batch-get accepts 1–50 ids per call.
