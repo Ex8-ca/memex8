@@ -41,7 +41,7 @@ const FIELDS: &[Field] = &[
         group: "Search",
         label: "Keyword matching",
         help:
-            "Blend exact-word (BM25) matches into vector search. Helps names, IDs and rare words.",
+            "Blend exact-word (BM25) matches into vector search. Helps names, IDs and rare words. On by default.",
         kind: Kind::Bool,
     },
     Field {
