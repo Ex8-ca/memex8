@@ -37,6 +37,21 @@ struct Field {
 
 const FIELDS: &[Field] = &[
     Field {
+        key: "search.hybrid.enabled",
+        group: "Search",
+        label: "Keyword matching",
+        help:
+            "Blend exact-word (BM25) matches into vector search. Helps names, IDs and rare words.",
+        kind: Kind::Bool,
+    },
+    Field {
+        key: "search.hybrid.lexical_weight",
+        group: "Search",
+        label: "Keyword weight",
+        help: "How much a strong keyword match adds to a result's score (0 = none).",
+        kind: Kind::Float(0.0, 1.0),
+    },
+    Field {
         key: "search.coverage.high",
         group: "Search",
         label: "Coverage: high",
@@ -56,6 +71,13 @@ const FIELDS: &[Field] = &[
         label: "Duplicate similarity",
         help: "Memories at least this similar are treated as duplicates.",
         kind: Kind::Float(0.5, 1.0),
+    },
+    Field {
+        key: "slumber.consolidation.enabled",
+        group: "Slumber",
+        label: "LLM consolidation",
+        help: "Merge related memories into AI-written summaries during slumber. Off by default: summaries can drop details, and durable types (profile, preference, setup, ...) are never merged.",
+        kind: Kind::Bool,
     },
     Field {
         key: "slumber.dedup_dry_run",

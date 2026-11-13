@@ -124,6 +124,9 @@ class CertificationLifecycleTest(unittest.TestCase):
                 self.assertIn('[memex8_md]\nenabled = false', config)
                 self.assertIn('[digest_md]\nenabled = false', config)
                 config = config.replace('idle_timeout = "10m"', 'idle_timeout = "24h"')
+                # Consolidation is opt-in since the switch landed; these tests exercise it.
+                config = config.replace('[slumber.consolidation]\nenabled = false', '[slumber.consolidation]\nenabled = true')
+                self.assertIn('[slumber.consolidation]\nenabled = true', config)
                 config_path = work / "config.toml"
                 config_path.write_text(config)
                 command = [binary, "--config", str(config_path)]

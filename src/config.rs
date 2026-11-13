@@ -31,6 +31,43 @@ pub struct AppConfig {
 #[serde(default)]
 pub struct SearchConfig {
     pub coverage: CoverageConfig,
+    pub hybrid: HybridConfig,
+}
+
+/// Keyword (BM25) matches blended into vector search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HybridConfig {
+    /// Blend BM25 keyword matches into vector search.
+    pub enabled: bool,
+    /// Bonus for the best keyword match, on the cosine scale (0..=1).
+    pub lexical_weight: f32,
+    /// Keyword candidates considered per query.
+    pub lexical_candidates: usize,
+}
+
+impl Default for HybridConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lexical_weight: 0.15,
+            lexical_candidates: 50,
+        }
+    }
+}
+
+impl HybridConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.lexical_weight.is_finite() && (0.0..=1.0).contains(&self.lexical_weight),
+            "search.hybrid.lexical_weight must be between 0 and 1"
+        );
+        anyhow::ensure!(
+            (1..=500).contains(&self.lexical_candidates),
+            "search.hybrid.lexical_candidates must be between 1 and 500"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -360,6 +397,11 @@ impl Default for SummarizeConfig {
 /// Supports both OpenAI (default, cheap for this use case) and local LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsolidationConfig {
+    /// Run LLM consolidation (slumber phase 6). Off by default: summaries tend to
+    /// drop exceptions and exact values, and they crowd originals out of the
+    /// top-k. Turn on in Settings -> Slumber -> "LLM consolidation".
+    #[serde(default)]
+    pub enabled: bool,
     /// Backend to use: "openai" (default) or "local".
     #[serde(default = "default_consolidation_backend")]
     pub backend: String,
@@ -377,6 +419,7 @@ fn default_consolidation_backend() -> String {
 impl Default for ConsolidationConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             backend: "openai".into(),
             model: Some("gpt-4o-mini".into()),
         }
@@ -674,6 +717,7 @@ impl AppConfig {
         let config: AppConfig = v.clone().try_into()?;
         config.slumber.validate_dedup()?;
         config.search.coverage.validate()?;
+        config.search.hybrid.validate()?;
         Ok(config)
     }
 
@@ -866,6 +910,45 @@ impl Default for AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consolidation_is_off_by_default_and_can_be_enabled() {
+        assert!(!AppConfig::default().slumber.consolidation.enabled);
+        let base = toml::to_string(&AppConfig::default()).unwrap();
+        let on = AppConfig::from_toml_with_overrides(
+            &base,
+            Some("[slumber.consolidation]\nenabled = true\n"),
+        )
+        .unwrap();
+        assert!(on.slumber.consolidation.enabled);
+        // A config file that predates the switch keeps consolidation off.
+        let legacy: ConsolidationConfig = toml::from_str("backend = \"openai\"").unwrap();
+        assert!(!legacy.enabled);
+    }
+
+    #[test]
+    fn hybrid_defaults_validate_and_bad_values_are_rejected() {
+        let d = HybridConfig::default();
+        assert!(d.validate().is_ok());
+        let heavy = HybridConfig {
+            lexical_weight: 1.5,
+            ..HybridConfig::default()
+        };
+        assert!(heavy.validate().is_err());
+        let none = HybridConfig {
+            lexical_candidates: 0,
+            ..HybridConfig::default()
+        };
+        assert!(none.validate().is_err());
+        let base = toml::to_string(&AppConfig::default()).unwrap();
+        // An invalid override is ignored (startup must never fail on settings.toml).
+        let c = AppConfig::from_toml_with_overrides(
+            &base,
+            Some("[search.hybrid]\nlexical_weight = 3.0\n"),
+        )
+        .unwrap();
+        assert_eq!(c.search.hybrid.lexical_weight, 0.15);
+    }
 
     /// Regression pin: an explicit relative path in config.toml must not mask
     /// TURBOVEC_* (the container could not persist its index for weeks).

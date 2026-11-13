@@ -64,6 +64,11 @@ spreading_activation_bump = 0.005
 # backend: "openai" (uses OPENAI_API_KEY) or "local" (uses LOCAL_LLM_URL + LOCAL_LLM_API_KEY)
 # Embedding provider is configured separately: [embedding].provider = "openai" | "ollama"
 [slumber.consolidation]
+# LLM consolidation merges related memories into summaries (slumber phase 6).
+# Off by default: summaries can drop exceptions and exact values. Durable types
+# (profile, preference, relationship, setup, instruction, decision, commitment)
+# are never merged even when it is on. Toggle in the web UI: Settings -> Slumber.
+# enabled = false
 backend = "openai"
 model = "gpt-4o-mini"    # OpenAI model name
 
@@ -132,6 +137,14 @@ theme = "dark"
 
 # Retrieval-strength heuristic, using raw cosine before boosts/min_score/pagination.
 # Thresholds must satisfy 0 <= partial < high <= 1.
+[search.hybrid]
+# Blend exact-word (BM25) matches into vector search; helps names, IDs and rare
+# words. Toggle in the web UI: Settings -> Search -> Keyword matching.
+# On the MemDerive bench it lifts top-15 support recall from 47.6 to ~52.5.
+# enabled = false
+# lexical_weight = 0.15      # bonus for the best keyword match, cosine scale
+# lexical_candidates = 50    # keyword candidates per query
+
 [search.coverage]
 high = 0.55
 partial = 0.40
