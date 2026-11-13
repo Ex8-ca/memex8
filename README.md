@@ -185,7 +185,7 @@ Nightly "sleep" pipeline (13 phases): deduplicate → **TurboQuant compression**
 
 - Docker & Docker Compose v2 (`docker compose`, not `docker-compose`)
 - OpenAI API key *(or Ollama for fully local embeddings, see [Local embeddings](#local-embeddings-ollama))*
-- A few GB of free disk and a few minutes: there is no prebuilt image, so the first `docker compose up` compiles the Rust binary inside Docker
+- A few GB of free disk. By default the first `docker compose up` compiles the Rust binary inside Docker (a few minutes); or use the [prebuilt image](#3-run) (linux/amd64) and skip the build
 - **Your user must be able to talk to the Docker daemon.** Either:
   - Add yourself to the `docker` group: `sudo usermod -aG docker $USER`, then log
     out and back in (or `newgrp docker` for the current shell), **or**
@@ -249,6 +249,15 @@ OPENAI_API_KEY=sk-...        # or leave empty + set EMBEDDING_PROVIDER=ollama
 docker compose up -d
 docker compose ps        # wait until memex8 shows "healthy" (the first run builds the image: a few minutes)
 ```
+
+**Faster: prebuilt image.** Releases publish `ghcr.io/ex8-ca/memex8` (linux/amd64; tags like `0.2.0`, `0.2` and `latest`). Layer the override file to pull it instead of building:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+# pin a version: MEMEX8_VERSION=0.2.0 in .env  (default: latest)
+```
+
+On arm64 (Apple silicon, Raspberry Pi) build from source with plain `docker compose up -d`.
 
 Memories and the search index live in Docker volumes (`qdrant_data`,
 `memex8_data`), and a daily digest is written to `~/.memex8/` on the host.
