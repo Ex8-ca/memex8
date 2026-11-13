@@ -31,6 +31,25 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Minimum fraction of live memories a TurboVec index must cover to be
+/// trusted for search.
+///
+/// TurboVec is preferred over Qdrant in the search path, so an index that
+/// covers only a fraction of the corpus silently shrinks the searchable set:
+/// it does not just return stale results, it returns *fewer* results. A 90%
+/// threshold tolerates the normal gap (memories ingested since the last
+/// rebuild) while rejecting an index that is genuinely stale.
+pub const TURBOVEC_MIN_COVERAGE_PERCENT: u64 = 90;
+
+/// Whether a TurboVec index holding `indexed` vectors covers the `live`
+/// memory corpus closely enough to be used for search.
+pub fn turbovec_index_covers_live(indexed: u64, live: u64) -> bool {
+    if live == 0 {
+        return true;
+    }
+    indexed.saturating_mul(100) >= live.saturating_mul(TURBOVEC_MIN_COVERAGE_PERCENT)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryResult {
     pub id: String,
@@ -167,7 +186,7 @@ impl Engine {
         store.ensure_collections(dimensions).await?;
 
         // Try to load TurboVec index from disk for fast search
-        let turbovec_index = Self::init_turbovec_index(&config);
+        let turbovec_index = Self::init_turbovec_index(&config, &store).await;
 
         Ok(Self {
             config,
@@ -193,8 +212,16 @@ impl Engine {
     }
 
     /// Load TurboVec index from disk if it exists, otherwise return empty.
-    fn init_turbovec_index(
+    ///
+    /// A loaded index is only trusted when it actually covers the memories in
+    /// Qdrant. TurboVec is preferred over Qdrant in the search path, so a stale
+    /// index does not merely return old results: it silently shrinks the
+    /// searchable set to whatever the index happens to contain. Comparing the
+    /// index size against the live Qdrant count catches that and falls back to
+    /// the (complete) Qdrant path until the next slumber rebuilds the index.
+    async fn init_turbovec_index(
         config: &AppConfig,
+        store: &QdrantStore,
     ) -> Arc<RwLock<Option<quantizer::TurboQuantVectorIndex>>> {
         let index_path = config.turbovec.index_path.clone();
         let id_map_path = config.turbovec.id_map_path.clone();
@@ -205,15 +232,29 @@ impl Engine {
             quantizer::TurboQuantVectorIndex::load(&index_path, &id_map_path, dims, bit_width);
         match loaded {
             Ok(index) => {
-                tracing::info!(
-                    "📦 Loaded TurboVec index: {} vectors from {} ({}d @ {}-bit, {:.1}x compression)",
-                    index.vector_count(),
-                    index_path,
-                    dims,
-                    bit_width,
-                    index.compression_ratio()
-                );
-                Arc::new(RwLock::new(Some(index)))
+                let indexed = index.vector_count() as u64;
+                // If Qdrant can't be counted, keep the previous behaviour (use the index).
+                let live = store.count_memories().await.unwrap_or(0);
+                if turbovec_index_covers_live(indexed, live) {
+                    tracing::info!(
+                        "📦 Loaded TurboVec index: {} vectors from {} ({}d @ {}-bit, {:.1}x compression)",
+                        index.vector_count(),
+                        index_path,
+                        dims,
+                        bit_width,
+                        index.compression_ratio()
+                    );
+                    Arc::new(RwLock::new(Some(index)))
+                } else {
+                    tracing::warn!(
+                        "⚠️ TurboVec index at {} covers only {} of {} live memories; \
+                         ignoring it and falling back to Qdrant until the next slumber rebuilds it",
+                        index_path,
+                        indexed,
+                        live
+                    );
+                    Arc::new(RwLock::new(None))
+                }
             }
             Err(e) => {
                 tracing::debug!(
@@ -1579,6 +1620,40 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         0.0
     } else {
         dot / (norm_a * norm_b)
+    }
+}
+
+#[cfg(test)]
+mod turbovec_coverage_tests {
+    use super::turbovec_index_covers_live;
+
+    /// The stale-index regression pin: a 342-vector index was once loaded for
+    /// a 12,374-memory corpus, silently hiding 97% of memories from search.
+    #[test]
+    fn test_stale_turbovec_index_is_rejected() {
+        assert!(!turbovec_index_covers_live(342, 12_374));
+    }
+
+    /// A freshly rebuilt index covering the whole corpus must be accepted.
+    #[test]
+    fn test_full_turbovec_index_is_accepted() {
+        assert!(turbovec_index_covers_live(12_367, 12_374));
+        assert!(turbovec_index_covers_live(12_374, 12_374));
+    }
+
+    /// The normal gap (memories ingested since the last rebuild) must not
+    /// cause the index to be thrown away on every restart.
+    #[test]
+    fn test_small_index_gap_is_tolerated() {
+        assert!(turbovec_index_covers_live(9_500, 10_000));
+        assert!(!turbovec_index_covers_live(8_900, 10_000));
+    }
+
+    /// An empty corpus is not a reason to reject an index.
+    #[test]
+    fn test_empty_corpus_accepts_any_index() {
+        assert!(turbovec_index_covers_live(0, 0));
+        assert!(turbovec_index_covers_live(342, 0));
     }
 }
 

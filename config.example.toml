@@ -98,6 +98,12 @@ max_optimization_threads = 2
 enabled = true
 max_memories = 20
 update_on_slumber = true
+# Root directory for MEMEX8.md files written for memories whose `source_file`
+# is a label ("hermes", "hermes-sync") or URL rather than a real file path.
+# In Docker this is the `/watch` bind mount, so they land on the host under
+# `watch_dirs/<label>/MEMEX8.md`. Memories from a real file path still get
+# their MEMEX8.md beside that file. Default: "/watch".
+# output_dir = "/watch"
 
 [digest_md]
 enabled = true

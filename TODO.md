@@ -85,6 +85,16 @@
 - [ ] Backup/restore (`memex8 backup` / `memex8 restore`)
 - [ ] Prometheus metrics endpoint
 
+### 13. Wiki Pages per Realm
+- [ ] **Surface realm consolidation summaries as first-class wiki pages**: today the consolidation output lives only in Qdrant payloads; promote it to a per-realm "wiki page" browsable from the Web UI
+  - Inspired by Karpathy's "LLM Wiki" (docs as an LLM-maintained, incrementally growing artifact)
+  - **Pre-req:** slumber's LLM consolidation phase has been returning 0 consolidations; it must produce real output first
+  - **Backend:** `GET /api/v1/realms/:id/wiki` returns rendered markdown; `POST /api/v1/realms/:id/wiki/regenerate` on demand
+  - **Storage:** dedicated `wiki_pages` collection keyed by `realm_id` (not in `memories`, so wiki pages don't Weibull-decay)
+  - **Generation:** at the end of the consolidation phase, stitch per-cluster summaries into one markdown page per realm (H2 per cluster, links back to source memory IDs, `last regenerated YYYY-MM-DD` header)
+  - **Web UI:** a "Wiki" tab next to Overview / Cards / Graph / Realms / Timeline: realm list left, rendered markdown right
+  - **Files (rough):** new `src/engine/wiki.rs` + `src/storage/wiki_pages.rs` + routes in `src/api/` + additions to `web-dist/index.html`
+
 ## ✅ Completed
 
 ### Core
