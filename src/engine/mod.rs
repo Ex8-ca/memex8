@@ -890,42 +890,8 @@ impl Engine {
             None => all,
         };
 
-        // Sort
         let mut sorted = filtered;
-        match sort {
-            "importance" => sorted.sort_by(|a, b| {
-                let cmp = a.importance.partial_cmp(&b.importance).unwrap();
-                if descending {
-                    cmp
-                } else {
-                    cmp.reverse()
-                }
-            }),
-            "last_accessed" => sorted.sort_by(|a, b| {
-                let cmp = a.last_accessed.cmp(&b.last_accessed);
-                if descending {
-                    cmp
-                } else {
-                    cmp.reverse()
-                }
-            }),
-            "access_count" => sorted.sort_by(|a, b| {
-                let cmp = a.access_count.cmp(&b.access_count);
-                if descending {
-                    cmp
-                } else {
-                    cmp.reverse()
-                }
-            }),
-            _ => sorted.sort_by(|a, b| {
-                let cmp = a.ingested_at.cmp(&b.ingested_at);
-                if descending {
-                    cmp
-                } else {
-                    cmp.reverse()
-                }
-            }),
-        }
+        sort_memories(&mut sorted, sort, descending);
         Ok(sorted)
     }
 
@@ -1580,6 +1546,31 @@ impl Engine {
     }
 }
 
+/// Order memories for `GET /api/v1/memories`. `descending` puts the largest
+/// value first (highest importance, newest timestamp, most accesses); unknown
+/// sort keys fall back to `ingested_at`. NaN importance sorts without panicking.
+pub(crate) fn sort_memories(
+    memories: &mut [crate::storage::qdrant::MemoryPoint],
+    sort: &str,
+    descending: bool,
+) {
+    use std::cmp::Ordering;
+    let key: fn(
+        &crate::storage::qdrant::MemoryPoint,
+        &crate::storage::qdrant::MemoryPoint,
+    ) -> Ordering = match sort {
+        "importance" => |a, b| a.importance.total_cmp(&b.importance),
+        "last_accessed" => |a, b| a.last_accessed.cmp(&b.last_accessed),
+        "access_count" => |a, b| a.access_count.cmp(&b.access_count),
+        _ => |a, b| a.ingested_at.cmp(&b.ingested_at),
+    };
+    if descending {
+        memories.sort_by(|a, b| key(b, a));
+    } else {
+        memories.sort_by(key);
+    }
+}
+
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -1623,5 +1614,68 @@ mod tests {
         let stale = raw_score * verification_score_multiplier("stale");
         assert!(verified > stale);
         assert!(stale > contradicted);
+    }
+
+    fn listed(
+        id: &str,
+        importance: f32,
+        ingested_at: &str,
+        access_count: u32,
+    ) -> crate::storage::qdrant::MemoryPoint {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "content": id, "summary": null, "source_file": null,
+            "realm_id": null, "realm_name": "r", "importance": importance, "upvotes": 0,
+            "tags": [], "ingested_at": ingested_at, "last_accessed": ingested_at,
+            "access_count": access_count, "chunk_type": "manual", "heading": null, "source_hash": ""
+        }))
+        .unwrap()
+    }
+
+    fn ids(memories: &[crate::storage::qdrant::MemoryPoint]) -> Vec<&str> {
+        memories.iter().map(|m| m.id.as_str()).collect()
+    }
+
+    #[test]
+    fn test_sort_memories_descending_puts_largest_first() {
+        // Regression: `direction=desc` (the API default, documented as
+        // "newest first") returned the oldest / least important memories.
+        let mut m = vec![
+            listed("old", 0.2, "2026-05-01T00:00:00Z", 5),
+            listed("new", 0.9, "2026-11-12T00:00:00Z", 1),
+            listed("mid", 0.5, "2026-08-01T00:00:00Z", 9),
+        ];
+        super::sort_memories(&mut m, "ingested_at", true);
+        assert_eq!(ids(&m), ["new", "mid", "old"]);
+        super::sort_memories(&mut m, "importance", true);
+        assert_eq!(ids(&m), ["new", "mid", "old"]);
+        super::sort_memories(&mut m, "access_count", true);
+        assert_eq!(ids(&m), ["mid", "old", "new"]);
+        super::sort_memories(&mut m, "unknown-key", true);
+        assert_eq!(ids(&m), ["new", "mid", "old"]);
+    }
+
+    #[test]
+    fn test_sort_memories_ascending_puts_smallest_first() {
+        let mut m = vec![
+            listed("new", 0.9, "2026-11-12T00:00:00Z", 1),
+            listed("old", 0.2, "2026-05-01T00:00:00Z", 5),
+            listed("mid", 0.5, "2026-08-01T00:00:00Z", 9),
+        ];
+        super::sort_memories(&mut m, "ingested_at", false);
+        assert_eq!(ids(&m), ["old", "mid", "new"]);
+        super::sort_memories(&mut m, "importance", false);
+        assert_eq!(ids(&m), ["old", "mid", "new"]);
+    }
+
+    #[test]
+    fn test_sort_memories_nan_importance_does_not_panic() {
+        let mut m = vec![
+            listed("a", 0.0, "2026-01-01T00:00:00Z", 0),
+            listed("b", 0.5, "2026-01-02T00:00:00Z", 0),
+        ];
+        // JSON has no NaN, so set it after deserialising the fixture.
+        m[0].importance = f32::NAN;
+        super::sort_memories(&mut m, "importance", true);
+        assert_eq!(m.len(), 2);
     }
 }
