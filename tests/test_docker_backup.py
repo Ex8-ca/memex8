@@ -133,6 +133,22 @@ class DockerBackupTests(unittest.TestCase):
         self.assertEqual(override["services"]["memex8"]["environment"], original)
         self.assertTrue(any("up" in call.args[0] for call in run.call_args_list))
 
+    def test_upgrade_escapes_dollar_signs_for_compose(self):
+        """A "$" in an env value (e.g. an argon2 hash) must survive Compose interpolation."""
+        directory = self.make_backup()
+        manifest_path = directory / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["services"]["memex8"]["config"]["Env"] = ["MEMEX8_WEB_PASSWORD_HASH=$argon2id$v=19$m=1"]
+        manifest_path.write_text(json.dumps(manifest))
+        checks_path = directory / "checksums.json"
+        checks = json.loads(checks_path.read_text())
+        checks["manifest.json"] = backup.digest(manifest_path)
+        checks_path.write_text(json.dumps(checks))
+        with patch.object(backup, "backup", return_value=directory), patch.object(backup, "run"), patch("sys.argv", ["backup", "upgrade", "-f", "compose.yml", "--output", str(self.root), "--image", "memex8:new"]):
+            self.assertEqual(backup.main(), 0)
+        override = json.loads((directory / "upgrade.override.json").read_text())
+        self.assertEqual(override["services"]["memex8"]["environment"], ["MEMEX8_WEB_PASSWORD_HASH=$$argon2id$$v=19$$m=1"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -119,6 +119,16 @@ pub async fn run_with_engine(
 fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
+            "/settings",
+            axum::routing::get(crate::api::settings::get)
+                .put(crate::api::settings::put)
+                .delete(crate::api::settings::reset),
+        )
+        .route(
+            "/settings/restart",
+            axum::routing::post(crate::api::settings::restart),
+        )
+        .route(
             "/dedup/{id}/restore",
             axum::routing::post(crate::api::routes::memories::restore_duplicate),
         )

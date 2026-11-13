@@ -659,16 +659,97 @@ impl AppConfig {
         let config_path = Path::new(path);
         let mut config = if config_path.exists() {
             let content = std::fs::read_to_string(config_path)?;
-            let config: AppConfig = toml::from_str(&content)?;
-            config.slumber.validate_dedup()?;
-            config.search.coverage.validate()?;
-            config
+            let overrides = std::fs::read_to_string(Self::settings_path_for(&content)).ok();
+            Self::from_toml_with_overrides(&content, overrides.as_deref())?
         } else {
             tracing::warn!("Config file not found at {}, using defaults", path);
             Self::default()
         };
         config.apply_env_overrides();
         Ok(config)
+    }
+
+    /// Parse and validate a full config document.
+    pub fn from_value(v: &toml::Value) -> anyhow::Result<Self> {
+        let config: AppConfig = v.clone().try_into()?;
+        config.slumber.validate_dedup()?;
+        config.search.coverage.validate()?;
+        Ok(config)
+    }
+
+    /// Recursively merge `over` into `base` (tables merge, scalars replace).
+    pub fn merge_toml(base: &mut toml::Value, over: &toml::Value) {
+        match (base, over) {
+            (toml::Value::Table(b), toml::Value::Table(o)) => {
+                for (k, v) in o {
+                    match b.get_mut(k) {
+                        Some(existing) => Self::merge_toml(existing, v),
+                        None => {
+                            b.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            }
+            (b, o) => *b = o.clone(),
+        }
+    }
+
+    /// config.toml plus the UI-written overrides file. An overrides file that
+    /// is unparsable or yields an invalid config is ignored (with a warning)
+    /// so a bad saved setting can never stop the server from starting.
+    pub fn from_toml_with_overrides(
+        content: &str,
+        overrides: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        let base: toml::Value = toml::from_str(content)?;
+        if let Some(text) = overrides {
+            let attempt = toml::from_str::<toml::Value>(text)
+                .map_err(anyhow::Error::from)
+                .and_then(|over| {
+                    let mut merged = base.clone();
+                    Self::merge_toml(&mut merged, &over);
+                    Self::from_value(&merged)
+                });
+            match attempt {
+                Ok(c) => return Ok(c),
+                Err(e) => tracing::warn!("Ignoring invalid settings overrides: {e}"),
+            }
+        }
+        Self::from_value(&base)
+    }
+
+    /// Where UI-edited settings live: the data volume, next to the index.
+    pub fn settings_path_from_index(index_path: &str) -> std::path::PathBuf {
+        if let Ok(p) = std::env::var("MEMEX8_SETTINGS_PATH") {
+            if !p.is_empty() {
+                return p.into();
+            }
+        }
+        Path::new(index_path)
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("settings.toml")
+    }
+
+    fn settings_path_for(content: &str) -> std::path::PathBuf {
+        let from_file = toml::from_str::<toml::Value>(content)
+            .ok()
+            .and_then(|v| {
+                v.get("turbovec")?
+                    .get("index_path")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(default_turbovec_index_path);
+        let index = std::env::var("TURBOVEC_INDEX_PATH")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .unwrap_or(from_file);
+        Self::settings_path_from_index(&index)
+    }
+
+    pub fn settings_path(&self) -> std::path::PathBuf {
+        Self::settings_path_from_index(&self.turbovec.index_path)
     }
 
     /// Environment overrides applied after deserialization.
@@ -964,5 +1045,51 @@ mod tests {
                 map[t]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    fn base() -> String {
+        toml::to_string(&AppConfig::default()).unwrap()
+    }
+
+    #[test]
+    fn overrides_merge_over_base() {
+        let c = AppConfig::from_toml_with_overrides(
+            &base(),
+            Some("[slumber]\ndedup_threshold = 0.9\n[search.coverage]\nhigh = 0.7\n"),
+        )
+        .unwrap();
+        assert!((c.slumber.dedup_threshold - 0.9).abs() < 1e-6);
+        assert!((c.search.coverage.high - 0.7).abs() < 1e-6);
+        assert!((c.search.coverage.partial - 0.40).abs() < 1e-6); // untouched
+    }
+
+    #[test]
+    fn invalid_overrides_fall_back_to_base() {
+        let b = AppConfig::default();
+        // partial >= high is invalid; unparsable text is also ignored
+        for bad in [
+            "[search.coverage]\nhigh = 0.2\n",
+            "not = [valid",
+            "[slumber]\ndedup_threshold = \"x\"\n",
+        ] {
+            let c = AppConfig::from_toml_with_overrides(&base(), Some(bad)).unwrap();
+            assert_eq!(c.search.coverage.high, b.search.coverage.high);
+            assert_eq!(c.slumber.dedup_threshold, b.slumber.dedup_threshold);
+        }
+    }
+
+    #[test]
+    fn settings_path_sits_beside_the_index() {
+        std::env::remove_var("MEMEX8_SETTINGS_PATH");
+        let p = AppConfig::settings_path_from_index("/var/lib/memex8/data/memories.tv");
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("/var/lib/memex8/data/settings.toml")
+        );
     }
 }
