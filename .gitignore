@@ -18,3 +18,8 @@ __pycache__/
 
 # Private local memex8 environment files
 .env.memex8*
+
+# MemDerive bench: downloaded data, run output and the throwaway instance stay local
+bench/memderive/data/
+bench/memderive/results/
+bench/memderive/instance/
