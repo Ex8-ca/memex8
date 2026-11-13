@@ -143,7 +143,11 @@ impl SlumberEngine {
         }
 
         // Phase 6: LLM memory consolidation (only run when scheduler signals it)
-        if self.config.slumber.consolidation_schedule.is_empty() {
+        if !self.config.slumber.consolidation.enabled {
+            tracing::debug!(
+                "  Skipping consolidation: disabled (slumber.consolidation.enabled = false)"
+            );
+        } else if self.config.slumber.consolidation_schedule.is_empty() {
             tracing::debug!("  Skipping consolidation: schedule is disabled");
         } else if force_consolidation {
             tracing::info!("💤 Slumber phase 6: Memory consolidation (forced by scheduler)");

@@ -185,6 +185,23 @@ pub fn plan_duplicates(
 
 /// Derived summaries are never fed back into consolidation. With originals
 /// preserved, skip a source set already represented by a recorded summary.
+/// Memory types that hold durable facts and rules. Consolidation must never blend
+/// them into a summary: a summary can drop an exception or an exact value, and
+/// every later answer inherits the loss (MemDerive, arXiv:2610.25373, lesson L2).
+pub const CONSOLIDATION_PROTECTED_TYPES: &[&str] = &[
+    "profile",
+    "preference",
+    "relationship",
+    "setup",
+    "instruction",
+    "decision",
+    "commitment",
+];
+
+pub fn consolidation_protected_type(memory: &MemoryPoint) -> bool {
+    CONSOLIDATION_PROTECTED_TYPES.contains(&memory.memory_type.as_str())
+}
+
 pub fn consolidation_inputs<'a>(members: &[&'a MemoryPoint]) -> Vec<&'a MemoryPoint> {
     members
         .iter()
@@ -194,6 +211,7 @@ pub fn consolidation_inputs<'a>(members: &[&'a MemoryPoint]) -> Vec<&'a MemoryPo
                 && m.consolidated_from.is_empty()
                 && !certified(m)
                 && !consolidation_on_cooldown(m)
+                && !consolidation_protected_type(m)
         })
         .collect()
 }
@@ -265,6 +283,33 @@ pub fn source_fingerprint(sources: &[&MemoryPoint]) -> String {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
+
+    fn typed(id: &str, memory_type: &str) -> MemoryPoint {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "content": format!("memory {id}"), "summary": null,
+            "source_file": null, "realm_id": "r1", "realm_name": "Realm",
+            "importance": 1.0, "upvotes": 0, "tags": [],
+            "ingested_at": "2026-11-01T00:00:00Z", "last_accessed": "",
+            "access_count": 0, "chunk_type": "manual", "heading": null,
+            "source_hash": "h", "memory_type": memory_type, "visibility": "private"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn durable_types_are_never_consolidation_inputs() {
+        let protected: Vec<MemoryPoint> = CONSOLIDATION_PROTECTED_TYPES
+            .iter()
+            .map(|t| typed(t, t))
+            .collect();
+        let refs: Vec<&MemoryPoint> = protected.iter().collect();
+        assert!(consolidation_inputs(&refs).is_empty());
+
+        let general = typed("g", "general");
+        let event = typed("e", "event");
+        let untyped = typed("x", "");
+        assert_eq!(consolidation_inputs(&[&general, &event, &untyped]).len(), 3);
+    }
 
     fn point(id: &str, vector: &[f32]) -> MemoryPointWithVector {
         let memory = serde_json::from_value(serde_json::json!({
