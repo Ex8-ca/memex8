@@ -1,0 +1,11 @@
+# Use the prebuilt image from GitHub Container Registry instead of compiling
+# from source (linux/amd64). Layer it over the main compose file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+#
+# Pin a version with MEMEX8_VERSION (default: latest), e.g. in .env:
+#   MEMEX8_VERSION=0.2.0
+services:
+  memex8:
+    image: ghcr.io/ex8-ca/memex8:${MEMEX8_VERSION:-latest}
+    pull_policy: always
