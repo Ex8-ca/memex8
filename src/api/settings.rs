@@ -240,7 +240,13 @@ pub async fn get(State(st): State<Arc<AppState>>) -> Response {
         .iter()
         .map(|f| {
             let value = json_lookup(&running, f.key)
-                .map(|v| v.as_f64().map(|x| json!(round4(x))).unwrap_or(v.clone()))
+                .map(|v| {
+                    if v.is_f64() {
+                        json!(round4(v.as_f64().unwrap_or(0.0)))
+                    } else {
+                        v.clone()
+                    }
+                })
                 .unwrap_or(J::Null);
             let pending = toml_lookup(&overrides, f.key).map(toml_to_json);
             let changed = pending.as_ref().is_some_and(|p| !same(&value, p));
