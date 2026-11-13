@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="theme-color" content="#07060d">
-    <title>memex8 — Second Brain</title>
+    <title>memex8 — Associative Memory</title>
     <style>
         /* No external fonts or CDNs: this page talks to a private memory store,
            so it must not phone home. The stacks below pick up good local faces
@@ -79,6 +79,12 @@
         }
         .brand { display: flex; align-items: center; gap: 0.9rem; min-width: 0; }
         .logo { width: 42px; height: 42px; flex: none; }
+        /* "living memory" signature: the dashed orbit slowly scans and the core
+           breathes, so the wordmark feels like a running system, not a static icon. */
+        .logo .orbit-dash { transform-box: fill-box; transform-origin: center; animation: logo-spin 26s linear infinite; }
+        .logo .core-glow  { animation: logo-breathe 4.5s ease-in-out infinite; }
+        @keyframes logo-spin { to { transform: rotate(360deg); } }
+        @keyframes logo-breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
         .brand-title {
             font-family: var(--display); font-weight: 700; font-size: 1.55rem;
             letter-spacing: 0.06em; line-height: 1; text-transform: uppercase;
@@ -423,13 +429,13 @@
                         <stop offset="0" stop-color="#fff"/><stop offset="0.35" stop-color="#ff2e88"/><stop offset="1" stop-color="#ff2e88" stop-opacity="0"/>
                     </radialGradient>
                 </defs>
-                <circle cx="24" cy="24" r="21" fill="none" stroke="rgba(170,150,255,0.35)" stroke-dasharray="1.5 3"/>
+                <circle class="orbit-dash" cx="24" cy="24" r="21" fill="none" stroke="rgba(170,150,255,0.35)" stroke-dasharray="1.5 3"/>
                 <ellipse cx="24" cy="24" rx="21" ry="8" fill="none" stroke="rgba(45,226,230,0.55)" transform="rotate(-24 24 24)"/>
                 <ellipse cx="24" cy="24" rx="21" ry="8" fill="none" stroke="rgba(255,138,61,0.45)" transform="rotate(36 24 24)"/>
-                <circle cx="24" cy="24" r="11" fill="url(#lg-core)"/>
+                <circle class="core-glow" cx="24" cy="24" r="11" fill="url(#lg-core)"/>
             </svg>
             <div style="min-width:0">
-                <div class="brand-title">memex8<em>// second brain</em></div>
+                <div class="brand-title">memex8<em>// associative memory</em></div>
                 <div class="brand-sub" id="brand-sub">self-hosted memory · connecting…</div>
             </div>
         </div>
@@ -462,7 +468,7 @@
             <div class="ov-grid">
                 <article class="panel ov-hero">
                     <div class="panel-head">
-                        <span class="ttl"><span class="num">01</span><i class="dot" style="color:var(--pink)"></i>Memory core</span>
+                        <span class="ttl"><span class="num">01</span><i class="dot" style="color:var(--pink)"></i>The Memex</span>
                         <span class="aside" id="hero-aside">realms on the shell · top memories inside · cyan = associations</span>
                     </div>
                     <div class="core-wrap" id="core-wrap">
