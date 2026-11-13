@@ -20,6 +20,23 @@ A self-hosted memory system that models how **human memory actually works**: mem
 
 **[⭐ Star on GitHub](https://github.com/Ex8-ca/memex8) · [Report Issue](https://github.com/Ex8-ca/memex8/issues)**
 
+## Screenshots
+
+<table>
+  <tr>
+    <td width="33%"><a href="docs/screenshots/overview.jpg"><img src="docs/screenshots/overview.jpg" alt="Overview: the Memex sphere, verification, slumber, forgetting curves, largest realms"></a></td>
+    <td width="33%"><a href="docs/screenshots/graph.jpg"><img src="docs/screenshots/graph.jpg" alt="Association graph coloured by realm"></a></td>
+    <td width="33%"><a href="docs/screenshots/settings.jpg"><img src="docs/screenshots/settings.jpg" alt="Settings: editable server tunables"></a></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Overview</b><br>the Memex, verification, slumber, forgetting curves</td>
+    <td align="center"><b>Graph</b><br>associations, coloured by realm</td>
+    <td align="center"><b>Settings</b><br>edit server tunables behind your login</td>
+  </tr>
+</table>
+
+<sub>Taken from a real instance on a phone; memory text and realm names are redacted.</sub>
+
 ## Shared memory for Hermes, Claude Code, and Codex
 
 Use one memex8 server from **Hermes Agent, Claude Code, and Codex**, on the same
@@ -251,13 +268,70 @@ curl http://localhost:8080/health
 http://localhost:8080
 ```
 
+Sign in with a username and password (see [Signing in](#signing-in)), or paste
+your `MEMEX8_API_KEY` under *Settings → Advanced* if password login is off.
+
 > **Note:** `MEMEX8_API_KEY` is **required** when running `memex8 serve`.
 > The server refuses all `/api/v1` requests with `401 Unauthorized` when
 > the key is unset (fail-closed). For local development only, pass
 > `--allow-no-api-key` to start the server without it — the warning logs
 > will be loud on purpose. See [#11](../../issues/11) for context.
 
-**Web UI features:** an Overview dashboard (rotating memory-core sphere of realms, top memories and association links; verification breakdown; last slumber report; per-type Weibull forgetting curves; largest realms; just-remembered feed and live ticker), a Timeline scrubber built on `/api/v1/memories/timeline`, semantic search with the coverage verdict, realm filtering, a force-directed association graph that shows link strength on hover, and a memory detail view with retention-now, verification, "why it's linked" neighbours, upvote/downvote and delete. The page is a single self-contained file with no external fonts or CDNs.
+**Web UI features:** an Overview dashboard ("The Memex": a rotating sphere of realms, top memories and association links; verification breakdown; last slumber report; per-type Weibull forgetting curves; largest realms; just-remembered feed and live ticker), a Timeline scrubber built on `/api/v1/memories/timeline`, semantic search with the coverage verdict, realm filtering, a force-directed association graph that shows link strength on hover, a memory detail view with retention-now, verification, "why it's linked" neighbours, upvote/downvote and delete, and a Settings editor for server tunables. The page is a single self-contained file with no external fonts or CDNs.
+
+### Signing in
+
+Instead of pasting the API key into every browser, the UI can use a username and
+password. Add both to `.env.memex8`:
+
+```bash
+# make a hash (the password is read from stdin, 8+ characters)
+printf '%s' 'your-password' | docker run --rm -i --entrypoint memex8 <memex8-image> hash-password
+# or, with a local binary:  printf '%s' 'your-password' | memex8 hash-password
+
+MEMEX8_WEB_USER=alice
+MEMEX8_WEB_PASSWORD_HASH='$argon2id$v=19$m=19456,t=2,p=1$...'   # single quotes: the hash contains $
+```
+
+Recreate the container and the UI shows a sign-in screen. Details:
+
+- Passwords are stored only as an **argon2id** hash. A successful login sets a signed, `HttpOnly`, `SameSite=Strict` session cookie valid for 30 days (it also gets `Secure` when a reverse proxy sends `X-Forwarded-Proto: https`).
+- The `Authorization: Bearer` API key keeps working, so Hermes, the MCP bridge and other agents need no changes. The cookie is simply accepted as an alternative.
+- Five failed sign-ins in a minute lock login for the rest of that minute.
+- Rotating `MEMEX8_API_KEY` or changing the password signs everyone out.
+- *Settings → Sign out* ends the session. Login is off unless both variables are set.
+
+> **Plain HTTP:** the password and cookie cross your network unencrypted unless
+> you put memex8 behind HTTPS or Tailscale. See [Network exposure](#network-exposure).
+
+### Settings editor
+
+*Settings* (the gear) edits 15 validated tunables for **search coverage**,
+**slumber** (dedup, archive, prune, decay, associations, topic clusters) and
+**verification**. It sits behind the same login as the rest of the UI.
+
+- `config.toml` is mounted read-only, so edits are saved to a `settings.toml` on the data volume (next to the TurboVec index) and merged over `config.toml` at startup.
+- Changes apply after a restart. *Restart now* exits the process and the container's `unless-stopped` policy brings it back; each field shows *running* vs *pending* until then.
+- *Reset to config.toml* deletes the overrides file.
+- Values are range-checked, and cross-field rules hold (for example `coverage.partial < coverage.high`). An invalid or unparsable `settings.toml` is ignored with a warning, so a bad save can never stop the server from starting.
+- Secrets, URLs, paths and ports are **not** editable here.
+
+### Network exposure
+
+Inside Docker memex8 must listen on all interfaces, so who can reach it is set
+by the *host* side of the published ports (8080 web/API, 8081 MCP). That is the
+`MEMEX8_BIND_ADDR` variable in the compose `.env` (default `0.0.0.0`):
+
+```bash
+scripts/set-bind.sh                 # show the current setting
+scripts/set-bind.sh local --apply   # 127.0.0.1: this machine only
+scripts/set-bind.sh tailscale --apply  # this machine's Tailscale IP only
+scripts/set-bind.sh lan --apply     # every interface (default)
+scripts/set-bind.sh 192.168.1.50 --apply # one specific IPv4 address
+```
+
+`--apply` recreates the memex8 container (about 15–30 seconds; data is
+untouched). Without it the value is only written to `.env`.
 
 ---
 
@@ -382,6 +456,7 @@ memex8 slumber inspect-duplicates # Read-only candidate report; skips all other 
 memex8 slumber trigger # Run maintenance now
 memex8 doctor        # Diagnose issues
 memex8 serve         # Start REST API server
+memex8 hash-password # Hash a web-login password (reads stdin) for MEMEX8_WEB_PASSWORD_HASH
 memex8 mcp           # Start MCP server
 memex8 stats         # System statistics
 ```
@@ -411,6 +486,20 @@ memex8 stats         # System statistics
 | `GET`  | `/api/v1/realms` | List realms |
 | `POST` | `/api/v1/slumber/trigger` | Trigger slumber |
 | `GET`  | `/api/v1/health` | Health check (no auth) |
+
+### Web login & settings
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/auth/login` | Body `{ "username", "password" }`; sets the session cookie (no API key needed) |
+| `POST` | `/auth/logout` | Clear the session cookie |
+| `GET`  | `/auth/me` | `{ "login_enabled", "authenticated" }` |
+| `GET`  | `/api/v1/settings` | Editable tunables with running and pending values |
+| `PUT`  | `/api/v1/settings` | Body `{ "values": { "slumber.auto_archive_days": 21 } }`; validated, saved to `settings.toml` |
+| `DELETE` | `/api/v1/settings` | Discard saved overrides |
+| `POST` | `/api/v1/settings/restart` | Restart the server so saved settings apply |
+
+`/api/v1/*` accepts either the Bearer key or a valid session cookie.
 
 ### Reactions & Associations
 
