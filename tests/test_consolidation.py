@@ -100,6 +100,9 @@ def fixture(preserve=False, archive_dimensions=1, dedup_dry_run=True):
             config = config.replace('dedup_dry_run = true', 'dedup_dry_run = ' + str(dedup_dry_run).lower())
             config = config.replace('preserve_originals = true', 'preserve_originals = ' + str(preserve).lower())
             config = config.replace('idle_timeout = "10m"', 'idle_timeout = "24h"')
+            # Consolidation is opt-in since the switch landed; these tests exercise it.
+            config = config.replace('[slumber.consolidation]\nenabled = false', '[slumber.consolidation]\nenabled = true')
+            assert '[slumber.consolidation]\nenabled = true' in config
             config_path = work / "config.toml"
             config_path.write_text(config)
             command = [binary, "--config", str(config_path)]
