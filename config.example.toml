@@ -137,6 +137,14 @@ theme = "dark"
 
 # Retrieval-strength heuristic, using raw cosine before boosts/min_score/pagination.
 # Thresholds must satisfy 0 <= partial < high <= 1.
+[search.hybrid]
+# Blend exact-word (BM25) matches into vector search; helps names, IDs and rare
+# words. Toggle in the web UI: Settings -> Search -> Keyword matching.
+# On the MemDerive bench it lifts top-15 support recall from 47.6 to ~52.5.
+# enabled = false
+# lexical_weight = 0.15      # bonus for the best keyword match, cosine scale
+# lexical_candidates = 50    # keyword candidates per query
+
 [search.coverage]
 high = 0.55
 partial = 0.40

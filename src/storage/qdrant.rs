@@ -1051,6 +1051,50 @@ impl QdrantStore {
         Ok(!result.result.is_empty())
     }
 
+    /// Cosine-score a given set of memory IDs against `vector`, applying the same
+    /// realm/visibility filter as search. Missing or filtered-out IDs are simply
+    /// absent. Used to give keyword-only candidates a real similarity score.
+    pub async fn score_ids(
+        &self,
+        vector: &[f32],
+        ids: &[String],
+        realm: Option<&str>,
+        visibility: Option<&str>,
+    ) -> anyhow::Result<Vec<SearchResult>> {
+        let point_ids: Vec<qdrant_client::qdrant::PointId> = ids
+            .iter()
+            .filter_map(|id| uuid::Uuid::parse_str(id).ok())
+            .map(|u| u.to_string().into())
+            .collect();
+        if point_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let limit = point_ids.len() as u64;
+        let mut filter = Self::retrieval_filter(realm, None, visibility);
+        filter.must.push(Condition::has_id(point_ids));
+        let result = self
+            .client
+            .search_points(
+                SearchPointsBuilder::new(MEMORIES, vector, limit)
+                    .filter(filter)
+                    .with_payload(true)
+                    .with_vectors(false),
+            )
+            .await?;
+        Ok(result
+            .result
+            .into_iter()
+            .map(|r| {
+                let id = point_id_to_string(r.id.as_ref());
+                SearchResult {
+                    payload: memory_from_payload(&id, &map_to_json(&r.payload)),
+                    id,
+                    score: r.score,
+                }
+            })
+            .collect())
+    }
+
     pub async fn search_filtered(
         &self,
         vector: &[f32],

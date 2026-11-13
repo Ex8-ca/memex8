@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod embedder;
 pub mod graph;
 pub mod ingester;
+pub mod lexical;
 pub mod memex8_md;
 pub mod providers;
 pub mod quantizer;
@@ -131,6 +132,8 @@ pub struct Engine {
     /// TurboVec compressed vector index for fast search.
     /// Loaded from disk on startup, rebuilt during slumber.
     turbovec_index: Arc<RwLock<Option<quantizer::TurboQuantVectorIndex>>>,
+    /// BM25 keyword index (a cache rebuilt from Qdrant; see `lexical`).
+    lexical: Arc<RwLock<lexical::LexicalIndex>>,
 }
 
 struct SlumberState {
@@ -188,7 +191,7 @@ impl Engine {
         // Try to load TurboVec index from disk for fast search
         let turbovec_index = Self::init_turbovec_index(&config, &store).await;
 
-        Ok(Self {
+        let engine = Self {
             config,
             store,
             slumber_state: Arc::new(RwLock::new(SlumberState {
@@ -208,7 +211,27 @@ impl Engine {
             file_watcher: Arc::new(RwLock::new(None)),
             config_path: "config.toml".to_string(),
             turbovec_index,
-        })
+            lexical: Arc::new(RwLock::new(lexical::LexicalIndex::default())),
+        };
+        if let Err(e) = engine.rebuild_lexical_index().await {
+            tracing::warn!(
+                "Lexical index not built ({e}); search stays vector-only until the next rebuild"
+            );
+        }
+        Ok(engine)
+    }
+
+    /// Rebuild the BM25 keyword index from every memory in Qdrant.
+    pub async fn rebuild_lexical_index(&self) -> anyhow::Result<usize> {
+        let all = self.store.scroll_all_memories().await?;
+        let mut fresh = lexical::LexicalIndex::default();
+        for m in &all {
+            fresh.upsert(&m.id, &lexical::memory_text(m));
+        }
+        let n = fresh.len();
+        *self.lexical.write().await = fresh;
+        tracing::info!("🔤 Lexical index: {} memories", n);
+        Ok(n)
     }
 
     /// Load TurboVec index from disk if it exists, otherwise return empty.
@@ -711,6 +734,53 @@ impl Engine {
         };
         drop(tv_guard);
 
+        // Hybrid: blend BM25 keyword matches in (see `lexical`). Tag-filtered
+        // searches stay dense-only. Any failure falls back to the dense results.
+        let hybrid = &self.config.search.hybrid;
+        let results = if hybrid.enabled && tags.is_none_or(|t| t.is_empty()) {
+            let hits = self
+                .lexical
+                .read()
+                .await
+                .search(query, hybrid.lexical_candidates);
+            let have: std::collections::HashSet<&str> =
+                results.iter().map(|(_, p)| p.id.as_str()).collect();
+            let missing: Vec<String> = hits
+                .iter()
+                .filter(|(id, _)| !have.contains(id.as_str()))
+                .map(|(id, _)| id.clone())
+                .collect();
+            let lexical_only = if missing.is_empty() {
+                Ok(Vec::new())
+            } else {
+                self.store
+                    .score_ids(query_vector, &missing, realm, visibility)
+                    .await
+                    .map(|v| v.into_iter().map(|r| (r.score, r.payload)).collect())
+            };
+            match lexical_only {
+                Ok(lexical_only) => lexical::apply_lexical_bonus(
+                    results,
+                    lexical_only,
+                    &hits,
+                    hybrid.lexical_weight,
+                    min_score,
+                ),
+                Err(e) => {
+                    tracing::warn!("Keyword candidates skipped: {e}");
+                    lexical::apply_lexical_bonus(
+                        results,
+                        Vec::new(),
+                        &hits,
+                        hybrid.lexical_weight,
+                        min_score,
+                    )
+                }
+            }
+        } else {
+            results
+        };
+
         // Phase A.2: soft down-weight by verification status. Applies to ALL
         // retrieval paths above (TurboVec, Qdrant fallback, tag-filter).
         // Never filters — only re-weights, then re-sorts so the weighted
@@ -1077,7 +1147,9 @@ impl Engine {
 
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
         let _guard = self.store.maintenance_guard().await;
-        self.store.delete_memory(id).await
+        self.store.delete_memory(id).await?;
+        self.lexical.write().await.remove(id);
+        Ok(())
     }
 
     pub async fn edit_memory(&self, id: &str, new_content: &str) -> anyhow::Result<()> {
@@ -1098,6 +1170,10 @@ impl Engine {
         existing.verification_confidence = None;
         existing.reaction_score = crate::engine::reactions::infer_reaction(new_content);
         self.store.replace_memory(&existing, &vector).await?;
+        self.lexical
+            .write()
+            .await
+            .upsert(id, &lexical::memory_text(&existing));
         tracing::info!("Updated memory {}", id);
         Ok(())
     }
@@ -1138,6 +1214,11 @@ impl Engine {
             slumber.run_full_pipeline(force_consolidation).await
         }
         .await;
+        // Slumber rewrites, merges and deletes memories without going through the
+        // engine hooks, so refresh the keyword index from Qdrant afterwards.
+        if let Err(e) = self.rebuild_lexical_index().await {
+            tracing::warn!("Lexical index rebuild after slumber failed: {e}");
+        }
         // Reset even after an archive/index/storage failure so status is accurate.
         if result.is_err() {
             self.slumber_state.write().await.status = "idle".into();
@@ -1291,6 +1372,15 @@ impl Engine {
             )
             .await?;
 
+        {
+            let mut text = content.to_string();
+            for t in tags.as_deref().unwrap_or(&[]) {
+                text.push(' ');
+                text.push_str(t);
+            }
+            self.lexical.write().await.upsert(&id, &text);
+        }
+
         Ok(id)
     }
 
@@ -1377,6 +1467,9 @@ impl Engine {
             };
             self.store.replace_memory(&memory, &vector).await?;
             stored += 1;
+        }
+        if let Err(e) = self.rebuild_lexical_index().await {
+            tracing::warn!("Lexical index rebuild after import failed: {e}");
         }
         Ok(stored)
     }
@@ -1575,7 +1668,11 @@ impl Engine {
 
     /// Restore memories, realms, and graph edges from a backup tarball.
     pub async fn restore(&self, backup_path: &str, force: bool) -> anyhow::Result<usize> {
-        backup::restore(self, backup_path, force).await
+        let n = backup::restore(self, backup_path, force).await?;
+        if let Err(e) = self.rebuild_lexical_index().await {
+            tracing::warn!("Lexical index rebuild after restore failed: {e}");
+        }
+        Ok(n)
     }
 
     /// List available backups sorted by date (newest first).

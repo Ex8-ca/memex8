@@ -37,6 +37,21 @@ struct Field {
 
 const FIELDS: &[Field] = &[
     Field {
+        key: "search.hybrid.enabled",
+        group: "Search",
+        label: "Keyword matching",
+        help:
+            "Blend exact-word (BM25) matches into vector search. Helps names, IDs and rare words.",
+        kind: Kind::Bool,
+    },
+    Field {
+        key: "search.hybrid.lexical_weight",
+        group: "Search",
+        label: "Keyword weight",
+        help: "How much a strong keyword match adds to a result's score (0 = none).",
+        kind: Kind::Float(0.0, 1.0),
+    },
+    Field {
         key: "search.coverage.high",
         group: "Search",
         label: "Coverage: high",
