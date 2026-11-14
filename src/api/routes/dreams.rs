@@ -89,15 +89,24 @@ pub async fn delete(
     }
 }
 
-/// Mark a pending dream kept.
+#[derive(Deserialize, Default)]
+pub struct KeepBody {
+    /// Also store the dream as a `dream`-type memory (hidden from normal search).
+    #[serde(default)]
+    pub remember: bool,
+}
+
+/// Mark a pending dream kept; optional body `{ "remember": true }`.
 pub async fn keep(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    body: Option<Json<KeepBody>>,
 ) -> Result<Json<Dream>, ApiError> {
+    let remember = body.map(|b| b.0.remember).unwrap_or(false);
     state
         .engine
-        .dream_store()
-        .keep(&id)?
+        .keep_dream(&id, remember)
+        .await?
         .map(Json)
         .ok_or_else(|| ApiError::NotFound(id))
 }
@@ -132,6 +141,7 @@ mod tests {
             seed_ids: vec![],
             model: "m".into(),
             status: DreamStatus::Pending,
+            remembered_as: None,
         };
         let p = preview(&d);
         assert!(!p.contains('\n') && p.ends_with('…') && p.chars().count() <= 161);

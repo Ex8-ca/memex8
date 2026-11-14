@@ -300,6 +300,29 @@
         .legend-item:hover { color: var(--text); }
         .legend-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 
+        /* ── Dreams view ───────────────────────────────────── */
+        .nav-tab .badge { display: none; margin-left: 0.35rem; padding: 0 0.4rem; border-radius: 99px; background: var(--violet); color: #fff; font-size: 0.6rem; letter-spacing: 0.04em; line-height: 1.5; box-shadow: 0 0 10px var(--violet); }
+        .nav-tab .badge.on { display: inline-block; }
+        .dream-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
+        .dream-note { font-size: 0.78rem; color: var(--muted); max-width: 46rem; line-height: 1.5; }
+        .dream-grid { display: grid; gap: 0.7rem; }
+        .dream-card { position: relative; padding: 0.9rem 1.1rem; border: 1px solid var(--line); border-radius: 12px; cursor: pointer; background: linear-gradient(135deg, rgba(155, 92, 255, 0.10), transparent 60%), var(--panel); }
+        .dream-card:hover { border-color: var(--violet); box-shadow: 0 14px 30px -18px var(--violet); }
+        .dream-card.pending { border-color: rgba(155, 92, 255, 0.55); }
+        .dream-card h3 { font-family: Georgia, "Times New Roman", serif; font-style: italic; font-weight: 400; font-size: 1.05rem; margin: 0.15rem 0 0.3rem; }
+        .dream-card p { font-size: 0.8rem; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .dream-meta { display: flex; gap: 0.5rem; align-items: center; font-family: var(--mono); font-size: 0.64rem; color: var(--dim); letter-spacing: 0.06em; text-transform: uppercase; }
+        .dream-pill { padding: 0 0.45rem; border-radius: 99px; border: 1px solid var(--violet); color: var(--violet); }
+        .dream-pill.kept { border-color: var(--line-strong); color: var(--muted); }
+        .dream-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.7rem; }
+        .dream-text { font-family: Georgia, "Times New Roman", serif; font-style: italic; font-size: 1.05rem; line-height: 1.7; color: #e6dcff; white-space: pre-wrap; margin: 0.8rem 0 1rem; }
+        .waking { border-left: 2px solid var(--cyan); padding: 0.4rem 0.8rem; margin-bottom: 1rem; font-size: 0.86rem; }
+        .waking b { display: block; font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--cyan); font-weight: 500; margin-bottom: 0.2rem; }
+        .woven { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+        .woven .chip { cursor: pointer; color: var(--violet); }
+        .woven .chip.gone { opacity: 0.35; cursor: default; text-decoration: line-through; }
+        .woven .chip.cited { color: var(--cyan); }
+
         /* ── Timeline view ─────────────────────────────────── */
         .tl-panel { margin-bottom: 1rem; }
         .tl-readout { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.8rem; }
@@ -460,6 +483,7 @@
             <button class="nav-tab" data-view="cards" role="tab">Memories</button>
             <button class="nav-tab" data-view="graph" role="tab">Graph</button>
             <button class="nav-tab" data-view="timeline" role="tab">Timeline</button>
+            <button class="nav-tab" data-view="dreams" role="tab">Dreams<span class="badge" id="dream-badge">0</span></button>
             <button class="nav-tab" data-view="realms" role="tab">Realms</button>
         </div>
         <form class="search-box" id="search-form" role="search">
@@ -570,6 +594,15 @@
             <div class="tl-list" id="tl-list"><div class="loading">Loading</div></div>
         </section>
 
+        <!-- Dreams -->
+        <section class="view" id="view-dreams">
+            <div class="dream-head">
+                <div class="dream-note" id="dream-note">Dreams are fiction woven from your memories, not memories. They never appear in search. Keep the ones you like, discard the rest.</div>
+                <button class="primary-btn" id="dream-now" onclick="dreamNow()">Dream now</button>
+            </div>
+            <div class="dream-grid" id="dream-list"><div class="loading">Loading</div></div>
+        </section>
+
         <!-- Realms -->
         <section class="view" id="view-realms">
             <div class="list-head"><h2>Realms<small id="realms-sub"></small></h2></div>
@@ -627,6 +660,19 @@
     </div>
 
     <!-- Memory Detail Modal -->
+    <div class="modal-overlay" id="dream-overlay" style="z-index: 250;" onclick="if(event.target===this) closeDream()">
+        <div class="modal" style="max-width: 680px;">
+            <button class="modal-close" onclick="closeDream()">✕</button>
+            <div class="dream-meta" id="dream-modal-meta"></div>
+            <h2 id="dream-modal-title" style="font-family: Georgia, serif; font-style: italic; font-weight: 400; margin: 0.3rem 0 0;"></h2>
+            <div class="dream-text" id="dream-modal-text"></div>
+            <div class="waking" id="dream-modal-waking"></div>
+            <div class="dream-meta" style="margin-bottom: 0.4rem;">woven from</div>
+            <div class="woven" id="dream-modal-woven"></div>
+            <div class="dream-actions" id="dream-modal-actions" style="margin-top: 1.1rem;"></div>
+        </div>
+    </div>
+
     <div class="modal-overlay" id="modal-overlay">
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
             <button class="modal-close" onclick="closeModal()">✕</button>
@@ -794,8 +840,93 @@
                 stopGraphLoop();
             }
             if (name === 'timeline') initTimeline();
+            if (name === 'dreams') loadDreams();
         }
         document.querySelectorAll('.nav-tab').forEach(tab => tab.addEventListener('click', () => showView(tab.dataset.view)));
+
+        // ─── Dreams ──────────────────────────────────────────────
+        // A dream is fiction woven from memories, not a memory: it has its own API and
+        // never shows up in search. New dreams wait as "pending" until kept or discarded.
+        let DREAMS = [];
+        function setDreamBadge(n) {
+            const b = document.getElementById('dream-badge');
+            b.textContent = n; b.classList.toggle('on', n > 0);
+        }
+        async function loadDreamBadge() {
+            try { setDreamBadge((await api('/dreams?limit=1')).pending || 0); } catch (e) { /* older server: no dreams API */ }
+        }
+        async function loadDreams() {
+            const list = document.getElementById('dream-list');
+            try {
+                const r = await api('/dreams?limit=50');
+                DREAMS = r.dreams || [];
+                setDreamBadge(r.pending || 0);
+                document.getElementById('dream-note').innerHTML = r.enabled
+                    ? 'Dreams are fiction woven from your memories, not memories. They never appear in search. Keep the ones you like, discard the rest.'
+                    : 'Scheduled dreams are <b>off</b>. Turn them on in Settings → Dreams, or press <b>Dream now</b> for a one-off. Dreams are fiction, never searchable.';
+                list.innerHTML = DREAMS.length ? DREAMS.map(d => `
+                    <article class="dream-card ${d.status}" onclick="openDream('${d.id}')">
+                        <div class="dream-meta"><time>${escapeHtml(fmtDate(d.created_at))}</time><span class="dream-pill ${d.status}">${d.status === 'pending' ? 'new' : 'kept'}</span></div>
+                        <h3>${escapeHtml(d.title)}</h3>
+                        <p>${escapeHtml(d.preview)}</p>
+                        ${d.status === 'pending' ? `<div class="dream-actions" onclick="event.stopPropagation()">
+                            <button class="ghost-btn" onclick="keepDream('${d.id}', false)">Keep</button>
+                            <button class="ghost-btn" onclick="keepDream('${d.id}', true)">Keep &amp; remember</button>
+                            <button class="ghost-btn" onclick="discardDream('${d.id}')">Discard</button></div>` : ''}
+                    </article>`).join('') : '<div class="loading" style="animation:none">No dreams yet.</div>';
+            } catch (e) {
+                list.innerHTML = `<div class="loading err" style="animation:none">${escapeHtml(e.message)}</div>`;
+            }
+        }
+        async function dreamNow() {
+            const btn = document.getElementById('dream-now');
+            btn.disabled = true; btn.textContent = 'dreaming…';
+            try { const d = await api('/dreams', { method: 'POST' }); toast('A new dream is waiting'); await loadDreams(); openDream(d.id); }
+            catch (e) { toast(e.message, true); }
+            finally { btn.disabled = false; btn.textContent = 'Dream now'; }
+        }
+        async function keepDream(id, remember) {
+            try {
+                await api(`/dreams/${id}/keep`, { method: 'POST', body: JSON.stringify({ remember }) });
+                toast(remember ? 'Kept and remembered' : 'Kept');
+                closeDream(); loadDreams();
+            } catch (e) { toast(e.message, true); }
+        }
+        async function discardDream(id) {
+            if (!confirm('Discard this dream? It will be deleted.')) return;
+            try { await api(`/dreams/${id}`, { method: 'DELETE' }); toast('Discarded'); closeDream(); loadDreams(); }
+            catch (e) { toast(e.message, true); }
+        }
+        async function openDream(id) {
+            let d;
+            try { d = await api(`/dreams/${id}`); } catch (e) { toast(e.message, true); return; }
+            document.getElementById('dream-modal-meta').innerHTML = `<time>${escapeHtml(fmtDate(d.created_at))}</time><span class="dream-pill ${d.status}">${d.status === 'pending' ? 'new' : 'kept'}</span>${d.remembered_as ? '<span class="dream-pill kept">remembered</span>' : ''}`;
+            document.getElementById('dream-modal-title').textContent = d.title;
+            document.getElementById('dream-modal-text').textContent = d.dream;
+            document.getElementById('dream-modal-waking').innerHTML = `<b>Waking note</b>${escapeHtml(d.waking_note || '—')}`;
+            const cited = new Set(d.waking_note_ids || []);
+            const woven = document.getElementById('dream-modal-woven');
+            woven.innerHTML = (d.seed_ids || []).map(i => `<span class="chip flat" data-id="${i}">${escapeHtml(i.slice(0, 8))}</span>`).join('') || '<span class="subtle">—</span>';
+            document.getElementById('dream-modal-actions').innerHTML = d.status === 'pending'
+                ? `<button class="primary-btn" onclick="keepDream('${d.id}', false)">Keep</button>
+                   <button class="ghost-btn" onclick="keepDream('${d.id}', true)">Keep &amp; remember</button>
+                   <button class="ghost-btn" onclick="discardDream('${d.id}')">Discard</button>`
+                : `<button class="ghost-btn" onclick="discardDream('${d.id}')">Delete</button>`;
+            document.getElementById('dream-overlay').classList.add('active');
+            // Chips open the real memory; seeds that no longer exist are greyed out.
+            try {
+                const ids = (d.seed_ids || []).slice(0, 50);
+                const got = ids.length ? await api('/memories/batch-get', { method: 'POST', body: JSON.stringify({ ids }) }) : { memories: [], not_found: [] };
+                const gone = new Set(got.not_found || []);
+                woven.querySelectorAll('.chip').forEach(c => {
+                    const i = c.dataset.id;
+                    if (gone.has(i)) { c.classList.add('gone'); c.title = 'this memory no longer exists'; return; }
+                    if (cited.has(i)) c.classList.add('cited');
+                    c.onclick = () => { closeDream(); openMemory(i); };
+                });
+            } catch (e) { /* chips stay inert */ }
+        }
+        function closeDream() { document.getElementById('dream-overlay').classList.remove('active'); }
 
         // ─── Settings (per-device API key) ───────────────────────
         function openSettings() {
@@ -2185,6 +2316,7 @@
 
         // ─── Init ────────────────────────────────────────────────
         loadAll();
+        loadDreamBadge();
         if (!REDUCED_MOTION) startCore();
     </script>
 </body>

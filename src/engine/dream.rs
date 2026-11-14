@@ -153,6 +153,9 @@ pub struct Dream {
     pub model: String,
     #[serde(default = "legacy_kept")]
     pub status: DreamStatus,
+    /// Set when the user chose "also remember it": the id of the `dream`-type memory.
+    #[serde(default)]
+    pub remembered_as: Option<String>,
 }
 
 impl Dream {
@@ -167,6 +170,7 @@ impl Dream {
             seed_ids,
             model: model.to_string(),
             status: DreamStatus::Pending,
+            remembered_as: None,
         }
     }
 }
@@ -269,6 +273,19 @@ impl DreamStore {
         Ok(Some(d))
     }
 
+    /// Mark kept and record which memory it was stored as.
+    pub fn keep_remembered(&self, id: &str, memory_id: &str) -> anyhow::Result<Option<Dream>> {
+        let Some((path, mut d)) = self.find(id) else {
+            return Ok(None);
+        };
+        d.status = DreamStatus::Kept;
+        d.remembered_as = Some(memory_id.to_string());
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&d)?)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(Some(d))
+    }
+
     pub fn pending_count(&self) -> usize {
         self.list(usize::MAX, Some(DreamStatus::Pending)).len()
     }
@@ -294,6 +311,35 @@ impl DreamStore {
         }
         n
     }
+}
+
+// ───────────────── remembering a dream (explicit user choice) ─────────────────
+
+/// A remembered dream is a real memory of type `dream`, tagged `dream`. It is hidden
+/// from every search and recall unless the search itself filters on the `dream` tag.
+pub const DREAM_TYPE: &str = "dream";
+
+pub fn memory_text_for(d: &Dream) -> String {
+    format!(
+        "[dream] {}\n\n{}\n\nWaking note: {}",
+        d.title, d.dream, d.waking_note
+    )
+}
+
+/// Drop `dream`-type memories from results unless the caller explicitly filtered on
+/// the `dream` tag. This is how a kept dream stays out of normal search, recall and
+/// prefetch without a signature change on every search path.
+pub fn exclude_dream_memories(
+    results: Vec<(f32, MemoryPoint)>,
+    tags: Option<&[String]>,
+) -> Vec<(f32, MemoryPoint)> {
+    if tags.is_some_and(|t| t.iter().any(|x| x == DREAM_TYPE)) {
+        return results;
+    }
+    results
+        .into_iter()
+        .filter(|(_, m)| m.memory_type != DREAM_TYPE)
+        .collect()
 }
 
 // ──────────────────────────── prompt and parsing ──────────────────────────
@@ -677,6 +723,7 @@ mod tests {
             seed_ids: vec![],
             model: "m".into(),
             status,
+            remembered_as: None,
         }
     }
 
@@ -803,6 +850,64 @@ mod tests {
             .with_timezone(&Local)
             .date_naive();
         assert_eq!(s.last_date(), Some(want));
+        let _ = std::fs::remove_dir_all(s.dir());
+    }
+
+    // ---- remembered dreams stay out of default search ----
+
+    fn typed(id: &str, ty: &str) -> (f32, MemoryPoint) {
+        let mut m = mem(id, "x", 1, 1);
+        m.memory_type = ty.into();
+        (0.9, m)
+    }
+
+    #[test]
+    fn dream_memories_are_hidden_unless_the_search_asks_for_the_dream_tag() {
+        let rows = || {
+            vec![
+                typed("a", "general"),
+                typed("d", "dream"),
+                typed("b", "profile"),
+            ]
+        };
+        let ids = |v: Vec<(f32, MemoryPoint)>| v.into_iter().map(|r| r.1.id).collect::<Vec<_>>();
+        assert_eq!(ids(exclude_dream_memories(rows(), None)), ["a", "b"]);
+        assert_eq!(ids(exclude_dream_memories(rows(), Some(&[]))), ["a", "b"]);
+        let other = vec!["project".to_string()];
+        assert_eq!(
+            ids(exclude_dream_memories(rows(), Some(&other))),
+            ["a", "b"]
+        );
+        let opt_in = vec!["dream".to_string()];
+        assert_eq!(
+            ids(exclude_dream_memories(rows(), Some(&opt_in))),
+            ["a", "d", "b"]
+        );
+    }
+
+    #[test]
+    fn remembered_text_is_prefixed_and_carries_the_waking_note() {
+        let mut d = dream("rem00000", now(), DreamStatus::Pending);
+        d.title = "Lantern".into();
+        d.dream = "tide files itself".into();
+        d.waking_note = "same project".into();
+        let t = memory_text_for(&d);
+        assert!(t.starts_with("[dream] Lantern"));
+        assert!(t.contains("tide files itself") && t.contains("Waking note: same project"));
+    }
+
+    #[test]
+    fn remembered_as_roundtrips_and_defaults_to_none() {
+        let s = DreamStore::new(tmpdir("rem"));
+        let d = dream("rem11111", now(), DreamStatus::Pending);
+        assert!(d.remembered_as.is_none());
+        s.save(&d).unwrap();
+        let kept = s.keep_remembered("rem11111", "mem-123").unwrap().unwrap();
+        assert_eq!(kept.status, DreamStatus::Kept);
+        assert_eq!(
+            s.get("rem11111").unwrap().remembered_as.as_deref(),
+            Some("mem-123")
+        );
         let _ = std::fs::remove_dir_all(s.dir());
     }
 

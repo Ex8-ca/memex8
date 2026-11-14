@@ -605,6 +605,7 @@ fn default_auto_archive_days_for(name: &str) -> u32 {
     let (k, eta_hours): (f64, f64) = match name {
         "profile" => (0.30, 8760.0),
         "preference" => (0.40, 4380.0),
+        "dream" => (0.40, 4380.0),
         "relationship" => (0.35, 8760.0),
         "learning" => (0.70, 1440.0),
         "fact" => (0.80, 720.0),
@@ -638,6 +639,7 @@ fn default_auto_archive_days_by_type() -> std::collections::HashMap<String, u32>
     let types = [
         "profile",
         "preference",
+        "dream",
         "relationship",
         "learning",
         "fact",

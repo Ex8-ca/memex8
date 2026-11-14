@@ -217,6 +217,15 @@ Output is human-readable by default; pass `--json` for machine-readable.
 | `memex8_certify` | Protect (or revoke protection for) a user-confirmed memory |
 | `memex8_unconsolidate` | Undo a consolidated summary from its archive |
 | `memex8_restore_duplicate` | Restore a removed duplicate from its slumber journal |
+| `memex8_dreams` | Review generated dreams: `pending` (newest unreviewed dream), `keep` (optionally `remember`), `discard`. Needs a memex8 server with dreams |
+
+## Dream reminders (optional)
+
+If you turn on **Settings → Dreams** in memex8, new dreams wait as *pending* until you keep or discard them. To have Hermes ask you at a time you choose, create a cron job (only if you want it), for example daily at 18:00 with this prompt:
+
+> Call `memex8_dreams(action="pending")`. If `pending` is 0, answer exactly `[SILENT]`. Otherwise show me the dream's title, the dream and the waking note, and ask: "Keep this dream?" (offer "keep", "keep and remember", or "discard"). Do nothing until I answer; then call `memex8_dreams` with `keep` (add `remember=true` only if I said remember) or `discard`.
+
+The generation hour is set in memex8 (Settings → Dreams); the reminder time lives in the Hermes cron job. Dreams are fiction, never searchable; "remember" stores a hidden `dream`-type memory you can find only by searching with the `dream` tag.
 
 ## How It Works
 

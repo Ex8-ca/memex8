@@ -92,6 +92,48 @@ class DreamTests(unittest.TestCase):
             self.assertEqual(gone2.exception.code, 404)
             self.assertEqual(memories_total(f), total)
 
+    def test_remembered_dream_is_a_hidden_memory(self):
+        with fixture() as f:
+            ids = seed(f)
+            f["state"]["chat_response"] = dream_reply(ids[:2])
+            d = f["api"]("/dreams", {}, "POST")
+            total = memories_total(f)
+
+            kept = f["api"](f"/dreams/{d['id']}/keep", {"remember": True}, "POST")
+            self.assertEqual(kept["status"], "kept")
+            mid = kept["remembered_as"]
+            self.assertTrue(mid)
+            self.assertEqual(memories_total(f), total + 1)
+            mem = f["api"]("/memories/" + mid)
+            self.assertEqual(mem["memory_type"], "dream")
+            self.assertIn("dream", mem["tags"])
+            self.assertTrue(mem["content"].startswith("[dream] The Lantern Tide"))
+            self.assertIn("Waking note:", mem["content"])
+
+            def search(**kw):
+                return f["api"]("/memories/search", {"query": PHRASE, "limit": 50, "min_score": 0.0, **kw}, "POST")
+            # Hidden from default search and recall...
+            self.assertFalse(any(r["id"] == mid for r in search()["results"]))
+            self.assertFalse(any(r["id"] == mid for r in f["api"]("/memories/recall?limit=100")["results"]))
+            # ...and found only when the search itself asks for the dream tag.
+            self.assertTrue(any(r["id"] == mid for r in search(tags=["dream"])["results"]))
+
+            # Keeping again with remember never stores a second copy.
+            again = f["api"](f"/dreams/{d['id']}/keep", {"remember": True}, "POST")
+            self.assertEqual(again["remembered_as"], mid)
+            self.assertEqual(memories_total(f), total + 1)
+
+    def test_keep_without_remember_stores_no_memory(self):
+        with fixture() as f:
+            ids = seed(f)
+            f["state"]["chat_response"] = dream_reply(ids[:2])
+            d = f["api"]("/dreams", {}, "POST")
+            total = memories_total(f)
+            kept = f["api"](f"/dreams/{d['id']}/keep", None, "POST")
+            self.assertEqual(kept["status"], "kept")
+            self.assertIsNone(kept["remembered_as"])
+            self.assertEqual(memories_total(f), total)
+
     def test_too_few_memories_is_a_clear_error_and_writes_nothing(self):
         with fixture() as f:
             seed(f, 3)

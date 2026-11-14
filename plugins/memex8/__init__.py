@@ -392,6 +392,30 @@ class _Client:
     def delete(self, memory_id: str) -> dict:
         return self.request("DELETE", f"/api/v1/memories/{memory_id}")
 
+    # ---- dreams (a dream is not a memory; these are separate endpoints) ----
+
+    def dreams_pending(self) -> dict:
+        """The newest pending dream in full, plus how many are waiting."""
+        try:
+            listing = self.request("GET", "/api/v1/dreams", params={"status": "pending", "limit": 5})
+        except RuntimeError as e:
+            if "(404)" in str(e):
+                return {"error": "This memex8 server has no dreams API; upgrade memex8 to a version with dreams."}
+            raise
+        dreams = listing.get("dreams") or []
+        if not dreams:
+            return {"pending": 0, "dream": None}
+        full = self.request("GET", f"/api/v1/dreams/{dreams[0]['id']}")
+        return {"pending": listing.get("pending", len(dreams)), "dream": full}
+
+    def dream_keep(self, dream_id: str, remember: bool = False) -> dict:
+        if not isinstance(remember, bool):
+            raise ValueError("remember must be a boolean")
+        return self.request("POST", f"/api/v1/dreams/{dream_id}/keep", json_body={"remember": remember})
+
+    def dream_discard(self, dream_id: str) -> dict:
+        return self.request("DELETE", f"/api/v1/dreams/{dream_id}")
+
     def get_memory(self, memory_id: str) -> dict:
         return self.request("GET", f"/api/v1/memories/{memory_id}")
 
@@ -632,6 +656,27 @@ REALMS_SCHEMA = {
         "type": "object",
         "properties": {},
         "required": [],
+    },
+}
+
+DREAMS_SCHEMA = {
+    "name": "memex8_dreams",
+    "description": (
+        "Review dreams memex8 generated from the user's memories. A dream is fiction woven from "
+        "memories, not a memory; it never appears in search. action=pending returns the newest "
+        "unreviewed dream (title, dream, waking note) and how many are waiting, or pending=0. Show "
+        "it to the user and ask whether to keep it. action=keep marks it kept (remember=true also "
+        "stores it as a hidden memory, only if the user asks). action=discard deletes it. Never "
+        "keep or discard without the user's answer."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["pending", "keep", "discard"]},
+            "dream_id": {"type": "string", "description": "Required for keep and discard."},
+            "remember": {"type": "boolean", "default": False, "description": "keep only: also store the dream as a hidden memory."},
+        },
+        "required": ["action"],
     },
 }
 
@@ -1664,7 +1709,7 @@ class Memex8MemoryProvider(MemoryProvider):
     # -- Tools --
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [TIMELINE_SCHEMA, SEARCH_SCHEMA, RECALL_SCHEMA, REMEMBER_SCHEMA, CERTIFY_SCHEMA, UNCONSOLIDATE_SCHEMA, RESTORE_DUPLICATE_SCHEMA, FORGET_SCHEMA, REALMS_SCHEMA, GET_SCHEMA]
+        return [TIMELINE_SCHEMA, SEARCH_SCHEMA, RECALL_SCHEMA, REMEMBER_SCHEMA, CERTIFY_SCHEMA, UNCONSOLIDATE_SCHEMA, RESTORE_DUPLICATE_SCHEMA, FORGET_SCHEMA, REALMS_SCHEMA, GET_SCHEMA, DREAMS_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._is_breaker_open():
@@ -1769,6 +1814,19 @@ class Memex8MemoryProvider(MemoryProvider):
                 return {"error": "memory_id is required"}
             return client.certify(memory_id, revoke=args.get("revoke", False),
                                   by=args.get("by"), note=args.get("note"))
+
+        if tool_name == "memex8_dreams":
+            action = args.get("action")
+            if action == "pending":
+                return client.dreams_pending()
+            if action in ("keep", "discard"):
+                dream_id = args.get("dream_id", "")
+                if not dream_id:
+                    return {"error": f"dream_id is required for {action}"}
+                if action == "keep":
+                    return client.dream_keep(dream_id, remember=args.get("remember", False))
+                return client.dream_discard(dream_id)
+            return {"error": "action must be one of: pending, keep, discard"}
 
         if tool_name == "memex8_forget":
             memory_id = args.get("memory_id", "")
