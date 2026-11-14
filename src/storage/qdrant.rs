@@ -63,6 +63,8 @@ pub struct MemoryPoint {
     /// Empty string = legacy memory, treated as "private".
     #[serde(default)]
     pub visibility: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<crate::storage::evidence::EvidenceRef>,
 }
 
 /// Memory with its embedding vector (internal use only, not serialized).
@@ -308,6 +310,7 @@ fn memory_to_payload(mem: &MemoryPoint) -> Payload {
         "verification_status": mem.verification_status,
         "memory_type": mem.memory_type,
         "visibility": mem.visibility,
+        "evidence_refs": mem.evidence_refs,
     });
     Payload::try_from(json).unwrap_or_default()
 }
@@ -354,6 +357,10 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
         verification_status: map_str(map, "verification_status")
             .unwrap_or_else(|| "unverified".to_string()),
         memory_type: map_str(map, "memory_type").unwrap_or_default(),
+        evidence_refs: map
+            .get("evidence_refs")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
         // Empty/missing visibility defaults to "private" so legacy
         // memories never accidentally become shareable on upgrade.
         visibility: map_str(map, "visibility")
@@ -621,6 +628,7 @@ impl QdrantStore {
             verification_status: "unverified".to_string(),
             memory_type: memory_type.to_string(),
             visibility: normalize_visibility(visibility).to_string(),
+            evidence_refs: vec![],
         };
         let payload = memory_to_payload(&mem);
         let point = PointStruct::new(id.to_string(), vector.to_vec(), payload);
@@ -742,6 +750,8 @@ impl QdrantStore {
         realm_name: Option<&str>,
         importance: f32,
         source_file: Option<&str>,
+        visibility: &str,
+        input_ids: &[String],
     ) -> anyhow::Result<()> {
         let ingested_at = chrono::Utc::now().to_rfc3339();
 
@@ -757,12 +767,13 @@ impl QdrantStore {
             "source_file": source_file.unwrap_or(""),
             "source_hash": "",
             "chunk_type": "consolidated",
+            "tags": input_ids.iter().map(|id| format!("consolidation-input:{id}")).collect::<Vec<_>>(),
             "related_memory_ids": Vec::<String>::new(),
             "association_strengths": Vec::<f32>::new(),
             "reaction_score": 0.0f32,
             "topic_clusters": Vec::<String>::new(),
             "memory_type": "general",
-            "visibility": "private",
+            "visibility": normalize_visibility(visibility),
         })
         .try_into()
         .unwrap_or_default();
@@ -1780,6 +1791,7 @@ mod tests {
             verification_status: "unverified".into(),
             memory_type: "general".into(),
             visibility: "public".into(),
+            evidence_refs: vec![],
         };
 
         // payload -> JSON object -> payload value -> Map.

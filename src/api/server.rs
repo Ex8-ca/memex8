@@ -110,6 +110,10 @@ pub async fn run_with_engine(
 fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
+            "/memories/{id}/evidence/{source_id}",
+            axum::routing::get(crate::api::routes::memories::evidence),
+        )
+        .route(
             "/memories",
             axum::routing::get(crate::api::routes::memories::list),
         )

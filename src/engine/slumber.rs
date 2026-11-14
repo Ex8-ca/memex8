@@ -6,6 +6,9 @@ use crate::engine::quantizer::{decide_bit_width, TurboQuantVectorIndex};
 use crate::engine::reactions::reaction_boost;
 use crate::storage::qdrant::{GapPoint, MemoryPoint, QdrantStore, VerificationStatusCounts};
 
+#[cfg(test)]
+mod consolidation_tests;
+
 pub struct SlumberEngine {
     config: AppConfig,
     store: QdrantStore,
@@ -83,6 +86,28 @@ impl SlumberEngine {
         &self,
         force_consolidation: bool,
     ) -> anyhow::Result<SlumberReport> {
+        let evidence_path = std::path::Path::new(&self.config.turbovec.index_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("data"))
+            .join("evidence.sqlite3");
+        anyhow::ensure!(
+            !self.config.evidence.enabled,
+            "evidence enabled: slumber unsupported until lineage-safe maintenance exists"
+        );
+        if evidence_path.exists() {
+            anyhow::ensure!(
+                !crate::storage::evidence::EvidenceStore::open(&evidence_path)?.has_records()?,
+                "evidence present: slumber unsupported"
+            );
+        }
+        anyhow::ensure!(
+            self.store
+                .scroll_all_memories()
+                .await?
+                .iter()
+                .all(|m| m.evidence_refs.is_empty()),
+            "evidence references present: slumber unsupported"
+        );
         let mut report = SlumberReport::default();
 
         // Phase 1: Deduplicate near-identical memories
@@ -1715,30 +1740,44 @@ impl SlumberEngine {
     // ─── Phase 6: LLM Memory Consolidation ────────────────────────────────────
 
     /// Use an LLM to consolidate raw conversation fragments into clean summaries.
-    /// Groups memories by realm, sends batches to local LLM (Qwen 3.6 via Unsloth),
-    /// then replaces fragmented memories with clean summaries.
+    /// Opt-in additive summaries, bounded to ten source records per compatible
+    /// realm/visibility group. Originals are never retired or deleted here.
     async fn llm_consolidate(&self) -> anyhow::Result<usize> {
+        if !self.config.slumber.consolidation.enabled {
+            return Ok(0);
+        }
         let backend = &self.config.slumber.consolidation.backend;
         let model = self.config.slumber.consolidation.model.clone();
 
         // Group memories by realm
         let all = self.store.scroll_all_memories().await?;
-        let mut by_realm: std::collections::HashMap<String, Vec<&MemoryPoint>> =
-            std::collections::HashMap::new();
+        let mut by_realm: std::collections::HashMap<
+            (String, Option<String>, String),
+            Vec<&MemoryPoint>,
+        > = std::collections::HashMap::new();
 
         for mem in &all {
-            // Project records retain their scope and source attribution. The
-            // legacy realm summary writer does not preserve either yet.
-            if mem.tags.iter().any(|tag| tag.starts_with("project:")) {
+            // No generic scope contract exists yet: skip all tagged sources,
+            // including project records, rather than discarding restrictions.
+            if !mem.tags.is_empty() || mem.chunk_type == "consolidated" {
                 continue;
             }
-            let realm = mem.realm_name.clone();
+            let visibility = match mem.visibility.as_str() {
+                "" | "private" => "private",
+                "public" => "public",
+                _ => continue,
+            };
+            let realm = (
+                mem.realm_name.clone(),
+                mem.realm_id.clone(),
+                visibility.into(),
+            );
             by_realm.entry(realm).or_default().push(mem);
         }
 
         let mut consolidated = 0;
 
-        for (realm_name, memories) in &by_realm {
+        for ((realm_name, _, visibility), memories) in &by_realm {
             // Only consolidate realms with 2+ memories
             if memories.len() < 2 {
                 continue;
@@ -1757,8 +1796,32 @@ impl SlumberEngine {
                 b.importance
                     .partial_cmp(&a.importance)
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.id.cmp(&b.id))
             });
             sorted.truncate(10);
+            // Identity and prompt order depend on the selected set, not rank.
+            sorted.sort_by(|a, b| a.id.cmp(&b.id));
+
+            // Stable identity for the exact bounded input snapshot. This also
+            // makes concurrent/retried upserts converge without deleting data.
+            use sha2::{Digest, Sha256};
+            let snapshot = serde_json::to_vec(&(
+                "consolidation-v1",
+                realm_name,
+                &sorted[0].realm_id,
+                visibility,
+                sorted
+                    .iter()
+                    .map(|m| (&m.id, &m.content))
+                    .collect::<Vec<_>>(),
+            ))?;
+            let hash = Sha256::digest(&snapshot);
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(&hash[..16]);
+            let id = uuid::Uuid::from_bytes(bytes).to_string();
+            if all.iter().any(|m| m.id == id) {
+                continue;
+            }
 
             let memory_texts: Vec<String> = sorted
                 .iter()
@@ -1846,28 +1909,21 @@ impl SlumberEngine {
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to embed summary: {}", e))?;
 
-            // Collect IDs to delete
-            let ids_to_delete: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
-
-            // Delete old fragmented memories
-            for id in &ids_to_delete {
-                if let Err(e) = self.store.delete_memory(id).await {
-                    tracing::warn!("  Failed to delete old memory {}: {}", id, e);
-                }
-            }
+            // Consolidation is additive: originals remain even if saving fails.
 
             // Store the consolidated summary with its own embedded vector
-            let id = uuid::Uuid::new_v4().to_string();
             if let Err(e) = self
                 .store
                 .store_memory_with_vector(
                     &id,
                     &summary,
                     &summary_vector,
-                    None,
+                    sorted[0].realm_id.as_deref(),
                     Some(realm_name),
                     1.0,
                     None,
+                    visibility,
+                    &sorted.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
                 )
                 .await
             {

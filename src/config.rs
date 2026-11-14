@@ -23,6 +23,14 @@ pub struct AppConfig {
     /// Memory verification sweep configuration (slumber Phase 13).
     #[serde(default)]
     pub verification: VerificationConfig,
+    #[serde(default)]
+    pub evidence: EvidenceConfig,
+}
+
+/// Evidence lives beside the existing TurboVec index on the persistent data mount.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EvidenceConfig {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,6 +297,9 @@ impl Default for SummarizeConfig {
 /// Supports both OpenAI (default, cheap for this use case) and local LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsolidationConfig {
+    /// Opt in to additive derived summaries. Never deletes source memories.
+    #[serde(default)]
+    pub enabled: bool,
     /// Backend to use: "openai" (default) or "local".
     #[serde(default = "default_consolidation_backend")]
     pub backend: String,
@@ -306,6 +317,7 @@ fn default_consolidation_backend() -> String {
 impl Default for ConsolidationConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             backend: "openai".into(),
             model: Some("gpt-4o-mini".into()),
         }
@@ -666,6 +678,7 @@ impl Default for AppConfig {
             watch: vec![],
             turbovec: TurbovecConfig::default(),
             verification: VerificationConfig::default(),
+            evidence: EvidenceConfig::default(),
         }
     }
 }

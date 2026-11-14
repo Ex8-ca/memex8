@@ -11,6 +11,7 @@ const MAX_BACKUPS: usize = 7;
 /// Backup all memories, realms, and graph edges to a timestamped tarball.
 /// Returns the path to the created backup file.
 pub async fn backup(engine: &Engine, output_path: Option<&str>) -> anyhow::Result<String> {
+    engine.refuse_evidence_projection_transfer().await?;
     let backup_dir = expand_path(output_path.unwrap_or(DEFAULT_BACKUP_DIR));
     fs::create_dir_all(&backup_dir)?;
 
@@ -65,6 +66,7 @@ pub async fn backup(engine: &Engine, output_path: Option<&str>) -> anyhow::Resul
 
 /// Restore memories, realms, and graph edges from a backup tarball.
 pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow::Result<usize> {
+    engine.refuse_evidence_projection_transfer().await?;
     let path = expand_path_buf(backup_path);
     if !path.exists() {
         anyhow::bail!("Backup file not found: {}", path.display());
@@ -95,8 +97,12 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
     extract_tarball(&path, &temp_dir)?;
 
     // Validate all required exports before the first database write.
-    let _: Vec<crate::storage::qdrant::MemoryWithVector> =
+    let incoming: Vec<crate::storage::qdrant::MemoryWithVector> =
         serde_json::from_str(&fs::read_to_string(temp_dir.join("memories.json"))?)?;
+    anyhow::ensure!(
+        incoming.iter().all(|m| m.memory.evidence_refs.is_empty()),
+        "evidence references in logical archive require paired SQLite restore"
+    );
     let _: Vec<crate::storage::qdrant::RealmPoint> =
         serde_json::from_str(&fs::read_to_string(temp_dir.join("realms.json"))?)?;
     let _: Vec<crate::storage::qdrant::GraphEdge> =

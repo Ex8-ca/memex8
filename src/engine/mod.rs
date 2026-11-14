@@ -4,6 +4,7 @@ pub mod chunker;
 pub mod decay;
 pub mod doctor;
 pub mod embedder;
+pub mod evidence;
 pub mod graph;
 pub mod ingester;
 pub mod memex8_md;
@@ -987,6 +988,7 @@ impl Engine {
         id: &str,
         payload: qdrant_client::Payload,
     ) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(id).await?;
         self.store.update_memory_payload(id, payload).await
     }
 
@@ -1030,10 +1032,12 @@ impl Engine {
     }
 
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(id).await?;
         self.store.delete_memory(id).await
     }
 
     pub async fn edit_memory(&self, id: &str, new_content: &str) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(id).await?;
         // Re-embed the new content and update the point
         let embedder = self.make_embedder()?;
         let vector = embedder.embed(new_content).await?;
@@ -1086,6 +1090,7 @@ impl Engine {
         &self,
         force_consolidation: bool,
     ) -> anyhow::Result<slumber::SlumberReport> {
+        self.refuse_evidence_transfer()?;
         {
             let mut state = self.slumber_state.write().await;
             state.status = "running".into();
@@ -1229,6 +1234,7 @@ impl Engine {
     }
 
     pub async fn export(&self, path: &str) -> anyhow::Result<()> {
+        self.refuse_evidence_projection_transfer().await?;
         // Export with vectors so they can be reused on import
         let memories = self.store.scroll_all_memories_with_vectors().await?;
         let json = serde_json::to_string_pretty(&memories)?;
@@ -1237,7 +1243,16 @@ impl Engine {
     }
 
     pub async fn import(&self, path: &str, reuse_vectors: bool) -> anyhow::Result<usize> {
+        self.refuse_evidence_projection_transfer().await?;
         let content = std::fs::read_to_string(path)?;
+        let incoming: serde_json::Value = serde_json::from_str(&content)?;
+        anyhow::ensure!(
+            incoming.as_array().is_none_or(|a| a.iter().all(|m| m
+                .get("evidence_refs")
+                .and_then(|v| v.as_array())
+                .is_none_or(|r| r.is_empty()))),
+            "evidence references in import require paired SQLite restore"
+        );
 
         if reuse_vectors {
             // Try to import with vectors first
