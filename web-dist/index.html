@@ -890,6 +890,8 @@
                     const cur = f.pending ?? f.value;
                     const input = f.type === 'bool'
                         ? `<input type="checkbox" data-key="${f.key}" ${cur ? 'checked' : ''}>`
+                        : f.type === 'choice'
+                        ? `<select class="field" data-key="${f.key}">${f.options.map(o => `<option value="${escapeHtml(o)}" ${o === cur ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('')}</select>`
                         : `<input class="field" type="number" data-key="${f.key}" value="${cur}" min="${f.min}" max="${f.max}" step="${f.type === 'int' ? 1 : 0.01}">`;
                     const pend = f.changed ? `<div class="pend">running ${escapeHtml(String(f.value))}, restart to apply ${escapeHtml(String(f.pending))}</div>` : '';
                     return `<div class="set-row"><div class="nm">${escapeHtml(f.label)}</div>${input}<div class="hp">${escapeHtml(f.help)}</div>${pend}</div>`;
@@ -902,8 +904,9 @@
             document.querySelectorAll('#srv-settings [data-key]').forEach(el => {
                 const f = SETTINGS.fields.find(x => x.key === el.dataset.key);
                 const cur = f.pending ?? f.value;
-                const v = f.type === 'bool' ? el.checked : Number(el.value);
-                if (f.type === 'bool' ? v !== cur : Math.abs(v - cur) > 1e-9) values[f.key] = v;
+                const v = f.type === 'bool' ? el.checked : f.type === 'choice' ? el.value : Number(el.value);
+                const differs = f.type === 'bool' || f.type === 'choice' ? v !== cur : Math.abs(v - cur) > 1e-9;
+                if (differs) values[f.key] = v;
             });
             if (!Object.keys(values).length) { toast('No changes to save'); return; }
             try {

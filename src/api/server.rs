@@ -119,6 +119,20 @@ pub async fn run_with_engine(
 fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
+            "/dreams",
+            axum::routing::get(crate::api::routes::dreams::list)
+                .post(crate::api::routes::dreams::create),
+        )
+        .route(
+            "/dreams/{id}",
+            axum::routing::get(crate::api::routes::dreams::get)
+                .delete(crate::api::routes::dreams::delete),
+        )
+        .route(
+            "/dreams/{id}/keep",
+            axum::routing::post(crate::api::routes::dreams::keep),
+        )
+        .route(
             "/settings",
             axum::routing::get(crate::api::settings::get)
                 .put(crate::api::settings::put)
