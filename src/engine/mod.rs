@@ -7,6 +7,7 @@ pub mod decay;
 pub mod dedup;
 pub mod dedup_removal;
 pub mod doctor;
+pub mod dream;
 pub mod embedder;
 pub mod graph;
 pub mod ingester;
@@ -134,6 +135,9 @@ pub struct Engine {
     turbovec_index: Arc<RwLock<Option<quantizer::TurboQuantVectorIndex>>>,
     /// BM25 keyword index (a cache rebuilt from Qdrant; see `lexical`).
     lexical: Arc<RwLock<lexical::LexicalIndex>>,
+    /// Dreams live in their own files, outside the memories collection.
+    dreams: dream::DreamStore,
+    dream_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct SlumberState {
@@ -191,6 +195,13 @@ impl Engine {
         // Try to load TurboVec index from disk for fast search
         let turbovec_index = Self::init_turbovec_index(&config, &store).await;
 
+        // Dreams sit next to the TurboVec index, so they're on the data volume and in backups.
+        let dreams = dream::DreamStore::new(
+            std::path::Path::new(&config.turbovec.index_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("dreams"),
+        );
         let engine = Self {
             config,
             store,
@@ -212,6 +223,8 @@ impl Engine {
             config_path: "config.toml".to_string(),
             turbovec_index,
             lexical: Arc::new(RwLock::new(lexical::LexicalIndex::default())),
+            dreams,
+            dream_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         if let Err(e) = engine.rebuild_lexical_index().await {
             tracing::warn!(
@@ -219,6 +232,50 @@ impl Engine {
             );
         }
         Ok(engine)
+    }
+
+    pub fn dream_store(&self) -> &dream::DreamStore {
+        &self.dreams
+    }
+
+    pub fn dream_config(&self) -> &crate::config::DreamConfig {
+        &self.config.dream
+    }
+
+    /// Generate one dream now (also used by the schedule). It is saved as *pending*
+    /// for the user to keep or discard. This never writes to the memories collection.
+    pub async fn dream_now(&self) -> anyhow::Result<dream::Dream> {
+        let _guard = self
+            .dream_lock
+            .try_lock()
+            .map_err(|_| dream::DreamError::InProgress)?;
+        let cfg = &self.config.dream;
+        let expired = self
+            .dreams
+            .expire_pending(cfg.pending_days as i64, chrono::Utc::now());
+        if expired > 0 {
+            tracing::info!("🌙 Expired {} unreviewed dream(s)", expired);
+        }
+        let all = self.store.scroll_all_memories().await?;
+        let seeds = {
+            use rand::SeedableRng;
+            let mut rng = rand::rngs::StdRng::from_entropy();
+            dream::pick_seeds(&all, cfg.seeds, chrono::Utc::now(), &mut rng)
+        };
+        if seeds.len() < dream::MIN_SEEDS {
+            return Err(dream::DreamError::NotEnoughMemories(seeds.len()).into());
+        }
+        let (raw, model) = dream::call_llm(
+            &self.config,
+            &dream::system_prompt(cfg.max_words),
+            &dream::seed_lines(&seeds),
+        )
+        .await?;
+        let parsed = dream::parse_dream(&raw, &seeds, cfg.max_words)?;
+        let d = dream::Dream::new(parsed, seeds.iter().map(|m| m.id.clone()).collect(), &model);
+        self.dreams.save(&d)?;
+        tracing::info!("🌙 Dream {}: {}", &d.id[..8], d.title);
+        Ok(d)
     }
 
     /// Rebuild the BM25 keyword index from every memory in Qdrant.

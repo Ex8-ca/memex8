@@ -137,6 +137,20 @@ theme = "dark"
 
 # Retrieval-strength heuristic, using raw cosine before boosts/min_score/pagination.
 # Thresholds must satisfy 0 <= partial < high <= 1.
+[dream]
+# Opt-in dreams: on a schedule, weave a few memories into a short dream plus a
+# "waking note" naming one real connection. Dreams are NOT memories: they are stored
+# as files under <data dir>/dreams/ and never returned by search, recall or MCP.
+# Seed memories go to the LLM backend from [slumber.consolidation]; use "local" to
+# keep them on your network. Toggle in the web UI: Settings -> Dreams.
+# enabled = false
+# frequency = "weekly"     # "daily" or "weekly"
+# hour = 4                 # local hour (0-23) the dream is generated
+# seeds = 12               # memories woven into each dream (4-40)
+# max_words = 350
+# pending_days = 14        # unreviewed dreams are deleted after this many days
+# model = "gpt-4o-mini"    # optional; defaults to the consolidation model
+
 [search.hybrid]
 # Blend exact-word (BM25) matches into vector search; helps names, IDs and rare
 # words. Toggle in the web UI: Settings -> Search -> Keyword matching.

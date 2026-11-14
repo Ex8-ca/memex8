@@ -5,6 +5,8 @@ use std::path::Path;
 pub struct AppConfig {
     #[serde(default)]
     pub search: SearchConfig,
+    #[serde(default)]
+    pub dream: DreamConfig,
     pub server: ServerConfig,
     pub auth: AuthConfig,
     pub embedding: EmbeddingConfig,
@@ -32,6 +34,60 @@ pub struct AppConfig {
 pub struct SearchConfig {
     pub coverage: CoverageConfig,
     pub hybrid: HybridConfig,
+}
+
+/// Dreams: scheduled, opt-in, quarantined from search. See `engine::dream`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DreamConfig {
+    /// Off by default.
+    pub enabled: bool,
+    /// "daily" or "weekly".
+    pub frequency: String,
+    /// Local hour (0-23) when the dream is generated.
+    pub hour: u32,
+    /// Seed memories per dream.
+    pub seeds: usize,
+    /// Upper bound on the dream's length.
+    pub max_words: usize,
+    /// Days a dream waits for keep/discard before it is deleted.
+    pub pending_days: u32,
+    /// Model override; defaults to the consolidation backend's model.
+    pub model: Option<String>,
+}
+
+impl Default for DreamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            frequency: "weekly".into(),
+            hour: 4,
+            seeds: 12,
+            max_words: 350,
+            pending_days: 14,
+            model: None,
+        }
+    }
+}
+
+impl DreamConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            matches!(self.frequency.as_str(), "daily" | "weekly"),
+            "dream.frequency must be daily or weekly"
+        );
+        anyhow::ensure!(self.hour <= 23, "dream.hour must be 0-23");
+        anyhow::ensure!((4..=40).contains(&self.seeds), "dream.seeds must be 4-40");
+        anyhow::ensure!(
+            (80..=1500).contains(&self.max_words),
+            "dream.max_words must be 80-1500"
+        );
+        anyhow::ensure!(
+            (1..=365).contains(&self.pending_days),
+            "dream.pending_days must be 1-365"
+        );
+        Ok(())
+    }
 }
 
 /// Keyword (BM25) matches blended into vector search.
@@ -720,6 +776,7 @@ impl AppConfig {
         config.slumber.validate_dedup()?;
         config.search.coverage.validate()?;
         config.search.hybrid.validate()?;
+        config.dream.validate()?;
         Ok(config)
     }
 
@@ -841,6 +898,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             search: SearchConfig::default(),
+            dream: DreamConfig::default(),
             server: ServerConfig {
                 host: "0.0.0.0".into(),
                 port: 8080,
@@ -912,6 +970,31 @@ impl Default for AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dream_defaults_are_off_and_valid_and_bad_values_rejected() {
+        let d = DreamConfig::default();
+        assert!(!d.enabled && d.validate().is_ok());
+        assert!(!AppConfig::default().dream.enabled);
+        let bad = |f: fn(&mut DreamConfig)| {
+            let mut c = DreamConfig::default();
+            f(&mut c);
+            assert!(c.validate().is_err());
+        };
+        bad(|c| c.frequency = "hourly".into());
+        bad(|c| c.hour = 24);
+        bad(|c| c.seeds = 3);
+        bad(|c| c.max_words = 50);
+        bad(|c| c.pending_days = 0);
+        // a config file that predates dreams still loads, with dreams off
+        let legacy: AppConfig = toml::from_str(
+            &toml::to_string(&AppConfig::default())
+                .unwrap()
+                .replace("[dream]", "[ignored]"),
+        )
+        .unwrap();
+        assert!(!legacy.dream.enabled);
+    }
 
     #[test]
     fn consolidation_is_off_by_default_and_can_be_enabled() {

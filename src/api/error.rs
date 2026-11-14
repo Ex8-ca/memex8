@@ -47,6 +47,18 @@ impl From<anyhow::Error> for ApiError {
                 }
             };
         }
+        if let Some(error) = e.downcast_ref::<crate::engine::dream::DreamError>() {
+            return match error {
+                crate::engine::dream::DreamError::InProgress => Self::Conflict(e.to_string()),
+                crate::engine::dream::DreamError::NotEnoughMemories(_) => {
+                    Self::Unprocessable(e.to_string())
+                }
+                crate::engine::dream::DreamError::Backend(_)
+                | crate::engine::dream::DreamError::BadReply(_) => {
+                    Self::Unprocessable(e.to_string())
+                }
+            };
+        }
         if e.is::<crate::engine::redaction::RedactionError>() {
             return Self::Unprocessable(e.to_string());
         }

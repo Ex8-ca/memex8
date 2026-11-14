@@ -25,6 +25,7 @@ enum Kind {
     Float(f64, f64),
     Int(i64, i64),
     Bool,
+    Choice(&'static [&'static str]),
 }
 
 struct Field {
@@ -50,6 +51,34 @@ const FIELDS: &[Field] = &[
         label: "Keyword weight",
         help: "How much a strong keyword match adds to a result's score (0 = none).",
         kind: Kind::Float(0.0, 1.0),
+    },
+    Field {
+        key: "dream.enabled",
+        group: "Dreams",
+        label: "Dreams",
+        help: "Weave a few memories into a short dream and a waking note on a schedule. Off by default. Dreams are never searchable; you keep or discard each one. The seed memories are sent to the AI backend you use for consolidation.",
+        kind: Kind::Bool,
+    },
+    Field {
+        key: "dream.frequency",
+        group: "Dreams",
+        label: "How often",
+        help: "Daily or weekly. When a chat reminder asks you about new dreams, its time is set in Hermes, not here.",
+        kind: Kind::Choice(&["daily", "weekly"]),
+    },
+    Field {
+        key: "dream.hour",
+        group: "Dreams",
+        label: "Dream at hour",
+        help: "Local hour (0-23) the dream is generated.",
+        kind: Kind::Int(0, 23),
+    },
+    Field {
+        key: "dream.seeds",
+        group: "Dreams",
+        label: "Memories per dream",
+        help: "How many memories are woven into each dream (4-40).",
+        kind: Kind::Int(4, 40),
     },
     Field {
         key: "search.coverage.high",
@@ -208,6 +237,10 @@ fn coerce(f: &Field, v: &J) -> Result<toml::Value, String> {
             }
             Ok(toml::Value::Float(x))
         }
+        Kind::Choice(options) => match v.as_str() {
+            Some(x) if options.contains(&x) => Ok(toml::Value::String(x.to_string())),
+            _ => Err(format!("{}: must be one of {}", f.key, options.join(", "))),
+        },
         Kind::Int(lo, hi) => {
             let x = v
                 .as_i64()
@@ -273,14 +306,15 @@ pub async fn get(State(st): State<Arc<AppState>>) -> Response {
             let pending = toml_lookup(&overrides, f.key).map(toml_to_json);
             let changed = pending.as_ref().is_some_and(|p| !same(&value, p));
             restart_required |= changed;
-            let (ty, min, max) = match f.kind {
-                Kind::Float(a, b) => ("float", json!(a), json!(b)),
-                Kind::Int(a, b) => ("int", json!(a), json!(b)),
-                Kind::Bool => ("bool", J::Null, J::Null),
+            let (ty, min, max, options) = match f.kind {
+                Kind::Float(a, b) => ("float", json!(a), json!(b), J::Null),
+                Kind::Int(a, b) => ("int", json!(a), json!(b), J::Null),
+                Kind::Bool => ("bool", J::Null, J::Null, J::Null),
+                Kind::Choice(o) => ("choice", J::Null, J::Null, json!(o)),
             };
             json!({
                 "key": f.key, "group": f.group, "label": f.label, "help": f.help,
-                "type": ty, "min": min, "max": max,
+                "type": ty, "min": min, "max": max, "options": options,
                 "value": value, "pending": pending, "changed": changed,
             })
         })
@@ -396,6 +430,32 @@ mod tests {
             let v = json_lookup(&cfg, f.key).unwrap();
             assert!(coerce(f, v).is_ok(), "default out of range: {}", f.key);
         }
+    }
+
+    #[test]
+    fn choice_accepts_only_listed_values() {
+        let f = field("dream.frequency").unwrap();
+        assert_eq!(coerce(f, &json!("daily")).unwrap().as_str(), Some("daily"));
+        assert!(coerce(f, &json!("weekly")).is_ok());
+        assert!(coerce(f, &json!("hourly")).is_err());
+        assert!(coerce(f, &json!(1)).is_err());
+        assert!(coerce(f, &json!(null)).is_err());
+    }
+
+    #[test]
+    fn dream_settings_exist_and_default_off() {
+        let cfg = serde_json::to_value(AppConfig::default()).unwrap();
+        assert_eq!(json_lookup(&cfg, "dream.enabled"), Some(&json!(false)));
+        for k in [
+            "dream.enabled",
+            "dream.frequency",
+            "dream.hour",
+            "dream.seeds",
+        ] {
+            assert_eq!(field(k).unwrap().group, "Dreams", "{k}");
+        }
+        assert!(coerce(field("dream.hour").unwrap(), &json!(24)).is_err());
+        assert!(coerce(field("dream.seeds").unwrap(), &json!(3)).is_err());
     }
 
     #[test]

@@ -81,6 +81,14 @@ impl Scheduler {
         let mut last_cron_run = Instant::now() - cron_interval;
         let mut last_consolidation: Option<chrono::DateTime<Local>> = None;
 
+        // Dreams use a wall-clock check every minute, not the slumber tick: the
+        // consolidation window assumed 5-minute ticks and went silent when ticks
+        // became hourly (see the test below). One attempt per local day at most, so a
+        // failing backend isn't retried every minute for a whole hour.
+        let mut dream_check = tokio::time::interval(Duration::from_secs(60));
+        dream_check.tick().await;
+        let mut last_dream_attempt: Option<chrono::NaiveDate> = None;
+
         loop {
             tokio::select! {
                 // Check idle timeout every 30 seconds
@@ -117,6 +125,24 @@ impl Scheduler {
 
                         // Reset activity timer so we don't immediately trigger again
                         *self.last_activity.write().await = Instant::now();
+                    }
+                }
+
+                _ = dream_check.tick() => {
+                    let now = Local::now().naive_local();
+                    let due = super::dream::dream_due(
+                        self.engine.dream_config(),
+                        now,
+                        self.engine.dream_store().last_date(),
+                    );
+                    if due && last_dream_attempt != Some(now.date()) {
+                        last_dream_attempt = Some(now.date());
+                        let engine = self.engine.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = engine.dream_now().await {
+                                tracing::warn!("🌙 Scheduled dream failed: {}", e);
+                            }
+                        });
                     }
                 }
 
