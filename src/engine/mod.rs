@@ -238,6 +238,33 @@ impl Engine {
         &self.dreams
     }
 
+    /// Keep a dream. With `remember`, also store it as a `dream`-type memory (the one
+    /// explicit, user-requested path from a dream to the memories collection). Keeping
+    /// twice with `remember` never stores it twice.
+    pub async fn keep_dream(
+        &self,
+        id: &str,
+        remember: bool,
+    ) -> anyhow::Result<Option<dream::Dream>> {
+        let Some(d) = self.dreams.get(id) else {
+            return Ok(None);
+        };
+        if !remember || d.remembered_as.is_some() {
+            return self.dreams.keep(id);
+        }
+        let memory_id = self
+            .store_memory(
+                &dream::memory_text_for(&d),
+                Some(vec![dream::DREAM_TYPE.to_string()]),
+                None,
+                Some("dream"),
+                None,
+                Some(dream::DREAM_TYPE),
+            )
+            .await?;
+        self.dreams.keep_remembered(id, &memory_id)
+    }
+
     pub fn dream_config(&self) -> &crate::config::DreamConfig {
         &self.config.dream
     }
@@ -838,6 +865,10 @@ impl Engine {
             results
         };
 
+        // Kept-and-remembered dreams are real memories of type `dream`; keep them out of
+        // every search unless the caller explicitly filters on the `dream` tag.
+        let results = dream::exclude_dream_memories(results, tags);
+
         // Phase A.2: soft down-weight by verification status. Applies to ALL
         // retrieval paths above (TurboVec, Qdrant fallback, tag-filter).
         // Never filters — only re-weights, then re-sorts so the weighted
@@ -962,6 +993,7 @@ impl Engine {
         let mut scored: Vec<_> = memories
             .into_iter()
             .filter(|m| realm.as_deref().map_or(true, |r| m.realm_name == r))
+            .filter(|m| m.memory_type != dream::DREAM_TYPE)
             .map(|m| {
                 // Per-type Weibull decay (replaces uniform 1/(1 + days * 0.1))
                 // Empty/legacy memory_type falls back to "general" defaults.

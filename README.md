@@ -549,12 +549,16 @@ Off by default. Turn on in **Settings → Dreams**. On a schedule you choose (da
 
 **A dream is fiction, not a memory.** It is stored as its own file under `dreams/` on the data volume (so it's in your backups), never in the memories collection, and no search, recall, timeline or MCP call can return it. Memories containing `[private]`, summaries and cron output are never used as seeds, and seed text goes through the same secret redaction as consolidation. Seeds are sent to the configured LLM backend: use the `local` backend to keep them on your network.
 
+The web UI has a **Dreams** tab (a badge counts unreviewed dreams) with a **Dream now** button; each pending dream can be **Kept**, **Kept & remembered** or **Discarded**. A dream's "woven from" chips open the real memories behind it (deleted ones are greyed out).
+
+*Keep & remember* stores the dream as a normal memory of type `dream` (tag `dream`, text prefixed `[dream]`) with slow decay. It is **hidden from every search and recall** unless the search itself filters on the tag `dream`, and it is never merged into a consolidation summary. Plain *Keep* stores nothing in your memories. The Hermes plugin's `memex8_dreams` tool lets a chat agent show a pending dream at a time you choose and ask whether to keep it (see the plugin README).
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/v1/dreams?limit=20&status=pending` | Newest first; `{ dreams: [{ id, created_at, title, preview, status }], pending, enabled }` |
 | `GET` | `/api/v1/dreams/{id}` | The full dream, waking note and the memory IDs it was woven from |
 | `POST` | `/api/v1/dreams` | Dream now (works even when the schedule is off); `409` if one is already running, `422` if there are fewer than 4 usable memories or the model's reply is unusable |
-| `POST` | `/api/v1/dreams/{id}/keep` | Mark a pending dream kept |
+| `POST` | `/api/v1/dreams/{id}/keep` | Mark a pending dream kept; optional body `{ "remember": true }` also stores it as a hidden `dream` memory (once) |
 | `DELETE` | `/api/v1/dreams/{id}` | Discard a dream |
 
 ### Reactions & Associations

@@ -196,6 +196,9 @@ pub const CONSOLIDATION_PROTECTED_TYPES: &[&str] = &[
     "instruction",
     "decision",
     "commitment",
+    // Not a durable fact but fiction: a summary of a dream would be an ordinary,
+    // searchable memory and would breach the dream quarantine.
+    "dream",
 ];
 
 pub fn consolidation_protected_type(memory: &MemoryPoint) -> bool {
