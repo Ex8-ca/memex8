@@ -129,7 +129,7 @@ class BridgeTests(unittest.TestCase):
 
     def test_stdio_handshake_parse_error_and_tool_list(self):
         messages = ["{broken", json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}), json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}), json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})]
-        proc = subprocess.run([sys.executable, str(SCRIPT), "--agent", "codex", "--project", "test"], input="\n".join(messages) + "\n", text=True, capture_output=True, env={**os.environ, "MEMEX8_API_KEY": "secret", "MEMEX8_OBSIDIAN_VAULT": ""}, timeout=10)
+        proc = subprocess.run([sys.executable, str(SCRIPT), "--agent", "codex", "--project", "test"], input="\n".join(messages) + "\n", text=True, capture_output=True, env={**os.environ, "MEMEX8_API_KEY": "secret", "MEMEX8_BASE_URL": "http://localhost:8080", "MEMEX8_OBSIDIAN_VAULT": ""}, timeout=10)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         replies = [json.loads(line) for line in proc.stdout.splitlines()]
         self.assertEqual(len(replies), 3)
