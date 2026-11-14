@@ -1350,32 +1350,34 @@ the top 10 for 8 of 18 queries off and 10 of 18 on; two misses became hits, two 
 rank 1 to 2. Queries with no shared words (paraphrases) missed either way, as expected. Verdict: pass. Final weight
 0.15; default flipped on (PR B).
 
-**Phase 1b dry run (467 legacy summaries, none certified):**
+**Phase 1b dry run (467 legacy summaries, none certified), corrected.** The first run reported 188 covered / 272
+partial / 7 orphan and 174 summaries were removed on that basis, then restored the same day. Cause: search results
+carry no `chunk_type`, so the "ignore other summaries" filter never fired and summaries were judged covered by each
+other (649 of 824 surviving "originals" were summaries; all 1,076 missing ones were summaries just removed). The
+fix filters by the store's own list of consolidated ids and, at apply time, refuses to delete anything whose cited
+originals are missing or are summaries (3 regression tests). Lesson: filter on a field you fetched, never on one the
+endpoint might omit, and verify the *evidence* of a "safe to delete" verdict still exists before deleting.
+
+Corrected result, one strong model over all 467 (second model agrees on 429 of 467 verdicts):
 
 | memory_type | n | covered | partial | orphan |
 |---|---:|---:|---:|---:|
-| general | 326 | 138 | 183 | 5 |
-| profile | 99 | 24 | 75 | 0 |
-| setup | 16 | 11 | 5 | 0 |
-| preference | 12 | 11 | 1 | 0 |
-| other | 14 | 4 | 8 | 2 |
-| **all (local model, thinking off)** | **467** | **188** | **272** | **7** |
+| general | 326 | 38 | 148 | 140 |
+| profile | 99 | 12 | 83 | 4 |
+| setup | 16 | 12 | 4 | 0 |
+| preference | 12 | 12 | 0 | 0 |
+| other | 14 | 1 | 10 | 3 |
+| **all** | **467** | **75** | **245** | **147** |
 
-Re-running `general` through a stronger model gave 210 covered / 111 partial / 5 orphan: 124 covered by both, 86
-covered only by the stronger model, 14 only by the local one. In a sample of "missing" facts about 32% were
-paraphrase false alarms (nearly every word is in the originals), so the strict quote check over-flags. Removal
-therefore requires every model that checked a summary to say covered (174 of 467 under that rule). Partial and orphan
-summaries are never removed.
-
-Two findings changed the script: (1) a reasoning model spent about 13k hidden tokens (2.5 min) per summary; with
-thinking off the same call takes 9 s and classifies the same way, so thinking is off by default (`LLM_THINKING=1`
-restores it). (2) The API has no way to add a tag, so partial/orphan summaries are listed in the report file instead of
-tagged, and the backup is a JSON array (what `memex8 import` reads), not JSON lines.
+50 summaries are covered according to two models; 25 only one model calls covered. 145 of 147 orphans are agreed:
+no similar original survives, so each may be the only record of something. Removing covered summaries would shrink
+the store by at most 75 of 6,312 (about 1%), so the removal step is low value and only worth doing for the 50
+two-model-agreed ones. Reasoning models cost about 2.5 min per summary unless thinking is off (9 s), which the
+script now does by default.
 
 **Task 1.5 verdict: keep consolidation, off by default.** Used: summaries are 7.4% of the store with mean
 `access_count` 357 against 17 for originals, and appear in the top 5 for 44% of 32 replayed queries (31% with hybrid
-on). Adds information: 279 of 467 (60%) hold at least one fact no original states, well above the 25% bar even after
-discounting false alarms. Consequence: Phase 3 (stale summaries) stays in scope, and the consolidation scheduler needs
+on). Adds information: 392 of 467 (84%) are partial or orphan, that is, hold at least one fact no original states, far above the 25% bar. Consequence: Phase 3 (stale summaries) stays in scope, and the consolidation scheduler needs
 its own fix (Task 1.4 confirmed the cause) before anyone turns the switch on.
 
-**Pending:** apply step of Phase 1b (needs approval), Phase 3, Phase 4.
+**Pending:** optional removal of the 50 two-model-agreed covered summaries (needs approval), Phase 3, Phase 4.

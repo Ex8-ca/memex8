@@ -100,6 +100,29 @@ class Selection(unittest.TestCase):
         self.assertEqual([m["id"] for m in r.order_for_review(mems)], ["f", "p", "g"])
 
 
+class OriginalsFilter(unittest.TestCase):
+    """Regression: search results carry no chunk_type, so summaries slipped in as 'originals'
+    and covered each other (both then removed). The filter must use the store's own id list."""
+
+    RESULTS = [{"id": "s1"}, {"id": "o1"}, {"id": "s2"}, {"id": "self"}, {"id": "o2"}]
+
+    def test_summaries_and_self_are_excluded_by_id(self):
+        got = r.usable_originals(self.RESULTS, summary_ids={"s1", "s2", "self"}, self_id="self")
+        self.assertEqual(sorted(got), ["o1", "o2"])
+
+    def test_results_without_chunk_type_still_filtered(self):
+        # none of RESULTS has a chunk_type key; filtering must not depend on it
+        self.assertTrue(all("chunk_type" not in x for x in self.RESULTS))
+        self.assertEqual(len(r.usable_originals(self.RESULTS, {"s1", "s2"}, "self")), 2)
+
+    def test_apply_time_guard_rejects_missing_or_summary_originals(self):
+        live = {"o1": {"chunk_type": "manual"}, "o2": {"chunk_type": "consolidated"}}
+        self.assertTrue(r.originals_still_valid(["o1"], live))
+        self.assertFalse(r.originals_still_valid(["o1", "gone"], live))
+        self.assertFalse(r.originals_still_valid(["o1", "o2"], live))
+        self.assertFalse(r.originals_still_valid([], live))
+
+
 class BackupFormat(unittest.TestCase):
     def test_backup_is_a_json_array_memex8_import_reads(self):
         import tempfile

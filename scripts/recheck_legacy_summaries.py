@@ -118,6 +118,18 @@ def order_for_review(mems):
     return sorted(mems, key=lambda m: PRIORITY.get(m.get("memory_type") or "", 9))
 
 
+def usable_originals(results, summary_ids, self_id):
+    """Search results (id + content only: no chunk_type) -> {id: content} of true originals.
+    Filter by the store's own set of consolidated ids; never trust a field the API omits."""
+    return {m["id"]: m.get("content", "") for m in results
+            if m["id"] != self_id and m["id"] not in summary_ids}
+
+
+def originals_still_valid(ids, live):
+    """Apply-time guard: every original must still exist and must not be a summary."""
+    return bool(ids) and all(i in live and live[i].get("chunk_type") != "consolidated" for i in ids)
+
+
 def write_backup(path, records):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
@@ -146,11 +158,14 @@ def fetch_all():
             return out
 
 
+SUMMARY_IDS = set()  # every consolidated memory id, filled from the full store listing
+
+
 def find_originals(summary):
     res = api("POST", "/api/v1/memories/search",
-              {"query": summary["content"][:2000], "limit": 12, "min_score": 0.6})
-    return {m["id"]: m["content"] for m in res.get("results", [])
-            if m["id"] != summary["id"] and m.get("chunk_type") != "consolidated"}
+              {"query": summary["content"][:2000], "limit": 24, "min_score": 0.6})
+    got = usable_originals(res.get("results", []), SUMMARY_IDS, summary["id"])
+    return dict(list(got.items())[:12])
 
 
 def ask_llm(summary, originals):
@@ -215,6 +230,7 @@ def main():
         if not (LLM_URL and LLM_MODEL):
             sys.exit("LLM_API_URL and LLM_MODEL must be set")
         mems = fetch_all()
+        SUMMARY_IDS.update(m["id"] for m in mems if m.get("chunk_type") == "consolidated")
         todo = [m for m in mems if is_legacy_summary(m)]
         if a.types:
             keep = set(a.types.split(","))
@@ -242,6 +258,11 @@ def main():
         return
 
     covered = [r for r in records if r["class"] == "covered" and not r.get("certified")]
+    live = {m["id"]: m for m in fetch_all()}
+    unsafe = [r for r in covered if not originals_still_valid(r["originals"], live)]
+    if unsafe:
+        sys.exit(f"REFUSING to apply: {len(unsafe)} covered summaries cite originals that no longer exist "
+                 f"or are themselves summaries. Re-run the check; nothing was changed.")
     backup = [api("GET", f"/api/v1/memories/{r['id']}") for r in covered]
     write_backup(a.backup, backup)
     print(f"backed up {len(backup)} summaries to {a.backup}")
