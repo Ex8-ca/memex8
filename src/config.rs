@@ -27,6 +27,14 @@ pub struct AppConfig {
     /// Memory verification sweep configuration (slumber Phase 13).
     #[serde(default)]
     pub verification: VerificationConfig,
+    #[serde(default)]
+    pub evidence: EvidenceConfig,
+}
+
+/// Evidence lives beside the existing TurboVec index on the persistent data mount.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EvidenceConfig {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -965,6 +973,7 @@ impl Default for AppConfig {
             watch: vec![],
             turbovec: TurbovecConfig::default(),
             verification: VerificationConfig::default(),
+            evidence: EvidenceConfig::default(),
         }
     }
 }

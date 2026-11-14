@@ -16,6 +16,8 @@ pub struct StoreRequest {
     /// "private" so a malformed caller can never accidentally mark a
     /// memory shareable.
     pub visibility: Option<String>,
+    pub evidence: Option<crate::storage::evidence::CaptureRequest>,
+    pub idempotency_key: Option<String>,
     /// Weibull decay type: profile|preference|entity|relationship|setup
     /// |pattern|fact|project|observation|learning|general (default).
     /// Personal-knowledge memories should pass a long-lived type to
@@ -57,6 +59,34 @@ pub async fn store(
     State(state): State<Arc<AppState>>,
     Json(req): Json<StoreRequest>,
 ) -> Result<Json<StoreResponse>, crate::api::error::ApiError> {
+    if let Some(capture) = req.evidence {
+        if req.certified || req.memory_type.is_some() {
+            return Err(ApiError::BadRequest(
+                "evidence capture does not yet support certification or memory_type".into(),
+            ));
+        }
+        let id = state
+            .engine
+            .store_with_evidence(
+                &req.content,
+                req.tags.unwrap_or_default(),
+                req.realm_hint.as_deref(),
+                req.source.as_deref(),
+                req.visibility.as_deref(),
+                req.idempotency_key.as_deref(),
+                &capture,
+            )
+            .await?;
+        return Ok(Json(StoreResponse {
+            id,
+            status: "stored".into(),
+        }));
+    }
+    if req.idempotency_key.is_some() {
+        return Err(ApiError::BadRequest(
+            "idempotency_key requires evidence capture".into(),
+        ));
+    }
     let id = state
         .engine
         .store_memory_with_certification(
@@ -73,6 +103,15 @@ pub async fn store(
         id,
         status: "stored".into(),
     }))
+}
+
+pub async fn evidence(
+    State(state): State<Arc<AppState>>,
+    Path((memory_id, source_id)): Path<(String, String)>,
+) -> Result<Json<crate::storage::evidence::SourceRecord>, ApiError> {
+    Ok(Json(
+        state.engine.read_evidence(&memory_id, &source_id).await?,
+    ))
 }
 
 pub async fn restore_duplicate(
@@ -202,6 +241,11 @@ pub async fn delete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, crate::api::error::ApiError> {
+    state
+        .engine
+        .refuse_evidence_mutation(&id)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     state.engine.delete_memory(&id).await?;
     Ok(Json(serde_json::json!({"deleted": id})))
 }
@@ -445,6 +489,11 @@ pub async fn update_memory(
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .engine
+        .refuse_evidence_mutation(&id)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     // Accept any subset of payload fields; apply via set_payload.
     let mut payload_obj = serde_json::Map::new();
     if let Some(t) = req.get("memory_type").and_then(|v| v.as_str()) {

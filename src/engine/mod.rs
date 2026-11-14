@@ -9,6 +9,7 @@ pub mod dedup_removal;
 pub mod doctor;
 pub mod dream;
 pub mod embedder;
+pub mod evidence;
 pub mod graph;
 pub mod ingester;
 pub mod lexical;
@@ -1124,6 +1125,7 @@ impl Engine {
     }
 
     pub async fn merge_realms(&self, target: &str, source: &str) -> anyhow::Result<()> {
+        self.refuse_evidence_projection_transfer().await?;
         let target_realm = self
             .store
             .find_realm_by_name(target)
@@ -1161,6 +1163,7 @@ impl Engine {
     }
 
     pub async fn split_realm(&self, name: &str) -> anyhow::Result<()> {
+        self.refuse_evidence_projection_transfer().await?;
         // TODO: k-means split with auto-generated names
         tracing::info!("Splitting realm: {}", name);
         Ok(())
@@ -1191,6 +1194,7 @@ impl Engine {
         id: &str,
         payload: qdrant_client::Payload,
     ) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(id).await?;
         let _guard = self.store.maintenance_guard().await;
         self.store.update_memory_payload(id, payload).await
     }
@@ -1235,6 +1239,7 @@ impl Engine {
     }
 
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(id).await?;
         let _guard = self.store.maintenance_guard().await;
         self.store.delete_memory(id).await?;
         self.lexical.write().await.remove(id);
@@ -1242,6 +1247,7 @@ impl Engine {
     }
 
     pub async fn edit_memory(&self, id: &str, new_content: &str) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(id).await?;
         let clean_content = redaction::required(new_content)?;
         let new_content = clean_content.as_str();
         let _guard = self.store.maintenance_guard().await;
@@ -1289,6 +1295,7 @@ impl Engine {
         &self,
         force_consolidation: bool,
     ) -> anyhow::Result<slumber::SlumberReport> {
+        self.refuse_evidence_transfer()?;
         {
             let mut state = self.slumber_state.write().await;
             state.status = "running".into();
@@ -1501,6 +1508,8 @@ impl Engine {
     }
 
     pub async fn export(&self, path: &str) -> anyhow::Result<()> {
+        let _guard = self.store.maintenance_guard().await;
+        self.refuse_evidence_projection_transfer().await?;
         // Export with vectors so they can be reused on import
         let memories = self.store.scroll_all_memories_with_vectors().await?;
         let json = serde_json::to_string_pretty(&memories)?;
@@ -1509,6 +1518,7 @@ impl Engine {
     }
 
     pub async fn import(&self, path: &str, reuse_vectors: bool) -> anyhow::Result<usize> {
+        self.refuse_evidence_projection_transfer().await?;
         let _guard = self.store.maintenance_guard().await;
         let content = std::fs::read_to_string(path)?;
         let memories: Vec<MemoryWithVector> = if reuse_vectors {
@@ -1537,6 +1547,10 @@ impl Engine {
                 })
                 .collect()
         };
+        anyhow::ensure!(
+            memories.iter().all(|m| m.memory.evidence_refs.is_empty()),
+            "evidence references in import require paired SQLite restore"
+        );
         let mut stored = 0;
         for snapshot in memories {
             let mut memory: crate::storage::qdrant::MemoryPoint =

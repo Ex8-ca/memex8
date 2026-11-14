@@ -7,6 +7,7 @@ use crate::storage::qdrant::{
 
 impl Engine {
     pub async fn unconsolidate(&self, id: &str) -> anyhow::Result<UnconsolidateResult> {
+        self.refuse_evidence_projection_transfer().await?;
         let _guard = self.store.maintenance_guard().await;
         let summary = self.store.get_memory(id).await?;
         let mut operation = match self.store.get_consolidation(id).await? {

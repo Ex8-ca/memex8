@@ -365,6 +365,7 @@ impl QdrantStore {
     /// Match content/type/visibility and certification at the actual deletion, so
     /// an edited or newly certified source cannot be removed from a stale snapshot.
     pub async fn delete_consolidation_snapshot(&self, memory: &MemoryPoint) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(&memory.id).await?;
         let filter = Filter {
             must: vec![
                 Condition::has_id([memory.id.clone()]),

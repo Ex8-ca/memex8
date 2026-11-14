@@ -50,6 +50,7 @@ _DEFAULT_RECALL_INJECT_CAP = 5  # hard cap on memories actually injected into th
 _DEFAULT_RECALL_MIN_SCORE = 0.3
 _DEFAULT_TIMEOUT = 10.0
 _DEFAULT_SEARCH_TIMEOUT = 15.0
+_DEFAULT_RECALL_DEADLINE_MS = 1500.0
 # Plugin version (kept in sync with plugin.yaml) — exposed via
 # {{version}} in the configurable system_prompt_block template
 _PLUGIN_VERSION = "1.2.0"
@@ -220,6 +221,7 @@ def _default_config() -> dict:
         "recall_top_k": _DEFAULT_RECALL_TOP_K,
         "search_top_k": _DEFAULT_SEARCH_TOP_K,
         "recall_min_score": _DEFAULT_RECALL_MIN_SCORE,
+        "recall_deadline_ms": _DEFAULT_RECALL_DEADLINE_MS,
         "timeout": _DEFAULT_TIMEOUT,
     }
 
@@ -308,7 +310,7 @@ class _Client:
             raise RuntimeError(f"memex8 {method} {path} failed ({resp.status_code}): {msg or payload}")
         return payload
 
-    def search(self, query: str, top_k: int = 8, realm: str = None, min_score: float = 0.3, compact: bool = False, tags: list = None, visibility: str = None) -> dict:
+    def search(self, query: str, top_k: int = 8, realm: Optional[str] = None, min_score: float = 0.3, compact: bool = False, tags: Optional[list] = None, visibility: Optional[str] = None, *, timeout: Optional[float] = None) -> dict:
         body = {"query": query, "limit": top_k, "min_score": min_score}
         if tags is not None:
             body["tags"] = tags
@@ -318,7 +320,7 @@ class _Client:
             body["compact"] = True
         if realm:
             body["realm"] = realm
-        return self.request("POST", "/api/v1/memories/search", json_body=body, timeout=_DEFAULT_SEARCH_TIMEOUT)
+        return self.request("POST", "/api/v1/memories/search", json_body=body, timeout=_DEFAULT_SEARCH_TIMEOUT if timeout is None else timeout)
 
     def recall(self, top_k: int = 8, realm: str = None, compact: bool = False) -> dict:
         params = {"limit": top_k}
@@ -828,7 +830,12 @@ class Memex8MemoryProvider(MemoryProvider):
 
         # Prefetch caches
         self._recall_result: list = []
-        self._prefetch_lock = threading.Lock()
+        self._prefetch_key = None
+        self._prefetch_generation = 0
+        self._prefetch_deadline = 0.0
+        self._prefetch_slots = threading.BoundedSemaphore(2)
+        self._prefetch_workers: set[threading.Thread] = set()
+        self._prefetch_lock = threading.RLock()
         self._prefetch_thread: Optional[threading.Thread] = None
         self._sync_thread: Optional[threading.Thread] = None
 
@@ -904,6 +911,11 @@ class Memex8MemoryProvider(MemoryProvider):
                 "key": "recall_top_k",
                 "description": "Max memories returned per auto-recall",
                 "default": str(_DEFAULT_RECALL_TOP_K),
+            },
+            {
+                "key": "recall_deadline_ms",
+                "description": "End-to-end auto-recall budget in milliseconds (including background time)",
+                "default": str(_DEFAULT_RECALL_DEADLINE_MS),
             },
             # Feature 1: per-session injection dedup
             {
@@ -1044,6 +1056,12 @@ class Memex8MemoryProvider(MemoryProvider):
 
     def initialize(self, session_id: str, **kwargs) -> None:
         """Initialize for a session. Verify connectivity to memex8."""
+        with self._prefetch_lock, self._client_lock:
+            self._initialize_session(session_id, **kwargs)
+
+    def _initialize_session(self, session_id: str, **kwargs) -> None:
+        """Replace lifecycle state atomically with respect to submissions."""
+        self._invalidate_prefetch()
         self._session_id = session_id
         self._hermes_home = kwargs.get("hermes_home", os.path.expanduser("~/.hermes"))
         self._turn_counter = 0
@@ -1101,20 +1119,83 @@ class Memex8MemoryProvider(MemoryProvider):
 
     # -- Background prefetch --
 
+    def _invalidate_prefetch(self) -> None:
+        with self._prefetch_lock:
+            self._prefetch_generation += 1
+            self._prefetch_key = None
+            self._recall_result = []
+
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        """Prefetch recall results in background for the next turn."""
+        """Queue query-aware, best-effort recall without waiting for old work.
+
+        At most two HTTP workers can be inflight. Overload drops the new
+        speculative request and invalidates obsolete results; no backlog is
+        retained. Explicit memory tools are unaffected.
+        """
+        with self._prefetch_lock:
+            submission = self._prepare_prefetch(query, session_id=session_id)
+        if submission is None:
+            return
+        generation, deadline = submission
+
+        # Client creation may block: never hold the lifecycle lock across it.
+        # An initialize during capture makes this submission obsolete; recheck
+        # before snapshotting config or allowing any worker to dispatch.
+        try:
+            client = self._get_client()
+            with self._prefetch_lock:
+                if generation != self._prefetch_generation:
+                    self._prefetch_slots.release()
+                    return
+                cfg = dict(self._config or {})
+            top_k = int(cfg.get("recall_top_k", _DEFAULT_RECALL_TOP_K))
+            min_score = float(cfg.get("recall_min_score", _DEFAULT_RECALL_MIN_SCORE))
+        except Exception as exc:
+            self._prefetch_slots.release()
+            logger.debug("memex8 prefetch setup failed: %s", exc)
+            return
+
+        self._start_prefetch(query, generation, deadline, client, top_k, min_score)
+
+    def _prepare_prefetch(self, query: str, *, session_id: str):
+        """Reserve a generation and slot while holding the lifecycle lock."""
         if self._is_breaker_open():
+            self._invalidate_prefetch()
             return
 
         auto_recall = self._config.get("auto_recall", True) if self._config else True
         if not auto_recall:
+            self._invalidate_prefetch()
             return
 
+        key = (session_id or self._session_id, query)
+        try:
+            budget_ms = float((self._config or {}).get("recall_deadline_ms", _DEFAULT_RECALL_DEADLINE_MS))
+            if not 0 < budget_ms < float("inf"):
+                raise ValueError("invalid recall deadline")
+        except (TypeError, ValueError):
+            budget_ms = _DEFAULT_RECALL_DEADLINE_MS
+        deadline = time.monotonic() + budget_ms / 1000.0
+        with self._prefetch_lock:
+            self._prefetch_generation += 1
+            generation = self._prefetch_generation
+            self._prefetch_key = key
+            self._prefetch_deadline = deadline
+            self._recall_result = []
+            if not self._prefetch_slots.acquire(blocking=False):
+                # Best-effort recall: supersede obsolete work without creating
+                # a backlog of network requests or waiting for old workers.
+                return
+
+        return generation, deadline
+
+    def _start_prefetch(self, query, generation, deadline, client, top_k, min_score):
         def _run():
             try:
-                client = self._get_client()
-                top_k = int(self._config.get("recall_top_k", _DEFAULT_RECALL_TOP_K)) if self._config else _DEFAULT_RECALL_TOP_K
-                results = client.recall(top_k=top_k)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                results = client.search(query, top_k=top_k, min_score=min_score, timeout=remaining)
                 # Handle both dict-wrapped and direct-list responses
                 if isinstance(results, dict):
                     recall_data = results.get("results", results.get("memories", []))
@@ -1122,20 +1203,42 @@ class Memex8MemoryProvider(MemoryProvider):
                     recall_data = results
                 else:
                     recall_data = []
+                if not isinstance(recall_data, list):
+                    raise ValueError("prefetch results must be a list")
+                for entry in recall_data:
+                    if not isinstance(entry, dict) or not isinstance(entry.get("content"), str):
+                        raise ValueError("prefetch memory must have string content")
+                    for field in ("importance", "score"):
+                        if field in entry:
+                            value = entry[field]
+                            if not isinstance(value, (int, float, str)):
+                                raise ValueError("invalid prefetch memory priority")
+                            float(value)
                 with self._prefetch_lock:
-                    self._recall_result = recall_data if recall_data else []
-                self._record_success()
+                    if generation == self._prefetch_generation and time.monotonic() <= deadline:
+                        self._recall_result = recall_data if recall_data else []
+                        self._record_success()
             except Exception as e:
-                self._record_failure(str(e))
+                with self._prefetch_lock:
+                    if generation == self._prefetch_generation:
+                        self._record_failure(str(e))
                 logger.debug("memex8 prefetch failed: %s", e)
+            finally:
+                self._prefetch_slots.release()
 
-        if self._prefetch_thread and self._prefetch_thread.is_alive():
-            self._prefetch_thread.join(timeout=3.0)
-
-        self._prefetch_thread = spawn_context_thread(
-            _run, name="memex8-prefetch"
-        )
-        self._prefetch_thread.start()
+        try:
+            with self._prefetch_lock:
+                if generation != self._prefetch_generation:
+                    self._prefetch_slots.release()
+                    return
+                self._prefetch_workers = {t for t in self._prefetch_workers if t.is_alive()}
+                self._prefetch_thread = spawn_context_thread(_run, name="memex8-prefetch")
+                self._prefetch_workers.add(self._prefetch_thread)
+                self._prefetch_thread.start()
+        except Exception as exc:
+            self._prefetch_slots.release()
+            logger.debug("memex8 prefetch setup failed: %s", exc)
+            return
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Return prefetched context block.
@@ -1146,11 +1249,21 @@ class Memex8MemoryProvider(MemoryProvider):
         is set, additionally sort candidates by importance and drop
         lowest-priority memories to fit within the budget.
         """
-        if self._prefetch_thread and self._prefetch_thread.is_alive():
-            self._prefetch_thread.join(timeout=3.0)
+        with self._prefetch_lock:
+            if self._prefetch_key != (session_id or self._session_id, query):
+                return ""
+            generation = self._prefetch_generation
+            deadline = self._prefetch_deadline
+            worker = self._prefetch_thread
+        if worker and worker.is_alive():
+            worker.join(timeout=max(0.0, deadline - time.monotonic()))
 
         with self._prefetch_lock:
-            recall = self._recall_result
+            if generation != self._prefetch_generation:
+                return ""
+            recall = self._recall_result if time.monotonic() <= deadline else []
+            self._prefetch_generation += 1
+            self._prefetch_key = None
             self._recall_result = []
 
         if not recall:
@@ -1335,6 +1448,7 @@ class Memex8MemoryProvider(MemoryProvider):
 
         Called when a session ends (exit, /reset, timeout).
         """
+        self._invalidate_prefetch()
         # Feature 1: clear per-session dedup state on session end
         with self._dedup_lock:
             self._injected_this_session = set()
@@ -1863,9 +1977,13 @@ class Memex8MemoryProvider(MemoryProvider):
     # -- Shutdown --
 
     def shutdown(self) -> None:
-        for t in (self._prefetch_thread, self._sync_thread):
+        self._invalidate_prefetch()
+        with self._prefetch_lock:
+            workers = list(self._prefetch_workers)
+        deadline = time.monotonic() + 5.0
+        for t in workers + [self._sync_thread]:
             if t and t.is_alive():
-                t.join(timeout=5.0)
+                t.join(timeout=max(0.0, deadline - time.monotonic()))
         with self._client_lock:
             self._client = None
 

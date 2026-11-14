@@ -234,6 +234,7 @@ impl Engine {
         &self,
         operation_id: &str,
     ) -> anyhow::Result<DuplicateRestoreResult> {
+        self.refuse_evidence_projection_transfer().await?;
         let _guard = self.store.maintenance_guard().await;
         let mut op = self
             .store

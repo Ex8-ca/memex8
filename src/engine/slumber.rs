@@ -7,6 +7,9 @@ use crate::engine::reactions::reaction_boost;
 use crate::storage::qdrant::{GapPoint, MemoryPoint, QdrantStore, VerificationStatusCounts};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+mod consolidation_tests;
+
 pub struct SlumberEngine {
     config: AppConfig,
     store: QdrantStore,
@@ -98,6 +101,28 @@ impl SlumberEngine {
         force_consolidation: bool,
     ) -> anyhow::Result<SlumberReport> {
         let _certification_guard = self.store.maintenance_guard().await;
+        let path = Path::new(&self.config.turbovec.index_path)
+            .parent()
+            .unwrap_or_else(|| Path::new("data"))
+            .join("evidence.sqlite3");
+        anyhow::ensure!(
+            !self.config.evidence.enabled,
+            "evidence enabled: slumber unsupported"
+        );
+        if path.exists() {
+            anyhow::ensure!(
+                !crate::storage::evidence::EvidenceStore::open(&path)?.has_records()?,
+                "evidence present: slumber unsupported"
+            );
+        }
+        anyhow::ensure!(
+            self.store
+                .scroll_all_memories()
+                .await?
+                .iter()
+                .all(|m| m.evidence_refs.is_empty()),
+            "evidence references present: slumber unsupported"
+        );
         let mut report = SlumberReport::default();
 
         // Phase 1: Deduplicate near-identical memories
@@ -1850,6 +1875,9 @@ impl SlumberEngine {
     /// Groups memories by realm, sends batches to local LLM (Qwen 3.6 via Unsloth),
     /// then replaces fragmented memories with clean summaries.
     async fn llm_consolidate(&self) -> anyhow::Result<usize> {
+        if !self.config.slumber.consolidation.enabled {
+            return Ok(0);
+        }
         let backend = &self.config.slumber.consolidation.backend;
         let model = self.config.slumber.consolidation.model.clone();
 
@@ -1858,8 +1886,8 @@ impl SlumberEngine {
         let mut by_realm: std::collections::BTreeMap<_, Vec<&MemoryPoint>> =
             std::collections::BTreeMap::new();
         for mem in &all {
-            // Keep project scope/source protections from the shared-memory work.
-            if mem.tags.iter().any(|tag| tag.starts_with("project:")) {
+            // Scoped tags lack a generic compatibility contract; skip them.
+            if mem.tags.iter().any(|tag| tag.contains(':')) {
                 continue;
             }
             let key = (

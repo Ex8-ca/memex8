@@ -1403,6 +1403,7 @@ mod tests {
             certification_note: None,
             memory_type: "general".into(),
             visibility: "private".into(),
+            evidence_refs: vec![],
         };
 
         let mem_b = MemoryPoint {
@@ -1442,6 +1443,7 @@ mod tests {
             certification_note: None,
             memory_type: "general".into(),
             visibility: "private".into(),
+            evidence_refs: vec![],
         };
 
         let (link_type, confidence, _) = classify_relationship(&mem_a, &mem_b, 0.8);

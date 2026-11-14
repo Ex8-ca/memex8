@@ -99,6 +99,8 @@ pub struct MemoryPoint {
     /// Empty string = legacy memory, treated as "private".
     #[serde(default)]
     pub visibility: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<crate::storage::evidence::EvidenceRef>,
 }
 
 impl MemoryPoint {
@@ -387,6 +389,7 @@ fn memory_to_payload(mem: &MemoryPoint) -> Payload {
         "certification_note": mem.certification_note,
         "memory_type": mem.memory_type,
         "visibility": mem.visibility,
+        "evidence_refs": mem.evidence_refs,
     });
     Payload::try_from(json).unwrap_or_default()
 }
@@ -447,6 +450,10 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
         certified_by: map_str(map, "certified_by"),
         certification_note: map_str(map, "certification_note"),
         memory_type: map_str(map, "memory_type").unwrap_or_default(),
+        evidence_refs: map
+            .get("evidence_refs")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
         // Empty/missing visibility defaults to "private" so legacy
         // memories never accidentally become shareable on upgrade.
         visibility: map_str(map, "visibility")
@@ -753,6 +760,7 @@ impl QdrantStore {
             certification_note: None,
             memory_type: memory_type.to_string(),
             visibility: normalize_visibility(visibility).to_string(),
+            evidence_refs: vec![],
         };
         crate::engine::redaction::ensure_memory(&mem)?;
         let payload = memory_to_payload(&mem);
@@ -766,6 +774,7 @@ impl QdrantStore {
 
     /// Restore the serialized payload verbatim rather than resetting metadata.
     pub async fn restore_memory(&self, memory: &MemoryWithVector) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(&memory.memory.id).await?;
         crate::engine::redaction::ensure_memory(&memory.memory)?;
         let point = PointStruct::new(
             memory.memory.id.clone(),
@@ -846,6 +855,17 @@ impl QdrantStore {
         Ok(result)
     }
 
+    /// Evidence snapshots are immutable until coordinated erasure/revision exists.
+    pub(crate) async fn refuse_evidence_mutation(&self, id: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.get_memory(id)
+                .await?
+                .is_none_or(|m| m.evidence_refs.is_empty()),
+            "evidence-linked mutation unsupported"
+        );
+        Ok(())
+    }
+
     /// Shared guard for local maintenance/content replacement.
     pub async fn maintenance_guard(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
         self.certification_gate.write().await
@@ -858,6 +878,7 @@ impl QdrantStore {
         by: Option<&str>,
         note: Option<&str>,
     ) -> anyhow::Result<Option<MemoryPoint>> {
+        self.refuse_evidence_mutation(id).await?;
         let _guard = self.certification_gate.write().await;
         let Some(mut memory) = self.get_memory(id).await? else {
             return Ok(None);
@@ -905,6 +926,7 @@ impl QdrantStore {
         id: &str,
         payload: Payload,
     ) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(id).await?;
         let value: serde_json::Value = payload.clone().into();
         crate::engine::redaction::ensure_clean(&value)?;
         if let Some(content) = value.get("content").and_then(|v| v.as_str()) {
@@ -930,6 +952,7 @@ impl QdrantStore {
     }
 
     pub async fn delete_unprotected_memory(&self, id: &str) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(id).await?;
         let filter = Filter {
             must: vec![Condition::has_id([id.to_string()])],
             must_not: vec![Condition::matches(
@@ -951,6 +974,7 @@ impl QdrantStore {
     /// Import/edit a complete snapshot without discarding certification or provenance.
     /// Existing certified content requires explicit revocation before replacement.
     pub async fn replace_memory(&self, memory: &MemoryPoint, vector: &[f32]) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(&memory.id).await?;
         crate::engine::redaction::ensure_memory(memory)?;
         if self
             .get_memory(&memory.id)
@@ -1166,6 +1190,7 @@ impl QdrantStore {
     }
 
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(id).await?;
         self.client
             .delete_points(
                 DeletePointsBuilder::new(MEMORIES)
@@ -1773,6 +1798,7 @@ impl QdrantStore {
 
     /// Update arbitrary payload fields on a memory point.
     pub async fn update_memory_payload(&self, id: &str, payload: Payload) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(id).await?;
         let value: serde_json::Value = payload.clone().into();
         crate::engine::redaction::ensure_clean(&value)?;
         if let Some(content) = value.get("content").and_then(|v| v.as_str()) {
@@ -1880,6 +1906,9 @@ impl QdrantStore {
             return Ok(());
         }
 
+        for (id, _) in ids_and_payloads {
+            self.refuse_evidence_mutation(id).await?;
+        }
         for (id, payload) in ids_and_payloads {
             self.client
                 .set_payload(
@@ -2265,6 +2294,7 @@ mod tests {
             certification_note: Some("Confirmed".into()),
             memory_type: "general".into(),
             visibility: "public".into(),
+            evidence_refs: vec![],
         };
 
         // payload -> JSON object -> payload value -> Map.
