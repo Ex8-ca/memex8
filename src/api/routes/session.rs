@@ -32,7 +32,8 @@ pub async fn session_end(
     let report = state.engine.run_session_end(input).await?;
 
     Ok(Json(serde_json::json!({
-        "status": "extracted",
+        "status": if report.skipped { "skipped" } else { "extracted" },
+        "reason": if report.skipped { Some("content empty after redaction") } else { None },
         "session_id": report.session_id,
         "summary_memory_id": report.summary_memory_id,
         "decisions_stored": report.decisions_stored,

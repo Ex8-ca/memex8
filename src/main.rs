@@ -35,6 +35,9 @@ enum Commands {
     /// Show current configuration
     ConfigShow,
 
+    /// Hash a web-login password (reads it from stdin) for MEMEX8_WEB_PASSWORD_HASH
+    HashPassword,
+
     /// Ingest a .md file or directory
     Ingest {
         /// Path to file or directory
@@ -289,6 +292,8 @@ enum RealmActions {
 
 #[derive(Subcommand)]
 enum SlumberActions {
+    /// Inspect duplicate candidates only (read-only; does not run slumber)
+    InspectDuplicates,
     /// Show slumber state and schedule
     Status,
     /// Manually trigger slumber pipeline
@@ -328,6 +333,17 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    // Needs no config: read a password from stdin, print its argon2 hash.
+    if matches!(cli.command, Commands::HashPassword) {
+        use std::io::Read;
+        let mut pw = String::new();
+        std::io::stdin().read_to_string(&mut pw)?;
+        let pw = pw.trim_end_matches(['\n', '\r']);
+        anyhow::ensure!(pw.len() >= 8, "password must be at least 8 characters");
+        println!("{}", api::session::hash_password(pw)?);
+        return Ok(());
+    }
+
     // Load config
     let config = config::AppConfig::load(&cli.config)?;
 
@@ -337,6 +353,7 @@ async fn main() -> anyhow::Result<()> {
             // TODO: interactive wizard
             println!("Configuration written to {}", cli.config);
         }
+        Commands::HashPassword => unreachable!("handled before config load"),
         Commands::ConfigShow => {
             println!("{}", toml::to_string_pretty(&config)?);
         }
@@ -511,9 +528,20 @@ async fn main() -> anyhow::Result<()> {
 
             let _ = std::fs::remove_file(&tmp);
         }
+        Commands::Slumber {
+            action: SlumberActions::InspectDuplicates,
+        } => {
+            // Deliberately bypass Engine::new: it initializes/backfills storage.
+            let url = std::env::var("QDRANT_URL").unwrap_or_else(|_| config.qdrant.url.clone());
+            let store = storage::qdrant::QdrantStore::new(&url).await?;
+            let slumber = engine::slumber::SlumberEngine::new(config, store);
+            let report = slumber.inspect_duplicates().await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Commands::Slumber { action } => {
             let engine = engine::Engine::new(config).await?;
             match action {
+                SlumberActions::InspectDuplicates => unreachable!(),
                 SlumberActions::Status => {
                     let status = engine.slumber_status().await;
                     println!("{}", serde_json::to_string_pretty(&status)?);

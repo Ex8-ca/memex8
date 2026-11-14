@@ -3,8 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+  # Also validate dependent PRs before their parent feature branch lands.
   pull_request:
-    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,10 +14,10 @@ jobs:
     name: Rust build + test
     runs-on: ubuntu-latest
     services:
-      qdrant:
+      consolidation-qdrant:
         image: qdrant/qdrant:v1.17.0
         ports:
-          - 6334:6334
+          - 6336:6334
       evidence-qdrant:
         image: qdrant/qdrant:v1.17.0
         ports:
@@ -65,10 +65,24 @@ jobs:
       - name: Run tests
         run: cargo test -- --skip test_kmeans_simple
 
-      - name: Test consolidation safety against disposable Qdrant
+      - name: Test lifecycle recovery with disposable Qdrant
         env:
-          MEMEX8_TEST_QDRANT_URL: http://127.0.0.1:6334
-        run: cargo test --lib consolidation_tests -- --include-ignored --test-threads=1
+          MEMEX8_TEST_BINARY: ${{ github.workspace }}/target/release/memex8
+        run: |
+          docker pull qdrant/qdrant:latest
+          python3 tests/test_dedup_inspection.py
+          python3 tests/test_certification.py
+          python3 tests/test_consolidation.py
+          python3 tests/test_dedup_removal.py
+          python3 tests/test_compact_retrieval.py
+          python3 tests/test_search_coverage.py
+          python3 tests/test_private_redaction.py
+          python3 tests/test_timeline.py
+
+      - name: Test source-preserving consolidation against disposable Qdrant
+        env:
+          MEMEX8_TEST_QDRANT_URL: http://127.0.0.1:6336
+        run: cargo test --lib consolidation_tests -- --ignored --test-threads=1
 
       - name: Test explicit REST evidence against disposable Qdrant
         env:
@@ -115,6 +129,12 @@ jobs:
           python3 integrations/shared-memory/test_bridge.py -v
           python3 tests/test_docker_backup.py -v
           python3 plugins/memex8/tests/test_visibility.py
+          python3 plugins/memex8/tests/test_certification.py
+          python3 plugins/memex8/tests/test_consolidation.py
+          python3 plugins/memex8/tests/test_dedup_removal.py
+          python3 plugins/memex8/tests/test_compact_retrieval.py
+          python3 plugins/memex8/tests/test_search_coverage.py
+          python3 plugins/memex8/tests/test_timeline.py
 
       - name: Test query-aware prefetch isolation and deadlines
         run: python3 -m pytest tests/test_prefetch.py -q

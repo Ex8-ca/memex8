@@ -1,21 +1,30 @@
 pub mod associations;
 pub mod backup;
 pub mod chunker;
+pub mod consolidation;
+pub mod coverage;
 pub mod decay;
+pub mod dedup;
+pub mod dedup_removal;
 pub mod doctor;
+pub mod dream;
 pub mod embedder;
 pub mod evidence;
 pub mod graph;
 pub mod ingester;
+pub mod lexical;
 pub mod memex8_md;
 pub mod providers;
 pub mod quantizer;
 pub mod query_intent;
 pub mod reactions;
 pub mod realms;
+pub mod redaction;
+pub mod retrieval;
 pub mod scheduler;
 pub mod session;
 pub mod slumber;
+pub mod timeline;
 pub mod watcher;
 
 use crate::config::AppConfig;
@@ -25,10 +34,38 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Minimum fraction of live memories a TurboVec index must cover to be
+/// trusted for search.
+///
+/// TurboVec is preferred over Qdrant in the search path, so an index that
+/// covers only a fraction of the corpus silently shrinks the searchable set:
+/// it does not just return stale results, it returns *fewer* results. A 90%
+/// threshold tolerates the normal gap (memories ingested since the last
+/// rebuild) while rejecting an index that is genuinely stale.
+pub const TURBOVEC_MIN_COVERAGE_PERCENT: u64 = 90;
+
+/// Whether a TurboVec index holding `indexed` vectors covers the `live`
+/// memory corpus closely enough to be used for search.
+pub fn turbovec_index_covers_live(indexed: u64, live: u64) -> bool {
+    if live == 0 {
+        return true;
+    }
+    indexed.saturating_mul(100) >= live.saturating_mul(TURBOVEC_MIN_COVERAGE_PERCENT)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryResult {
     pub id: String,
     pub content: String,
+    // Projection metadata stays internal so legacy full responses keep their shape.
+    #[serde(skip)]
+    pub(crate) summary: Option<String>,
+    #[serde(skip)]
+    pub(crate) ingested_at: String,
+    #[serde(skip)]
+    pub(crate) memory_type: String,
+    #[serde(skip)]
+    pub(crate) verification_status: String,
     pub heading: Option<String>,
     pub realm_name: String,
     pub importance: f32,
@@ -49,6 +86,7 @@ pub struct MemoryResult {
 /// memories rank lower but still surface. See PLAN-memory-memex8.md.
 pub(crate) fn verification_score_multiplier(status: &str) -> f32 {
     match status {
+        "certified" => 1.05,
         "verified" => 1.0,
         "unverified" => 0.95, // slight penalty, not exclusion
         "stale" => 0.85,
@@ -96,6 +134,11 @@ pub struct Engine {
     /// TurboVec compressed vector index for fast search.
     /// Loaded from disk on startup, rebuilt during slumber.
     turbovec_index: Arc<RwLock<Option<quantizer::TurboQuantVectorIndex>>>,
+    /// BM25 keyword index (a cache rebuilt from Qdrant; see `lexical`).
+    lexical: Arc<RwLock<lexical::LexicalIndex>>,
+    /// Dreams live in their own files, outside the memories collection.
+    dreams: dream::DreamStore,
+    dream_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct SlumberState {
@@ -151,9 +194,16 @@ impl Engine {
         store.ensure_collections(dimensions).await?;
 
         // Try to load TurboVec index from disk for fast search
-        let turbovec_index = Self::init_turbovec_index(&config);
+        let turbovec_index = Self::init_turbovec_index(&config, &store).await;
 
-        Ok(Self {
+        // Dreams sit next to the TurboVec index, so they're on the data volume and in backups.
+        let dreams = dream::DreamStore::new(
+            std::path::Path::new(&config.turbovec.index_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("dreams"),
+        );
+        let engine = Self {
             config,
             store,
             slumber_state: Arc::new(RwLock::new(SlumberState {
@@ -173,12 +223,113 @@ impl Engine {
             file_watcher: Arc::new(RwLock::new(None)),
             config_path: "config.toml".to_string(),
             turbovec_index,
-        })
+            lexical: Arc::new(RwLock::new(lexical::LexicalIndex::default())),
+            dreams,
+            dream_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
+        if let Err(e) = engine.rebuild_lexical_index().await {
+            tracing::warn!(
+                "Lexical index not built ({e}); search stays vector-only until the next rebuild"
+            );
+        }
+        Ok(engine)
+    }
+
+    pub fn dream_store(&self) -> &dream::DreamStore {
+        &self.dreams
+    }
+
+    /// Keep a dream. With `remember`, also store it as a `dream`-type memory (the one
+    /// explicit, user-requested path from a dream to the memories collection). Keeping
+    /// twice with `remember` never stores it twice.
+    pub async fn keep_dream(
+        &self,
+        id: &str,
+        remember: bool,
+    ) -> anyhow::Result<Option<dream::Dream>> {
+        let Some(d) = self.dreams.get(id) else {
+            return Ok(None);
+        };
+        if !remember || d.remembered_as.is_some() {
+            return self.dreams.keep(id);
+        }
+        let memory_id = self
+            .store_memory(
+                &dream::memory_text_for(&d),
+                Some(vec![dream::DREAM_TYPE.to_string()]),
+                None,
+                Some("dream"),
+                None,
+                Some(dream::DREAM_TYPE),
+            )
+            .await?;
+        self.dreams.keep_remembered(id, &memory_id)
+    }
+
+    pub fn dream_config(&self) -> &crate::config::DreamConfig {
+        &self.config.dream
+    }
+
+    /// Generate one dream now (also used by the schedule). It is saved as *pending*
+    /// for the user to keep or discard. This never writes to the memories collection.
+    pub async fn dream_now(&self) -> anyhow::Result<dream::Dream> {
+        let _guard = self
+            .dream_lock
+            .try_lock()
+            .map_err(|_| dream::DreamError::InProgress)?;
+        let cfg = &self.config.dream;
+        let expired = self
+            .dreams
+            .expire_pending(cfg.pending_days as i64, chrono::Utc::now());
+        if expired > 0 {
+            tracing::info!("🌙 Expired {} unreviewed dream(s)", expired);
+        }
+        let all = self.store.scroll_all_memories().await?;
+        let seeds = {
+            use rand::SeedableRng;
+            let mut rng = rand::rngs::StdRng::from_entropy();
+            dream::pick_seeds(&all, cfg.seeds, chrono::Utc::now(), &mut rng)
+        };
+        if seeds.len() < dream::MIN_SEEDS {
+            return Err(dream::DreamError::NotEnoughMemories(seeds.len()).into());
+        }
+        let (raw, model) = dream::call_llm(
+            &self.config,
+            &dream::system_prompt(cfg.max_words),
+            &dream::seed_lines(&seeds),
+        )
+        .await?;
+        let parsed = dream::parse_dream(&raw, &seeds, cfg.max_words)?;
+        let d = dream::Dream::new(parsed, seeds.iter().map(|m| m.id.clone()).collect(), &model);
+        self.dreams.save(&d)?;
+        tracing::info!("🌙 Dream {}: {}", &d.id[..8], d.title);
+        Ok(d)
+    }
+
+    /// Rebuild the BM25 keyword index from every memory in Qdrant.
+    pub async fn rebuild_lexical_index(&self) -> anyhow::Result<usize> {
+        let all = self.store.scroll_all_memories().await?;
+        let mut fresh = lexical::LexicalIndex::default();
+        for m in &all {
+            fresh.upsert(&m.id, &lexical::memory_text(m));
+        }
+        let n = fresh.len();
+        *self.lexical.write().await = fresh;
+        tracing::info!("🔤 Lexical index: {} memories", n);
+        Ok(n)
     }
 
     /// Load TurboVec index from disk if it exists, otherwise return empty.
-    fn init_turbovec_index(
+    ///
+    /// A loaded index is only trusted when it actually covers the memories in
+    /// Qdrant. TurboVec is preferred over Qdrant in the search path, so a stale
+    /// index does not merely return old results: it silently shrinks the
+    /// searchable set to whatever the index happens to contain. Comparing the
+    /// index size against the live Qdrant count catches that and falls back to
+    /// the (complete) Qdrant path until the next slumber rebuilds the index.
+    async fn init_turbovec_index(
         config: &AppConfig,
+        store: &QdrantStore,
     ) -> Arc<RwLock<Option<quantizer::TurboQuantVectorIndex>>> {
         let index_path = config.turbovec.index_path.clone();
         let id_map_path = config.turbovec.id_map_path.clone();
@@ -189,15 +340,29 @@ impl Engine {
             quantizer::TurboQuantVectorIndex::load(&index_path, &id_map_path, dims, bit_width);
         match loaded {
             Ok(index) => {
-                tracing::info!(
-                    "📦 Loaded TurboVec index: {} vectors from {} ({}d @ {}-bit, {:.1}x compression)",
-                    index.vector_count(),
-                    index_path,
-                    dims,
-                    bit_width,
-                    index.compression_ratio()
-                );
-                Arc::new(RwLock::new(Some(index)))
+                let indexed = index.vector_count() as u64;
+                // If Qdrant can't be counted, keep the previous behaviour (use the index).
+                let live = store.count_memories().await.unwrap_or(0);
+                if turbovec_index_covers_live(indexed, live) {
+                    tracing::info!(
+                        "📦 Loaded TurboVec index: {} vectors from {} ({}d @ {}-bit, {:.1}x compression)",
+                        index.vector_count(),
+                        index_path,
+                        dims,
+                        bit_width,
+                        index.compression_ratio()
+                    );
+                    Arc::new(RwLock::new(Some(index)))
+                } else {
+                    tracing::warn!(
+                        "⚠️ TurboVec index at {} covers only {} of {} live memories; \
+                         ignoring it and falling back to Qdrant until the next slumber rebuilds it",
+                        index_path,
+                        indexed,
+                        live
+                    );
+                    Arc::new(RwLock::new(None))
+                }
             }
             Err(e) => {
                 tracing::debug!(
@@ -244,6 +409,9 @@ impl Engine {
         let ingester = ingester::Ingester::new(self.config.clone());
         let chunks = ingester.ingest_path(path, chunk_by).await?;
         tracing::info!("Ingested {} chunks from {}", chunks.len(), path);
+        if chunks.is_empty() {
+            return Ok(());
+        }
 
         let embedder = self.make_embedder()?;
         let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
@@ -488,6 +656,9 @@ impl Engine {
             .ingest_path(&path.to_string_lossy(), chunk_by)
             .await?;
 
+        if chunks.is_empty() {
+            return Ok(());
+        }
         let embedder = self.make_embedder()?;
         let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
         let vectors = embedder.embed_batch(&texts).await?;
@@ -584,70 +755,120 @@ impl Engine {
         offset: usize,
         min_score: f32,
     ) -> anyhow::Result<Vec<MemoryResult>> {
-        let embedder = self.make_embedder()?;
-        let query_vector = embedder.embed(query).await?;
+        let query_vector = self.make_embedder()?.embed(query).await?;
+        self.search_embedded(
+            query,
+            realm,
+            tags,
+            limit,
+            offset,
+            min_score,
+            None,
+            &query_vector,
+        )
+        .await
+    }
 
-        // Try TurboVec search first (fast, compressed) when available and no tag filters
-        let results = if tags.is_none() || tags.as_ref().map_or(true, |t| t.is_empty()) {
-            let tv_guard = self.turbovec_index.read().await;
-            if let Some(ref tv) = *tv_guard {
-                // TurboVec path: search compressed index, fetch payloads from Qdrant
-                let fetch_limit = (limit + offset) * 4; // Over-fetch to account for filtering
-                let (scores, indices) = tv.search(&query_vector, fetch_limit);
-                let ids = tv.resolve_ids(&indices);
-
-                // Fetch full payloads from Qdrant by ID
-                let mut fetched: Vec<_> = Vec::new();
-                for (i, &id) in ids.iter().enumerate() {
-                    if i >= scores.len() {
-                        break;
-                    }
-                    if let Ok(Some(point)) = self.store.get_memory(id).await {
-                        let score = scores[i];
-                        if score >= min_score {
-                            if realm.map_or(true, |re| point.realm_name == re) {
-                                fetched.push((score, point));
-                            }
-                        }
+    async fn search_embedded(
+        &self,
+        query: &str,
+        realm: Option<&str>,
+        tags: Option<&[String]>,
+        limit: usize,
+        offset: usize,
+        min_score: f32,
+        visibility: Option<&str>,
+        query_vector: &[f32],
+    ) -> anyhow::Result<Vec<MemoryResult>> {
+        let tv_guard = self.turbovec_index.read().await;
+        let results = if let Some(tv) = tv_guard
+            .as_ref()
+            .filter(|_| tags.is_none_or(|t| t.is_empty()))
+        {
+            let fetch_limit = (limit + offset) * 4;
+            let (scores, indices) = tv.search(query_vector, fetch_limit);
+            let ids = tv.resolve_ids(&indices);
+            let mut fetched = Vec::new();
+            for (id, score) in ids.iter().zip(scores) {
+                if let Some(point) = self.store.get_memory(id).await? {
+                    if score >= min_score
+                        && realm.is_none_or(|r| point.realm_name == r)
+                        && visibility.is_none_or(|v| {
+                            point.visibility == crate::storage::qdrant::normalize_visibility(v)
+                        })
+                    {
+                        fetched.push((score, point));
                     }
                 }
-                fetched.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                fetched
-            } else {
-                // TurboVec not loaded — fall back to Qdrant
-                let qr = if let Some(tags) = tags {
-                    if tags.is_empty() {
-                        self.store
-                            .search(&query_vector, limit + offset, min_score, realm)
-                            .await?
-                    } else {
-                        self.store
-                            .search_by_tags(&query_vector, tags, limit + offset)
-                            .await?
-                            .into_iter()
-                            .filter(|r| r.score >= min_score)
-                            .filter(|r| realm.map_or(true, |re| r.payload.realm_name == re))
-                            .collect()
-                    }
-                } else {
-                    self.store
-                        .search(&query_vector, limit + offset, min_score, realm)
-                        .await?
-                };
-                qr.into_iter().map(|r| (r.score, r.payload)).collect()
             }
+            fetched
         } else {
-            // Tag filters active — must use Qdrant (TurboVec has no tag support)
-            let qr = self
-                .store
-                .search_by_tags(&query_vector, tags.as_ref().unwrap(), limit + offset)
+            self.store
+                .search_filtered(
+                    query_vector,
+                    limit + offset,
+                    min_score,
+                    realm,
+                    tags,
+                    visibility,
+                )
                 .await?
                 .into_iter()
-                .filter(|r| r.score >= min_score)
-                .filter(|r| realm.map_or(true, |re| r.payload.realm_name == re))
-                .collect::<Vec<_>>();
-            qr.into_iter().map(|r| (r.score, r.payload)).collect()
+                .map(|r| (r.score, r.payload))
+                .collect()
         };
+        drop(tv_guard);
+
+        // Hybrid: blend BM25 keyword matches in (see `lexical`). Tag-filtered
+        // searches stay dense-only. Any failure falls back to the dense results.
+        let hybrid = &self.config.search.hybrid;
+        let results = if hybrid.enabled && tags.is_none_or(|t| t.is_empty()) {
+            let hits = self
+                .lexical
+                .read()
+                .await
+                .search(query, hybrid.lexical_candidates);
+            let have: std::collections::HashSet<&str> =
+                results.iter().map(|(_, p)| p.id.as_str()).collect();
+            let missing: Vec<String> = hits
+                .iter()
+                .filter(|(id, _)| !have.contains(id.as_str()))
+                .map(|(id, _)| id.clone())
+                .collect();
+            let lexical_only = if missing.is_empty() {
+                Ok(Vec::new())
+            } else {
+                self.store
+                    .score_ids(query_vector, &missing, realm, visibility)
+                    .await
+                    .map(|v| v.into_iter().map(|r| (r.score, r.payload)).collect())
+            };
+            match lexical_only {
+                Ok(lexical_only) => lexical::apply_lexical_bonus(
+                    results,
+                    lexical_only,
+                    &hits,
+                    hybrid.lexical_weight,
+                    min_score,
+                ),
+                Err(e) => {
+                    tracing::warn!("Keyword candidates skipped: {e}");
+                    lexical::apply_lexical_bonus(
+                        results,
+                        Vec::new(),
+                        &hits,
+                        hybrid.lexical_weight,
+                        min_score,
+                    )
+                }
+            }
+        } else {
+            results
+        };
+
+        // Kept-and-remembered dreams are real memories of type `dream`; keep them out of
+        // every search unless the caller explicitly filters on the `dream` tag.
+        let results = dream::exclude_dream_memories(results, tags);
 
         // Phase A.2: soft down-weight by verification status. Applies to ALL
         // retrieval paths above (TurboVec, Qdrant fallback, tag-filter).
@@ -678,7 +899,11 @@ impl Engine {
                     &p.memory_type
                 };
                 let query_time = chrono::Utc::now();
-                let recency = decay::weibull_boost(&p.last_accessed, query_time, mem_type) as f32;
+                let recency = if p.is_certified() {
+                    1.0
+                } else {
+                    decay::weibull_boost(&p.last_accessed, query_time, mem_type) as f32
+                };
 
                 // Vector score already includes similarity; we apply bias to it.
                 // importance: pull from payload.
@@ -730,6 +955,10 @@ impl Engine {
             .map(|(score, p)| MemoryResult {
                 id: p.id,
                 content: p.content,
+                summary: p.summary,
+                ingested_at: p.ingested_at,
+                memory_type: p.memory_type,
+                verification_status: p.verification_status,
                 heading: p.heading,
                 realm_name: p.realm_name,
                 importance: p.importance,
@@ -765,6 +994,7 @@ impl Engine {
         let mut scored: Vec<_> = memories
             .into_iter()
             .filter(|m| realm.as_deref().map_or(true, |r| m.realm_name == r))
+            .filter(|m| m.memory_type != dream::DREAM_TYPE)
             .map(|m| {
                 // Per-type Weibull decay (replaces uniform 1/(1 + days * 0.1))
                 // Empty/legacy memory_type falls back to "general" defaults.
@@ -775,7 +1005,11 @@ impl Engine {
                 };
                 let query_time = chrono::DateTime::from_timestamp(now as i64, 0)
                     .unwrap_or_else(|| chrono::Utc::now());
-                let recency = decay::weibull_boost(&m.last_accessed, query_time, mem_type) as f32;
+                let recency = if m.is_certified() {
+                    1.0
+                } else {
+                    decay::weibull_boost(&m.last_accessed, query_time, mem_type) as f32
+                };
                 // Upvote factor: each upvote adds a multiplicative boost that saturates
                 // gently via log1p. 1 upvote ≈ 1.18×, 5 upvotes ≈ 1.79×, 20 ≈ 3.05×.
                 // Independent of importance so users can flag signal even on under-scored entries.
@@ -819,6 +1053,10 @@ impl Engine {
             .map(|(m, score)| MemoryResult {
                 id: m.id,
                 content: m.content,
+                summary: m.summary,
+                ingested_at: m.ingested_at,
+                memory_type: m.memory_type,
+                verification_status: m.verification_status,
                 heading: m.heading,
                 realm_name: m.realm_name,
                 importance: m.importance,
@@ -853,42 +1091,8 @@ impl Engine {
             None => all,
         };
 
-        // Sort
         let mut sorted = filtered;
-        match sort {
-            "importance" => sorted.sort_by(|a, b| {
-                let cmp = a.importance.partial_cmp(&b.importance).unwrap();
-                if descending {
-                    cmp
-                } else {
-                    cmp.reverse()
-                }
-            }),
-            "last_accessed" => sorted.sort_by(|a, b| {
-                let cmp = a.last_accessed.cmp(&b.last_accessed);
-                if descending {
-                    cmp
-                } else {
-                    cmp.reverse()
-                }
-            }),
-            "access_count" => sorted.sort_by(|a, b| {
-                let cmp = a.access_count.cmp(&b.access_count);
-                if descending {
-                    cmp
-                } else {
-                    cmp.reverse()
-                }
-            }),
-            _ => sorted.sort_by(|a, b| {
-                let cmp = a.ingested_at.cmp(&b.ingested_at);
-                if descending {
-                    cmp
-                } else {
-                    cmp.reverse()
-                }
-            }),
-        }
+        sort_memories(&mut sorted, sort, descending);
         Ok(sorted)
     }
 
@@ -921,6 +1125,7 @@ impl Engine {
     }
 
     pub async fn merge_realms(&self, target: &str, source: &str) -> anyhow::Result<()> {
+        self.refuse_evidence_projection_transfer().await?;
         let target_realm = self
             .store
             .find_realm_by_name(target)
@@ -958,6 +1163,7 @@ impl Engine {
     }
 
     pub async fn split_realm(&self, name: &str) -> anyhow::Result<()> {
+        self.refuse_evidence_projection_transfer().await?;
         // TODO: k-means split with auto-generated names
         tracing::info!("Splitting realm: {}", name);
         Ok(())
@@ -989,6 +1195,7 @@ impl Engine {
         payload: qdrant_client::Payload,
     ) -> anyhow::Result<()> {
         self.refuse_evidence_mutation(id).await?;
+        let _guard = self.store.maintenance_guard().await;
         self.store.update_memory_payload(id, payload).await
     }
 
@@ -1002,7 +1209,7 @@ impl Engine {
             .into_iter()
             .filter(|m| {
                 // Low importance AND (old OR no access)
-                if m.importance > prune_threshold {
+                if m.is_certified() || m.importance > prune_threshold {
                     return false;
                 }
                 let mem_type_for_age = if m.memory_type.is_empty() {
@@ -1033,43 +1240,35 @@ impl Engine {
 
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
         self.refuse_evidence_mutation(id).await?;
-        self.store.delete_memory(id).await
+        let _guard = self.store.maintenance_guard().await;
+        self.store.delete_memory(id).await?;
+        self.lexical.write().await.remove(id);
+        Ok(())
     }
 
     pub async fn edit_memory(&self, id: &str, new_content: &str) -> anyhow::Result<()> {
         self.refuse_evidence_mutation(id).await?;
-        // Re-embed the new content and update the point
+        let clean_content = redaction::required(new_content)?;
+        let new_content = clean_content.as_str();
+        let _guard = self.store.maintenance_guard().await;
+        let mut existing = self.get_memory(id).await?;
+        if existing.is_certified() {
+            return Err(crate::storage::qdrant::CertifiedMemoryError.into());
+        }
+        existing = redaction::sanitize(&existing)?;
         let embedder = self.make_embedder()?;
         let vector = embedder.embed(new_content).await?;
-
-        let existing = self.get_memory(id).await?;
-        let realm_id = existing.realm_id.as_deref().unwrap_or("");
-
-        // Infer reaction score from new content
-        let reaction_score = crate::engine::reactions::infer_reaction(new_content);
-
-        self.store
-            .store_memory(
-                id,
-                &vector,
-                new_content,
-                existing.heading.as_deref(),
-                existing.source_file.as_deref(),
-                realm_id,
-                &existing.realm_name,
-                &existing.source_hash,
-                &existing.chunk_type,
-                &existing.memory_type,
-                reaction_score,
-                // Preserve the existing visibility on update.
-                if existing.visibility.is_empty() {
-                    "private"
-                } else {
-                    &existing.visibility
-                },
-            )
-            .await?;
-
+        existing.content = new_content.to_string();
+        existing.summary = None;
+        existing.verification_status = "unverified".into();
+        existing.last_verified = None;
+        existing.verification_confidence = None;
+        existing.reaction_score = crate::engine::reactions::infer_reaction(new_content);
+        self.store.replace_memory(&existing, &vector).await?;
+        self.lexical
+            .write()
+            .await
+            .upsert(id, &lexical::memory_text(&existing));
         tracing::info!("Updated memory {}", id);
         Ok(())
     }
@@ -1086,6 +1285,12 @@ impl Engine {
         }
     }
 
+    /// Qdrant remains authoritative while compressed indexes are rebuilt.
+    pub(crate) async fn invalidate_search_index(&self) -> anyhow::Result<()> {
+        *self.turbovec_index.write().await = None;
+        dedup_removal::invalidate_index_files(&self.config)
+    }
+
     pub async fn trigger_slumber(
         &self,
         force_consolidation: bool,
@@ -1098,7 +1303,23 @@ impl Engine {
 
         tracing::info!("💤 Slumber started...");
         let slumber = slumber::SlumberEngine::new(self.config.clone(), self.store.clone_store());
-        let report = slumber.run_full_pipeline(force_consolidation).await?;
+        let result = async {
+            if !self.config.slumber.dedup_dry_run {
+                self.invalidate_search_index().await?;
+            }
+            slumber.run_full_pipeline(force_consolidation).await
+        }
+        .await;
+        // Slumber rewrites, merges and deletes memories without going through the
+        // engine hooks, so refresh the keyword index from Qdrant afterwards.
+        if let Err(e) = self.rebuild_lexical_index().await {
+            tracing::warn!("Lexical index rebuild after slumber failed: {e}");
+        }
+        // Reset even after an archive/index/storage failure so status is accurate.
+        if result.is_err() {
+            self.slumber_state.write().await.status = "idle".into();
+        }
+        let report = result?;
 
         {
             let mut state = self.slumber_state.write().await;
@@ -1155,7 +1376,43 @@ impl Engine {
         realm_hint: Option<&str>,
         source: Option<&str>,
         visibility: Option<&str>,
+        memory_type: Option<&str>,
     ) -> anyhow::Result<String> {
+        self.store_memory_with_certification(
+            content,
+            tags,
+            realm_hint,
+            source,
+            visibility,
+            memory_type,
+            false,
+        )
+        .await
+    }
+
+    pub async fn store_memory_with_certification(
+        &self,
+        content: &str,
+        tags: Option<Vec<String>>,
+        realm_hint: Option<&str>,
+        source: Option<&str>,
+        visibility: Option<&str>,
+        memory_type: Option<&str>,
+        certified: bool,
+    ) -> anyhow::Result<String> {
+        let clean_content = redaction::required(content)?;
+        let content = clean_content.as_str();
+        let tags = tags.map(|tags| {
+            tags.into_iter()
+                .map(|s| redaction::text(&s))
+                .collect::<Vec<_>>()
+        });
+        let clean_realm = realm_hint.map(redaction::text);
+        let realm_hint = clean_realm.as_deref();
+        let clean_source = source.map(redaction::text);
+        let source = clean_source.as_deref();
+        let clean_type = memory_type.map(redaction::text);
+        let memory_type = clean_type.as_deref();
         let embedder = self.make_embedder()?;
         let vector = embedder.embed(content).await?;
 
@@ -1185,6 +1442,13 @@ impl Engine {
         let visibility_str =
             crate::storage::qdrant::normalize_visibility(visibility.unwrap_or("private"));
 
+        // Caller-supplied memory_type wins; default to "general" only when
+        // omitted. The 7-day Weibull decay for "general" is too aggressive
+        // for personal-knowledge memories — callers should set type
+        // explicitly (profile, preference, entity, etc) for 365-day
+        // retention.
+        let memory_type_str = memory_type.unwrap_or("general");
+
         self.store
             .store_memory_with_tags(
                 &id,
@@ -1196,12 +1460,22 @@ impl Engine {
                 &realm_name,
                 "",
                 "manual",
-                "general",
+                memory_type_str,
                 reaction_score,
                 visibility_str,
                 tags.as_deref().unwrap_or(&[]),
+                certified,
             )
             .await?;
+
+        {
+            let mut text = content.to_string();
+            for t in tags.as_deref().unwrap_or(&[]) {
+                text.push(' ');
+                text.push_str(t);
+            }
+            self.lexical.write().await.upsert(&id, &text);
+        }
 
         Ok(id)
     }
@@ -1234,6 +1508,7 @@ impl Engine {
     }
 
     pub async fn export(&self, path: &str) -> anyhow::Result<()> {
+        let _guard = self.store.maintenance_guard().await;
         self.refuse_evidence_projection_transfer().await?;
         // Export with vectors so they can be reused on import
         let memories = self.store.scroll_all_memories_with_vectors().await?;
@@ -1244,85 +1519,62 @@ impl Engine {
 
     pub async fn import(&self, path: &str, reuse_vectors: bool) -> anyhow::Result<usize> {
         self.refuse_evidence_projection_transfer().await?;
+        let _guard = self.store.maintenance_guard().await;
         let content = std::fs::read_to_string(path)?;
-        let incoming: serde_json::Value = serde_json::from_str(&content)?;
+        let memories: Vec<MemoryWithVector> = if reuse_vectors {
+            serde_json::from_str(&content)
+                .or_else(|_| {
+                    serde_json::from_str::<Vec<crate::storage::qdrant::MemoryPoint>>(&content).map(
+                        |points| {
+                            points
+                                .into_iter()
+                                .map(|memory| MemoryWithVector {
+                                    memory,
+                                    vector: Vec::new(),
+                                })
+                                .collect()
+                        },
+                    )
+                })
+                .map_err(|_| anyhow::anyhow!("Invalid memory import format"))?
+        } else {
+            serde_json::from_str::<Vec<crate::storage::qdrant::MemoryPoint>>(&content)
+                .map_err(|_| anyhow::anyhow!("Invalid memory import format"))?
+                .into_iter()
+                .map(|memory| MemoryWithVector {
+                    memory,
+                    vector: Vec::new(),
+                })
+                .collect()
+        };
         anyhow::ensure!(
-            incoming.as_array().is_none_or(|a| a.iter().all(|m| m
-                .get("evidence_refs")
-                .and_then(|v| v.as_array())
-                .is_none_or(|r| r.is_empty()))),
+            memories.iter().all(|m| m.memory.evidence_refs.is_empty()),
             "evidence references in import require paired SQLite restore"
         );
-
-        if reuse_vectors {
-            // Try to import with vectors first
-            if let Ok(memories) = serde_json::from_str::<Vec<MemoryWithVector>>(&content) {
-                let count = memories.len();
-                for m in &memories {
-                    let realm_id = m.memory.realm_id.as_deref().unwrap_or("");
-                    let reaction_score =
-                        crate::engine::reactions::infer_reaction(&m.memory.content);
-                    self.store
-                        .store_memory(
-                            &m.memory.id,
-                            &m.vector,
-                            &m.memory.content,
-                            m.memory.heading.as_deref(),
-                            m.memory.source_file.as_deref(),
-                            realm_id,
-                            &m.memory.realm_name,
-                            &m.memory.source_hash,
-                            &m.memory.chunk_type,
-                            &m.memory.memory_type,
-                            reaction_score,
-                            // Import path: preserve the source visibility.
-                            if m.memory.visibility.is_empty() {
-                                "private"
-                            } else {
-                                &m.memory.visibility
-                            },
-                        )
-                        .await?;
-                }
-                tracing::info!("Imported {} memories with vectors from {}", count, path);
-                return Ok(count);
+        let mut stored = 0;
+        for snapshot in memories {
+            let mut memory: crate::storage::qdrant::MemoryPoint =
+                redaction::sanitize(&snapshot.memory)?;
+            if !redaction::meaningful(&memory.content) {
+                tracing::info!("Skipped imported memory: content empty after redaction");
+                continue;
             }
+            let changed = memory.content != snapshot.memory.content;
+            if changed {
+                memory.source_hash = crate::storage::qdrant::content_hash(&memory.content);
+            }
+            let vector = if reuse_vectors && !changed && !snapshot.vector.is_empty() {
+                snapshot.vector
+            } else {
+                self.make_embedder()?.embed(&memory.content).await?
+            };
+            self.store.replace_memory(&memory, &vector).await?;
+            stored += 1;
         }
-
-        // Fallback: import without vectors, re-embed
-        let memories: Vec<crate::storage::qdrant::MemoryPoint> = serde_json::from_str(&content)?;
-        let count = memories.len();
-
-        let embedder = self.make_embedder()?;
-        for mem in &memories {
-            let vector = embedder.embed(&mem.content).await?;
-            let realm_id = mem.realm_id.as_deref().unwrap_or("");
-            let reaction_score = crate::engine::reactions::infer_reaction(&mem.content);
-            self.store
-                .store_memory(
-                    &mem.id,
-                    &vector,
-                    &mem.content,
-                    mem.heading.as_deref(),
-                    mem.source_file.as_deref(),
-                    realm_id,
-                    &mem.realm_name,
-                    &mem.source_hash,
-                    &mem.chunk_type,
-                    &mem.memory_type,
-                    reaction_score,
-                    // Fallback import path: preserve source visibility.
-                    if mem.visibility.is_empty() {
-                        "private"
-                    } else {
-                        &mem.visibility
-                    },
-                )
-                .await?;
+        if let Err(e) = self.rebuild_lexical_index().await {
+            tracing::warn!("Lexical index rebuild after import failed: {e}");
         }
-
-        tracing::info!("Imported {} memories from {}", count, path);
-        Ok(count)
+        Ok(stored)
     }
 
     /// Return the config file path.
@@ -1461,8 +1713,14 @@ impl Engine {
         &self,
         input: crate::engine::session::SessionInput,
     ) -> anyhow::Result<crate::engine::session::SessionReport> {
-        let session_engine =
-            crate::engine::session::SessionEngine::new(self.config.clone(), self.store.clone());
+        // Session embedding must use the active provider/dimensions, including env overrides.
+        let mut config = self.config.clone();
+        config.embedding.provider = self.embed_provider.clone();
+        config.embedding.model = self.embed_model.clone();
+        config.embedding.dimensions = self.embed_dimensions;
+        config.embedding.openai.base_url = self.openai_base_url.clone();
+        config.embedding.openai.dimensions = self.embed_dimensions;
+        let session_engine = crate::engine::session::SessionEngine::new(config, self.store.clone());
         session_engine.run_session_end(input).await
     }
 
@@ -1513,7 +1771,11 @@ impl Engine {
 
     /// Restore memories, realms, and graph edges from a backup tarball.
     pub async fn restore(&self, backup_path: &str, force: bool) -> anyhow::Result<usize> {
-        backup::restore(self, backup_path, force).await
+        let n = backup::restore(self, backup_path, force).await?;
+        if let Err(e) = self.rebuild_lexical_index().await {
+            tracing::warn!("Lexical index rebuild after restore failed: {e}");
+        }
+        Ok(n)
     }
 
     /// List available backups sorted by date (newest first).
@@ -1522,6 +1784,31 @@ impl Engine {
         backup_dir: Option<&str>,
     ) -> anyhow::Result<Vec<backup::BackupInfo>> {
         backup::list_backups(backup_dir)
+    }
+}
+
+/// Order memories for `GET /api/v1/memories`. `descending` puts the largest
+/// value first (highest importance, newest timestamp, most accesses); unknown
+/// sort keys fall back to `ingested_at`. NaN importance sorts without panicking.
+pub(crate) fn sort_memories(
+    memories: &mut [crate::storage::qdrant::MemoryPoint],
+    sort: &str,
+    descending: bool,
+) {
+    use std::cmp::Ordering;
+    let key: fn(
+        &crate::storage::qdrant::MemoryPoint,
+        &crate::storage::qdrant::MemoryPoint,
+    ) -> Ordering = match sort {
+        "importance" => |a, b| a.importance.total_cmp(&b.importance),
+        "last_accessed" => |a, b| a.last_accessed.cmp(&b.last_accessed),
+        "access_count" => |a, b| a.access_count.cmp(&b.access_count),
+        _ => |a, b| a.ingested_at.cmp(&b.ingested_at),
+    };
+    if descending {
+        memories.sort_by(|a, b| key(b, a));
+    } else {
+        memories.sort_by(key);
     }
 }
 
@@ -1537,11 +1824,46 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[cfg(test)]
+mod turbovec_coverage_tests {
+    use super::turbovec_index_covers_live;
+
+    /// The stale-index regression pin: a 342-vector index was once loaded for
+    /// a 12,374-memory corpus, silently hiding 97% of memories from search.
+    #[test]
+    fn test_stale_turbovec_index_is_rejected() {
+        assert!(!turbovec_index_covers_live(342, 12_374));
+    }
+
+    /// A freshly rebuilt index covering the whole corpus must be accepted.
+    #[test]
+    fn test_full_turbovec_index_is_accepted() {
+        assert!(turbovec_index_covers_live(12_367, 12_374));
+        assert!(turbovec_index_covers_live(12_374, 12_374));
+    }
+
+    /// The normal gap (memories ingested since the last rebuild) must not
+    /// cause the index to be thrown away on every restart.
+    #[test]
+    fn test_small_index_gap_is_tolerated() {
+        assert!(turbovec_index_covers_live(9_500, 10_000));
+        assert!(!turbovec_index_covers_live(8_900, 10_000));
+    }
+
+    /// An empty corpus is not a reason to reject an index.
+    #[test]
+    fn test_empty_corpus_accepts_any_index() {
+        assert!(turbovec_index_covers_live(0, 0));
+        assert!(turbovec_index_covers_live(342, 0));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::verification_score_multiplier;
 
     #[test]
     fn test_verification_score_multiplier_values() {
+        assert_eq!(verification_score_multiplier("certified"), 1.05);
         assert_eq!(verification_score_multiplier("verified"), 1.0);
         assert_eq!(verification_score_multiplier("unverified"), 0.95);
         assert_eq!(verification_score_multiplier("stale"), 0.85);
@@ -1567,5 +1889,68 @@ mod tests {
         let stale = raw_score * verification_score_multiplier("stale");
         assert!(verified > stale);
         assert!(stale > contradicted);
+    }
+
+    fn listed(
+        id: &str,
+        importance: f32,
+        ingested_at: &str,
+        access_count: u32,
+    ) -> crate::storage::qdrant::MemoryPoint {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "content": id, "summary": null, "source_file": null,
+            "realm_id": null, "realm_name": "r", "importance": importance, "upvotes": 0,
+            "tags": [], "ingested_at": ingested_at, "last_accessed": ingested_at,
+            "access_count": access_count, "chunk_type": "manual", "heading": null, "source_hash": ""
+        }))
+        .unwrap()
+    }
+
+    fn ids(memories: &[crate::storage::qdrant::MemoryPoint]) -> Vec<&str> {
+        memories.iter().map(|m| m.id.as_str()).collect()
+    }
+
+    #[test]
+    fn test_sort_memories_descending_puts_largest_first() {
+        // Regression: `direction=desc` (the API default, documented as
+        // "newest first") returned the oldest / least important memories.
+        let mut m = vec![
+            listed("old", 0.2, "2026-05-01T00:00:00Z", 5),
+            listed("new", 0.9, "2026-11-12T00:00:00Z", 1),
+            listed("mid", 0.5, "2026-08-01T00:00:00Z", 9),
+        ];
+        super::sort_memories(&mut m, "ingested_at", true);
+        assert_eq!(ids(&m), ["new", "mid", "old"]);
+        super::sort_memories(&mut m, "importance", true);
+        assert_eq!(ids(&m), ["new", "mid", "old"]);
+        super::sort_memories(&mut m, "access_count", true);
+        assert_eq!(ids(&m), ["mid", "old", "new"]);
+        super::sort_memories(&mut m, "unknown-key", true);
+        assert_eq!(ids(&m), ["new", "mid", "old"]);
+    }
+
+    #[test]
+    fn test_sort_memories_ascending_puts_smallest_first() {
+        let mut m = vec![
+            listed("new", 0.9, "2026-11-12T00:00:00Z", 1),
+            listed("old", 0.2, "2026-05-01T00:00:00Z", 5),
+            listed("mid", 0.5, "2026-08-01T00:00:00Z", 9),
+        ];
+        super::sort_memories(&mut m, "ingested_at", false);
+        assert_eq!(ids(&m), ["old", "mid", "new"]);
+        super::sort_memories(&mut m, "importance", false);
+        assert_eq!(ids(&m), ["old", "mid", "new"]);
+    }
+
+    #[test]
+    fn test_sort_memories_nan_importance_does_not_panic() {
+        let mut m = vec![
+            listed("a", 0.0, "2026-01-01T00:00:00Z", 0),
+            listed("b", 0.5, "2026-01-02T00:00:00Z", 0),
+        ];
+        // JSON has no NaN, so set it after deserialising the fixture.
+        m[0].importance = f32::NAN;
+        super::sort_memories(&mut m, "importance", true);
+        assert_eq!(m.len(), 2);
     }
 }

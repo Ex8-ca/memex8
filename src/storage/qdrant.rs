@@ -8,6 +8,14 @@ use qdrant_client::qdrant::{
 use qdrant_client::Payload;
 use qdrant_client::Qdrant;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+#[path = "consolidation.rs"]
+mod consolidation;
+#[path = "timeline.rs"]
+mod timeline;
+pub use consolidation::{content_hash, ConsolidationOperation, RecoveryError, UnconsolidateResult};
 
 // ─── Data types ───────────────────────────────────────────────────────────────
 
@@ -28,6 +36,27 @@ pub struct MemoryPoint {
     pub chunk_type: String,
     pub heading: Option<String>,
     pub source_hash: String,
+    /// Direct sources of a consolidated summary. Empty for legacy points.
+    #[serde(default)]
+    pub consolidated_from: Vec<String>,
+    #[serde(default)]
+    pub derived_by: String,
+    #[serde(default)]
+    pub consolidated_at: Option<String>,
+    #[serde(default)]
+    pub no_consolidate_until: Option<String>,
+    /// Content fingerprints of underlying evidence, retained after sources disappear.
+    #[serde(default)]
+    pub consolidated_evidence: Vec<String>,
+    /// Dedup recovery protects a restored point from immediate removal.
+    #[serde(default)]
+    pub no_dedup_until: Option<String>,
+    /// Journal IDs applied atomically with metadata; prevents retrying the merge.
+    #[serde(default)]
+    pub dedup_applied_operations: Vec<String>,
+    /// Per-original-ID access contributions avoid counting shared ancestry twice.
+    #[serde(default)]
+    pub dedup_access_contributions: std::collections::BTreeMap<String, u32>,
     /// IDs of semantically associated memories.
     #[serde(default)]
     pub related_memory_ids: Vec<String>,
@@ -50,9 +79,16 @@ pub struct MemoryPoint {
     /// Verifier's confidence the claim is still true, 0.0–1.0. None = unverified.
     #[serde(default)]
     pub verification_confidence: Option<f32>,
-    /// "unverified" | "verified" | "stale" | "contradicted"
+    /// "unverified" | "verified" | "stale" | "contradicted" | "certified"
     #[serde(default)]
     pub verification_status: String,
+    #[serde(default)]
+    pub certified_at: Option<String>,
+    /// Caller-supplied attribution, not an authenticated user identity.
+    #[serde(default)]
+    pub certified_by: Option<String>,
+    #[serde(default)]
+    pub certification_note: Option<String>,
     /// Semantic memory type for per-type Weibull decay (preference, fact, event, etc.).
     /// Empty string = legacy memory, treated as "general" in decay.
     #[serde(default)]
@@ -67,6 +103,25 @@ pub struct MemoryPoint {
     pub evidence_refs: Vec<crate::storage::evidence::EvidenceRef>,
 }
 
+impl MemoryPoint {
+    pub fn is_certified(&self) -> bool {
+        self.verification_status == "certified"
+    }
+}
+
+#[derive(Debug)]
+pub struct CertifiedMemoryError;
+
+impl std::fmt::Display for CertifiedMemoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Memory is certified; revoke certification before replacing its content"
+        )
+    }
+}
+impl std::error::Error for CertifiedMemoryError {}
+
 /// Memory with its embedding vector (internal use only, not serialized).
 #[derive(Debug, Clone)]
 pub struct MemoryPointWithVector {
@@ -80,6 +135,14 @@ pub struct MemoryWithVector {
     #[serde(flatten)]
     pub memory: MemoryPoint,
     pub vector: Vec<f32>,
+}
+
+/// Typed provenance options prevent accidental overwrites of core payload fields.
+pub struct ConsolidationMetadata {
+    pub source_ids: Vec<String>,
+    pub source_fingerprint: String,
+    pub visibility: String,
+    pub evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +167,8 @@ pub struct SearchResult {
 /// slumber report.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VerificationStatusCounts {
+    #[serde(default)]
+    pub certified: u64,
     pub verified: u64,
     pub stale: u64,
     pub contradicted: u64,
@@ -146,6 +211,8 @@ pub struct GraphEdge {
 #[derive(Clone)]
 pub struct QdrantStore {
     client: Qdrant,
+    /// Serialize certification with content replacement and local maintenance.
+    certification_gate: Arc<RwLock<()>>,
 }
 
 const MEMORIES: &str = "memories";
@@ -301,13 +368,25 @@ fn memory_to_payload(mem: &MemoryPoint) -> Payload {
         "chunk_type": mem.chunk_type,
         "heading": mem.heading,
         "source_hash": mem.source_hash,
+        "consolidated_from": mem.consolidated_from,
+        "derived_by": mem.derived_by,
+        "consolidated_at": mem.consolidated_at,
+        "no_consolidate_until": mem.no_consolidate_until,
+        "consolidated_evidence": mem.consolidated_evidence,
+        "no_dedup_until": mem.no_dedup_until,
+        "dedup_applied_operations": mem.dedup_applied_operations,
+        "dedup_access_contributions": mem.dedup_access_contributions,
         "related_memory_ids": mem.related_memory_ids,
         "association_strengths": mem.association_strengths,
         "reaction_score": mem.reaction_score,
         "topic_clusters": mem.topic_clusters,
+        "quantized_bit_width": mem.quantized_bit_width,
         "last_verified": mem.last_verified,
         "verification_confidence": mem.verification_confidence,
         "verification_status": mem.verification_status,
+        "certified_at": mem.certified_at,
+        "certified_by": mem.certified_by,
+        "certification_note": mem.certification_note,
         "memory_type": mem.memory_type,
         "visibility": mem.visibility,
         "evidence_refs": mem.evidence_refs,
@@ -344,6 +423,17 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
         chunk_type: map_str(map, "chunk_type").unwrap_or_default(),
         heading: map_str(map, "heading"),
         source_hash: map_str(map, "source_hash").unwrap_or_default(),
+        consolidated_from: map_str_vec(map, "consolidated_from"),
+        derived_by: map_str(map, "derived_by").unwrap_or_default(),
+        consolidated_at: map_str(map, "consolidated_at"),
+        no_consolidate_until: map_str(map, "no_consolidate_until"),
+        consolidated_evidence: map_str_vec(map, "consolidated_evidence"),
+        no_dedup_until: map_str(map, "no_dedup_until"),
+        dedup_applied_operations: map_str_vec(map, "dedup_applied_operations"),
+        dedup_access_contributions: map
+            .get("dedup_access_contributions")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
         related_memory_ids: map_str_vec(map, "related_memory_ids"),
         association_strengths: map_f32_vec(map, "association_strengths"),
         reaction_score: map_f32(map, "reaction_score"),
@@ -356,6 +446,9 @@ fn memory_from_payload(id: &str, map: &serde_json::Map<String, serde_json::Value
             .map(|v| v as f32),
         verification_status: map_str(map, "verification_status")
             .unwrap_or_else(|| "unverified".to_string()),
+        certified_at: map_str(map, "certified_at"),
+        certified_by: map_str(map, "certified_by"),
+        certification_note: map_str(map, "certification_note"),
         memory_type: map_str(map, "memory_type").unwrap_or_default(),
         evidence_refs: map
             .get("evidence_refs")
@@ -433,7 +526,10 @@ impl QdrantStore {
         // which moves independently of the Rust client crate.
         // See issue #14.
         let client = Qdrant::from_url(url).skip_compatibility_check().build()?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            certification_gate: Arc::new(RwLock::new(())),
+        })
     }
 
     pub async fn ensure_collections(&self, dimensions: u32) -> anyhow::Result<()> {
@@ -474,6 +570,29 @@ impl QdrantStore {
         // legacy memory that doesn't have the field. Safe to call on
         // every startup; no-op once the migration has run.
         self.backfill_visibility().await?;
+
+        // Also install the index for existing collections; creation is idempotent.
+        for field in ["verification_status", "related_memory_ids"] {
+            self.client
+                .create_field_index(
+                    CreateFieldIndexCollectionBuilder::new(MEMORIES, field, FieldType::Keyword)
+                        .wait(true),
+                )
+                .await?;
+        }
+
+        self.client
+            .create_field_index(
+                CreateFieldIndexCollectionBuilder::new(
+                    MEMORIES,
+                    "ingested_at",
+                    FieldType::Datetime,
+                )
+                .wait(true),
+            )
+            .await?;
+
+        self.ensure_consolidation_archive().await?;
 
         // ── realms ──
         if !self.client.collection_exists(REALMS).await? {
@@ -581,6 +700,7 @@ impl QdrantStore {
             reaction_score,
             visibility,
             &[],
+            false,
         )
         .await
     }
@@ -600,6 +720,7 @@ impl QdrantStore {
         reaction_score: f32,
         visibility: &str,
         tags: &[String],
+        certified: bool,
     ) -> anyhow::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let mem = MemoryPoint {
@@ -613,11 +734,19 @@ impl QdrantStore {
             upvotes: 0,
             tags: tags.to_vec(),
             ingested_at: now.clone(),
-            last_accessed: now,
+            last_accessed: now.clone(),
             access_count: 0,
             chunk_type: chunk_type.to_string(),
             heading: heading.map(|s| s.to_string()),
             source_hash: source_hash.to_string(),
+            consolidated_from: Vec::new(),
+            derived_by: String::new(),
+            consolidated_at: None,
+            no_consolidate_until: None,
+            consolidated_evidence: Vec::new(),
+            no_dedup_until: None,
+            dedup_applied_operations: Vec::new(),
+            dedup_access_contributions: Default::default(),
             related_memory_ids: vec![],
             association_strengths: vec![],
             reaction_score,
@@ -625,11 +754,15 @@ impl QdrantStore {
             quantized_bit_width: 0.0,
             last_verified: None,
             verification_confidence: None,
-            verification_status: "unverified".to_string(),
+            verification_status: if certified { "certified" } else { "unverified" }.to_string(),
+            certified_at: certified.then_some(now),
+            certified_by: None,
+            certification_note: None,
             memory_type: memory_type.to_string(),
             visibility: normalize_visibility(visibility).to_string(),
             evidence_refs: vec![],
         };
+        crate::engine::redaction::ensure_memory(&mem)?;
         let payload = memory_to_payload(&mem);
         let point = PointStruct::new(id.to_string(), vector.to_vec(), payload);
 
@@ -641,6 +774,8 @@ impl QdrantStore {
 
     /// Restore the serialized payload verbatim rather than resetting metadata.
     pub async fn restore_memory(&self, memory: &MemoryWithVector) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(&memory.memory.id).await?;
+        crate::engine::redaction::ensure_memory(&memory.memory)?;
         let point = PointStruct::new(
             memory.memory.id.clone(),
             memory.vector.clone(),
@@ -670,7 +805,197 @@ impl QdrantStore {
         Ok(None)
     }
 
-    /// Set the importance score for a memory.
+    /// Fetch one Qdrant batch, then restore caller order (including repeated IDs).
+    /// Malformed UUIDs are unavailable rather than turning a whole batch into an error.
+    pub async fn get_memories(
+        &self,
+        ids: &[String],
+    ) -> anyhow::Result<crate::engine::retrieval::BatchGetResult> {
+        use crate::engine::retrieval::{validate_batch_ids, BatchGetResult};
+        validate_batch_ids(ids).map_err(anyhow::Error::msg)?;
+        let normalized: Vec<_> = ids
+            .iter()
+            .map(|id| uuid::Uuid::parse_str(id).ok().map(|id| id.to_string()))
+            .collect();
+        let unique: std::collections::BTreeSet<_> = normalized.iter().flatten().cloned().collect();
+        let mut found = std::collections::HashMap::new();
+        if !unique.is_empty() {
+            let response = self
+                .client
+                .get_points(
+                    GetPointsBuilder::new(
+                        MEMORIES,
+                        unique
+                            .into_iter()
+                            .map(Into::into)
+                            .collect::<Vec<qdrant_client::qdrant::PointId>>(),
+                    )
+                    .with_payload(true)
+                    .with_vectors(false),
+                )
+                .await?;
+            for point in response.result {
+                let id = point_id_to_string(point.id.as_ref());
+                found.insert(
+                    id.clone(),
+                    memory_from_payload(&id, &map_to_json(&point.payload)),
+                );
+            }
+        }
+        let mut result = BatchGetResult {
+            memories: Vec::new(),
+            not_found: Vec::new(),
+        };
+        for (requested, normalized) in ids.iter().zip(normalized) {
+            match normalized.and_then(|id| found.get(&id)) {
+                Some(memory) => result.memories.push(memory.clone()),
+                None => result.not_found.push(requested.clone()),
+            }
+        }
+        Ok(result)
+    }
+
+    /// Evidence snapshots are immutable until coordinated erasure/revision exists.
+    pub(crate) async fn refuse_evidence_mutation(&self, id: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.get_memory(id)
+                .await?
+                .is_none_or(|m| m.evidence_refs.is_empty()),
+            "evidence-linked mutation unsupported"
+        );
+        Ok(())
+    }
+
+    /// Shared guard for local maintenance/content replacement.
+    pub async fn maintenance_guard(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+        self.certification_gate.write().await
+    }
+
+    pub async fn set_certification(
+        &self,
+        id: &str,
+        revoke: bool,
+        by: Option<&str>,
+        note: Option<&str>,
+    ) -> anyhow::Result<Option<MemoryPoint>> {
+        self.refuse_evidence_mutation(id).await?;
+        let _guard = self.certification_gate.write().await;
+        let Some(mut memory) = self.get_memory(id).await? else {
+            return Ok(None);
+        };
+        if revoke {
+            // Repeated revocation must not reset an ordinary verification rating.
+            if !memory.is_certified() {
+                return Ok(Some(memory));
+            }
+            memory.verification_status = "unverified".into();
+            memory.certified_at = None;
+            memory.certified_by = None;
+            memory.certification_note = None;
+            memory.last_verified = None;
+            memory.verification_confidence = None;
+        } else {
+            if !memory.is_certified() || memory.certified_at.is_none() {
+                memory.certified_at = Some(chrono::Utc::now().to_rfc3339());
+            }
+            memory.verification_status = "certified".into();
+            if let Some(by) = by {
+                memory.certified_by = Some(crate::engine::redaction::text(by));
+            }
+            if let Some(note) = note {
+                memory.certification_note = Some(crate::engine::redaction::text(note));
+            }
+        }
+        let payload = serde_json::json!({
+            "verification_status": memory.verification_status,
+            "certified_at": memory.certified_at,
+            "certified_by": memory.certified_by,
+            "certification_note": memory.certification_note,
+            "last_verified": memory.last_verified,
+            "verification_confidence": memory.verification_confidence,
+        })
+        .try_into()?;
+        self.update_memory_payload(id, payload).await?;
+        Ok(Some(memory))
+    }
+
+    /// Automatic mutations recheck certification atomically at Qdrant, even if
+    /// another client certified the memory after this maintenance pass read it.
+    pub async fn update_unprotected_payload(
+        &self,
+        id: &str,
+        payload: Payload,
+    ) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(id).await?;
+        let value: serde_json::Value = payload.clone().into();
+        crate::engine::redaction::ensure_clean(&value)?;
+        if let Some(content) = value.get("content").and_then(|v| v.as_str()) {
+            crate::engine::redaction::required(content)?;
+        }
+
+        let filter = Filter {
+            must: vec![Condition::has_id([id.to_string()])],
+            must_not: vec![Condition::matches(
+                "verification_status",
+                "certified".to_string(),
+            )],
+            ..Default::default()
+        };
+        self.client
+            .set_payload(
+                SetPayloadPointsBuilder::new(MEMORIES, payload)
+                    .points_selector(PointsSelectorOneOf::Filter(filter))
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_unprotected_memory(&self, id: &str) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(id).await?;
+        let filter = Filter {
+            must: vec![Condition::has_id([id.to_string()])],
+            must_not: vec![Condition::matches(
+                "verification_status",
+                "certified".to_string(),
+            )],
+            ..Default::default()
+        };
+        self.client
+            .delete_points(
+                DeletePointsBuilder::new(MEMORIES)
+                    .points(PointsSelectorOneOf::Filter(filter))
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Import/edit a complete snapshot without discarding certification or provenance.
+    /// Existing certified content requires explicit revocation before replacement.
+    pub async fn replace_memory(&self, memory: &MemoryPoint, vector: &[f32]) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(&memory.id).await?;
+        crate::engine::redaction::ensure_memory(memory)?;
+        if self
+            .get_memory(&memory.id)
+            .await?
+            .is_some_and(|m| m.is_certified())
+        {
+            return Err(CertifiedMemoryError.into());
+        }
+        let mut memory = memory.clone();
+        memory.visibility = normalize_visibility(&memory.visibility).to_string();
+        let point = PointStruct::new(
+            memory.id.clone(),
+            vector.to_vec(),
+            memory_to_payload(&memory),
+        );
+        self.client
+            .upsert_points(UpsertPointsBuilder::new(MEMORIES, vec![point]).wait(true))
+            .await?;
+        Ok(())
+    }
+
     pub async fn set_memory_importance(&self, id: &str, importance: f32) -> anyhow::Result<()> {
         let payload: qdrant_client::Payload = serde_json::json!({
             "importance": importance,
@@ -688,6 +1013,143 @@ impl QdrantStore {
             )
             .await?;
         Ok(())
+    }
+
+    fn retrieval_filter(
+        realm: Option<&str>,
+        tags: Option<&[String]>,
+        visibility: Option<&str>,
+    ) -> Filter {
+        let mut conditions = Vec::new();
+        if let Some(realm) = realm {
+            conditions.push(Condition::matches("realm_name", realm.to_string()));
+        }
+        for tag in tags.unwrap_or_default() {
+            conditions.push(Condition::matches("tags", tag.clone()));
+        }
+        if let Some(visibility) = visibility {
+            conditions.push(Condition::matches(
+                "visibility",
+                normalize_visibility(visibility).to_string(),
+            ));
+        }
+        Filter::must(conditions)
+    }
+
+    pub async fn coverage_scores(
+        &self,
+        vector: &[f32],
+        limit: usize,
+        realm: Option<&str>,
+        tags: Option<&[String]>,
+        visibility: Option<&str>,
+    ) -> anyhow::Result<Vec<f32>> {
+        let result = self
+            .client
+            .search_points(
+                SearchPointsBuilder::new(MEMORIES, vector, limit as u64)
+                    .filter(Self::retrieval_filter(realm, tags, visibility))
+                    .with_payload(false)
+                    .with_vectors(false),
+            )
+            .await?;
+        Ok(result.result.into_iter().map(|r| r.score).collect())
+    }
+
+    pub async fn has_matching_memory(
+        &self,
+        realm: &str,
+        tags: Option<&[String]>,
+        visibility: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let result = self
+            .client
+            .scroll(
+                ScrollPointsBuilder::new(MEMORIES)
+                    .limit(1)
+                    .filter(Self::retrieval_filter(Some(realm), tags, visibility))
+                    .with_payload(false)
+                    .with_vectors(false),
+            )
+            .await?;
+        Ok(!result.result.is_empty())
+    }
+
+    /// Cosine-score a given set of memory IDs against `vector`, applying the same
+    /// realm/visibility filter as search. Missing or filtered-out IDs are simply
+    /// absent. Used to give keyword-only candidates a real similarity score.
+    pub async fn score_ids(
+        &self,
+        vector: &[f32],
+        ids: &[String],
+        realm: Option<&str>,
+        visibility: Option<&str>,
+    ) -> anyhow::Result<Vec<SearchResult>> {
+        let point_ids: Vec<qdrant_client::qdrant::PointId> = ids
+            .iter()
+            .filter_map(|id| uuid::Uuid::parse_str(id).ok())
+            .map(|u| u.to_string().into())
+            .collect();
+        if point_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let limit = point_ids.len() as u64;
+        let mut filter = Self::retrieval_filter(realm, None, visibility);
+        filter.must.push(Condition::has_id(point_ids));
+        let result = self
+            .client
+            .search_points(
+                SearchPointsBuilder::new(MEMORIES, vector, limit)
+                    .filter(filter)
+                    .with_payload(true)
+                    .with_vectors(false),
+            )
+            .await?;
+        Ok(result
+            .result
+            .into_iter()
+            .map(|r| {
+                let id = point_id_to_string(r.id.as_ref());
+                SearchResult {
+                    payload: memory_from_payload(&id, &map_to_json(&r.payload)),
+                    id,
+                    score: r.score,
+                }
+            })
+            .collect())
+    }
+
+    pub async fn search_filtered(
+        &self,
+        vector: &[f32],
+        limit: usize,
+        min_score: f32,
+        realm: Option<&str>,
+        tags: Option<&[String]>,
+        visibility: Option<&str>,
+    ) -> anyhow::Result<Vec<SearchResult>> {
+        let result = self
+            .client
+            .search_points(
+                SearchPointsBuilder::new(MEMORIES, vector, limit as u64)
+                    .filter(Self::retrieval_filter(realm, tags, visibility))
+                    .with_payload(true)
+                    .with_vectors(false),
+            )
+            .await?;
+        Ok(result
+            .result
+            .into_iter()
+            .filter(|r| r.score >= min_score)
+            .map(|r| {
+                let id = point_id_to_string(r.id.as_ref());
+                SearchResult {
+                    payload: memory_from_payload(&id, &map_to_json(&r.payload)),
+                    id,
+                    score: r.score,
+                }
+            })
+            .collect())
     }
 
     pub async fn search(
@@ -728,6 +1190,7 @@ impl QdrantStore {
     }
 
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(id).await?;
         self.client
             .delete_points(
                 DeletePointsBuilder::new(MEMORIES)
@@ -741,6 +1204,9 @@ impl QdrantStore {
     }
 
     /// Store a memory with a pre-computed vector (for consolidated summaries).
+    /// `memory_type` controls Weibull decay — pass the most-stable type of
+    /// the source memories so the summary doesn't decay after 7 days when
+    /// the originals are long-lived (profile/preference/entity/etc).
     pub async fn store_memory_with_vector(
         &self,
         id: &str,
@@ -750,9 +1216,11 @@ impl QdrantStore {
         realm_name: Option<&str>,
         importance: f32,
         source_file: Option<&str>,
-        visibility: &str,
-        input_ids: &[String],
+        memory_type: Option<&str>,
+        metadata: &ConsolidationMetadata,
     ) -> anyhow::Result<()> {
+        crate::engine::redaction::required(content)?;
+        crate::engine::redaction::ensure_clean(&(content, realm_name, source_file, memory_type))?;
         let ingested_at = chrono::Utc::now().to_rfc3339();
 
         let payload: Payload = serde_json::json!({
@@ -765,15 +1233,18 @@ impl QdrantStore {
             "ingested_at": ingested_at,
             "last_accessed": ingested_at,
             "source_file": source_file.unwrap_or(""),
-            "source_hash": "",
+            "source_hash": metadata.source_fingerprint,
             "chunk_type": "consolidated",
-            "tags": input_ids.iter().map(|id| format!("consolidation-input:{id}")).collect::<Vec<_>>(),
+            "consolidated_from": metadata.source_ids,
+            "derived_by": "consolidation",
+            "consolidated_at": ingested_at,
+            "consolidated_evidence": metadata.evidence,
             "related_memory_ids": Vec::<String>::new(),
             "association_strengths": Vec::<f32>::new(),
             "reaction_score": 0.0f32,
             "topic_clusters": Vec::<String>::new(),
-            "memory_type": "general",
-            "visibility": normalize_visibility(visibility),
+            "memory_type": memory_type.unwrap_or("general"),
+            "visibility": normalize_visibility(&metadata.visibility),
         })
         .try_into()
         .unwrap_or_default();
@@ -999,7 +1470,7 @@ impl QdrantStore {
             .collect())
     }
 
-    async fn scroll_memories_internal(
+    pub(crate) async fn scroll_memories_internal(
         &self,
         with_vectors: bool,
     ) -> anyhow::Result<Vec<MemoryPointWithVector>> {
@@ -1055,6 +1526,7 @@ impl QdrantStore {
         let mut counts = VerificationStatusCounts::default();
         for mem in &all {
             match mem.verification_status.as_str() {
+                "certified" => counts.certified += 1,
                 "verified" => counts.verified += 1,
                 "stale" => counts.stale += 1,
                 "contradicted" => counts.contradicted += 1,
@@ -1326,6 +1798,13 @@ impl QdrantStore {
 
     /// Update arbitrary payload fields on a memory point.
     pub async fn update_memory_payload(&self, id: &str, payload: Payload) -> anyhow::Result<()> {
+        self.refuse_evidence_mutation(id).await?;
+        let value: serde_json::Value = payload.clone().into();
+        crate::engine::redaction::ensure_clean(&value)?;
+        if let Some(content) = value.get("content").and_then(|v| v.as_str()) {
+            crate::engine::redaction::required(content)?;
+        }
+
         self.client
             .set_payload(
                 SetPayloadPointsBuilder::new(MEMORIES, payload)
@@ -1427,6 +1906,9 @@ impl QdrantStore {
             return Ok(());
         }
 
+        for (id, _) in ids_and_payloads {
+            self.refuse_evidence_mutation(id).await?;
+        }
         for (id, payload) in ids_and_payloads {
             self.client
                 .set_payload(
@@ -1439,6 +1921,16 @@ impl QdrantStore {
                 .await?;
         }
 
+        Ok(())
+    }
+
+    pub async fn batch_update_unprotected_payload(
+        &self,
+        ids_and_payloads: &[(&str, Payload)],
+    ) -> anyhow::Result<()> {
+        for (id, payload) in ids_and_payloads {
+            self.update_unprotected_payload(id, payload.clone()).await?;
+        }
         Ok(())
     }
 
@@ -1781,6 +2273,14 @@ mod tests {
             chunk_type: "manual".into(),
             heading: None,
             source_hash: "".into(),
+            consolidated_from: vec!["source-a".into(), "source-b".into()],
+            derived_by: "consolidation".into(),
+            consolidated_at: Some("2026-11-08T00:00:00Z".into()),
+            no_consolidate_until: Some("2026-12-08T00:00:00Z".into()),
+            consolidated_evidence: vec!["evidence-fingerprint".into()],
+            no_dedup_until: Some("2026-12-08T00:00:00Z".into()),
+            dedup_applied_operations: vec!["operation-id".into()],
+            dedup_access_contributions: [("source-a".into(), 4)].into(),
             related_memory_ids: vec![],
             association_strengths: vec![],
             reaction_score: 0.0,
@@ -1788,7 +2288,10 @@ mod tests {
             quantized_bit_width: 0.0,
             last_verified: None,
             verification_confidence: None,
-            verification_status: "unverified".into(),
+            verification_status: "certified".into(),
+            certified_at: Some("2026-11-08T00:00:00Z".into()),
+            certified_by: Some("marc".into()),
+            certification_note: Some("Confirmed".into()),
             memory_type: "general".into(),
             visibility: "public".into(),
             evidence_refs: vec![],
@@ -1807,6 +2310,27 @@ mod tests {
 
         let decoded = memory_from_payload("test-1", obj);
         assert_eq!(decoded.visibility, "public");
+        assert_eq!(decoded.consolidated_from, original.consolidated_from);
+        assert_eq!(decoded.derived_by, original.derived_by);
+        assert_eq!(decoded.consolidated_at, original.consolidated_at);
+        assert_eq!(decoded.no_consolidate_until, original.no_consolidate_until);
+        assert_eq!(decoded.no_dedup_until, original.no_dedup_until);
+        assert_eq!(
+            decoded.dedup_applied_operations,
+            original.dedup_applied_operations
+        );
+        assert_eq!(
+            decoded.dedup_access_contributions,
+            original.dedup_access_contributions
+        );
+        assert_eq!(
+            decoded.consolidated_evidence,
+            original.consolidated_evidence
+        );
+        assert!(decoded.is_certified());
+        assert_eq!(decoded.certified_at, original.certified_at);
+        assert_eq!(decoded.certified_by, original.certified_by);
+        assert_eq!(decoded.certification_note, original.certification_note);
         assert_eq!(decoded.tags, original.tags);
         assert_eq!(decoded.source_file, original.source_file);
     }
@@ -1820,6 +2344,18 @@ mod tests {
         map.insert("content".into(), json!("legacy"));
         map.insert("realm_name".into(), json!("general"));
         let decoded = memory_from_payload("legacy-1", &map);
+        assert!(decoded.consolidated_from.is_empty());
+        assert!(decoded.derived_by.is_empty());
+        assert!(decoded.consolidated_at.is_none());
+        assert!(decoded.no_consolidate_until.is_none());
+        assert!(decoded.no_dedup_until.is_none());
+        assert!(decoded.dedup_applied_operations.is_empty());
+        assert!(decoded.dedup_access_contributions.is_empty());
+        assert!(decoded.consolidated_evidence.is_empty());
+        assert!(!decoded.is_certified());
+        assert!(decoded.certified_at.is_none());
+        assert!(decoded.certified_by.is_none());
+        assert!(decoded.certification_note.is_none());
         assert_eq!(decoded.visibility, "private");
     }
 }

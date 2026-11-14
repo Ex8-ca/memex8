@@ -1,3 +1,4 @@
+pub mod dreams;
 pub mod graph;
 pub mod inference;
 pub mod memories;

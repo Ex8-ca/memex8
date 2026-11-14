@@ -39,11 +39,19 @@ split_threshold = 100
 merge_threshold = 0.3
 
 [slumber]
+# Certified memories are protected automatically; certification has no config toggle.
 idle_timeout = "10m"
 cron_ingest = "*/5 * * * *"
 quantize_bit_width = 3.5
 auto_archive_days = 90
 prune_threshold = 0.1
+# Duplicate inspection uses original vectors and never crosses realm/visibility boundaries.
+dedup_threshold = 0.95
+# false enables archived duplicate removal during full slumber; review candidates first.
+# A full slumber still runs other mutating phases; use `slumber inspect-duplicates`
+# for a read-only report.
+dedup_dry_run = true
+dedup_max_comparisons_per_realm = 1000000
 consolidation_schedule = "0 3 * * *"   # Daily at 3am; "" to disable
 
 # Memory evolution: decay, associations, spreading activation
@@ -56,12 +64,19 @@ spreading_activation_bump = 0.005
 # backend: "openai" (uses OPENAI_API_KEY) or "local" (uses LOCAL_LLM_URL + LOCAL_LLM_API_KEY)
 # Embedding provider is configured separately: [embedding].provider = "openai" | "ollama"
 [slumber.consolidation]
+# LLM consolidation merges related memories into summaries (slumber phase 6).
+# Off by default: summaries can drop exceptions and exact values. Durable types
+# (profile, preference, relationship, setup, instruction, decision, commitment)
+# are never merged even when it is on. Toggle in the web UI: Settings -> Slumber.
+# enabled = false
 backend = "openai"
 model = "gpt-4o-mini"    # OpenAI model name
 
 [slumber.summarize]
 enabled = true
 max_cluster_size = 20
+# Both settings archive full sources in Qdrant before any consolidation deletion.
+# Undo uses the current embedding provider and applies a fixed 30-day cooldown.
 preserve_originals = true
 confidence_threshold = 0.8
 
@@ -88,6 +103,12 @@ max_optimization_threads = 2
 enabled = true
 max_memories = 20
 update_on_slumber = true
+# Root directory for MEMEX8.md files written for memories whose `source_file`
+# is a label ("hermes", "hermes-sync") or URL rather than a real file path.
+# In Docker this is the `/watch` bind mount, so they land on the host under
+# `watch_dirs/<label>/MEMEX8.md`. Memories from a real file path still get
+# their MEMEX8.md beside that file. Default: "/watch".
+# output_dir = "/watch"
 
 [digest_md]
 enabled = true
@@ -113,3 +134,31 @@ theme = "dark"
 # path = "/home/user/notes"
 # chunk_by = "file"
 # poll_interval = "10m"
+
+# Retrieval-strength heuristic, using raw cosine before boosts/min_score/pagination.
+# Thresholds must satisfy 0 <= partial < high <= 1.
+[dream]
+# Opt-in dreams: on a schedule, weave a few memories into a short dream plus a
+# "waking note" naming one real connection. Dreams are NOT memories: they are stored
+# as files under <data dir>/dreams/ and never returned by search, recall or MCP.
+# Seed memories go to the LLM backend from [slumber.consolidation]; use "local" to
+# keep them on your network. Toggle in the web UI: Settings -> Dreams.
+# enabled = false
+# frequency = "weekly"     # "daily" or "weekly"
+# hour = 4                 # local hour (0-23) the dream is generated
+# seeds = 12               # memories woven into each dream (4-40)
+# max_words = 350
+# pending_days = 14        # unreviewed dreams are deleted after this many days
+# model = "gpt-4o-mini"    # optional; defaults to the consolidation model
+
+[search.hybrid]
+# Blend exact-word (BM25) matches into vector search; helps names, IDs and rare
+# words. Toggle in the web UI: Settings -> Search -> Keyword matching.
+# On the MemDerive bench it lifts top-15 support recall from 47.6 to ~52.5.
+# enabled = true
+# lexical_weight = 0.15      # bonus for the best keyword match, cosine scale
+# lexical_candidates = 50    # keyword candidates per query
+
+[search.coverage]
+high = 0.55
+partial = 0.40

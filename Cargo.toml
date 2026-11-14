@@ -1,13 +1,14 @@
 [package]
 name = "memex8"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.94"
 description = "Self-hosted AI memory system with Qdrant, TurboVec compression, and auto-discovered knowledge realms"
 license = "MIT"
 authors = ["memex8 contributors"]
 readme = "README.md"
-repository = "https://github.com/user/memex8"
+repository = "https://github.com/Ex8-ca/memex8"
+homepage = "https://github.com/Ex8-ca/memex8"
 keywords = ["memory", "qdrant", "vector", "ai", "embeddings"]
 categories = ["command-line-utilities", "database", "web-programming"]
 
@@ -95,6 +96,10 @@ include_dir = "0.7"
 
 # SHA hashing (for file change detection)
 sha2 = "0.10"
+
+# Web UI password login (argon2 hashes + HMAC-signed session cookie)
+argon2 = "0.5"
+hmac = "0.12"
 
 # TOML config with merge
 config = "0.14"

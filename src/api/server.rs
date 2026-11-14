@@ -87,6 +87,15 @@ pub async fn run_with_engine(
             axum::routing::post(crate::api::routes::webhook::skill_executed),
         )
         .route("/health", axum::routing::get(health))
+        .route(
+            "/auth/login",
+            axum::routing::post(crate::api::session::login),
+        )
+        .route(
+            "/auth/logout",
+            axum::routing::post(crate::api::session::logout),
+        )
+        .route("/auth/me", axum::routing::get(crate::api::session::me))
         .route("/mcp", axum::routing::get(crate::mcp::http::sse_handler))
         .route("/", axum::routing::get(crate::web::serve_root))
         // Wildcard route for static assets + SPA fallback. Note: this must be
@@ -114,6 +123,43 @@ fn api_routes() -> Router<Arc<AppState>> {
             axum::routing::get(crate::api::routes::memories::evidence),
         )
         .route(
+            "/dreams",
+            axum::routing::get(crate::api::routes::dreams::list)
+                .post(crate::api::routes::dreams::create),
+        )
+        .route(
+            "/dreams/{id}",
+            axum::routing::get(crate::api::routes::dreams::get)
+                .delete(crate::api::routes::dreams::delete),
+        )
+        .route(
+            "/dreams/{id}/keep",
+            axum::routing::post(crate::api::routes::dreams::keep),
+        )
+        .route(
+            "/settings",
+            axum::routing::get(crate::api::settings::get)
+                .put(crate::api::settings::put)
+                .delete(crate::api::settings::reset),
+        )
+        .route(
+            "/settings/restart",
+            axum::routing::post(crate::api::settings::restart),
+        )
+        .route(
+            "/dedup/{id}/restore",
+            axum::routing::post(crate::api::routes::memories::restore_duplicate),
+        )
+        .route(
+            "/memories/{id}/unconsolidate",
+            axum::routing::post(crate::api::routes::memories::unconsolidate),
+        )
+        .route(
+            "/memories/{id}/certify",
+            axum::routing::post(crate::api::routes::memories::certify)
+                .delete(crate::api::routes::memories::revoke_certification),
+        )
+        .route(
             "/memories",
             axum::routing::get(crate::api::routes::memories::list),
         )
@@ -123,7 +169,16 @@ fn api_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/memories/search",
-            axum::routing::post(crate::api::routes::memories::search),
+            axum::routing::post(crate::api::routes::memories::search)
+                .get(crate::api::routes::memories::search_get),
+        )
+        .route(
+            "/memories/timeline",
+            axum::routing::get(crate::api::routes::memories::timeline),
+        )
+        .route(
+            "/memories/batch-get",
+            axum::routing::post(crate::api::routes::memories::batch_get),
         )
         .route(
             "/memories/recall",

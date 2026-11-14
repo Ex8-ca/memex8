@@ -20,6 +20,7 @@ pub fn weibull_params() -> HashMap<&'static str, (f64, f64)> {
     m.insert("profile", (0.30, 8760.0)); // ~1 year, very slow
     m.insert("preference", (0.40, 4380.0)); // ~6 months, slow
     m.insert("relationship", (0.35, 8760.0)); // ~1 year, people
+    m.insert("dream", (0.40, 4380.0)); // a dream the user chose to keep: like preference
     m.insert("learning", (0.70, 1440.0)); // ~2 months
                                           // Medium-term working knowledge
     m.insert("fact", (0.80, 720.0)); // ~1 month, near-exponential

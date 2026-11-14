@@ -1,5 +1,198 @@
 # memex8 Implementation Status
 
+## 2026-11-08 — Timeline retrieval (roadmap G)
+
+- Added `memex8_timeline` in both Rust MCP transports and Hermes, plus REST
+  `GET /api/v1/memories/timeline`. Exactly one ID/query/RFC3339 anchor; scoped
+  query resolution; before/after default 5, each bounded at 50.
+- Shared compact rows, UTC output, stable timestamp/ID ordering, explicit query
+  miss, and typed missing/corrupt-anchor errors. ID/query anchors are included;
+  timestamp anchors have no synthetic row.
+- Added a Qdrant datetime index for new/existing collections. Indexed directional
+  queries and full boundary-tie pagination are bounded at 10,000 fetched rows;
+  `truncated` exposes partial reads. No config keys or prefetch changes.
+- Added disposable-Qdrant pagination/tie/scope/anchor/budget/tool tests and Hermes
+  validation/transport contracts to CI. Validation passed: formatting/build,
+  81+81 Rust unit tests and 38 core tests (existing kmeans skip), all three
+  timeline scenarios, compact/coverage regressions, and 24 Hermes tests.
+  No deployment or live-data changes.
+
+## 2026-11-08 — Private-text redaction (roadmap H, brought forward)
+
+- Added one Unicode-safe stateful private-span parser: case-insensitive/multiline,
+  multiple and nested spans, `[private]` replacement, and fail-closed unclosed tags.
+  Empty/marker-only direct writes return 422 `content empty after redaction`.
+- Sanitized capture/edit metadata and bodies, files before chunking/source hashing,
+  watched-file ingestion, webhooks, imports, session inputs before truncation/LLM,
+  and derived summaries before embedding. All-private file/import units skip with
+  safe diagnostics; sessions explicitly report skipped without provider calls.
+- Embedding factory now enforces the shared parser at the provider boundary.
+  Storage guards reject marked memory/archive payloads; exact recovery refuses
+  marked legacy snapshots before re-embedding. Imports re-embed changed bodies
+  rather than reusing incompatible vectors. Backup restores preflight memories
+  and journals before writes. Session embedding uses active provider/dimensions.
+- Removed untrusted provider error bodies and parse details from failure messages.
+  Rust MCP and Hermes remember descriptions explain private tags. No new config
+  keys or parameters; configurable secret patterns remain deferred.
+- Validation: five disposable-Qdrant privacy scenarios passed, checking provider
+  requests, payloads and logs for a sentinel across direct/MCP writes, huge cross-
+  chunk spans, session truncation/message boundaries, webhook input, vector-reuse
+  imports, edits, derived summaries and upstream error bodies. Existing recovery,
+  compact/coverage, certification/inspection, Hermes, path and bridge regressions
+  passed. Formatting/build and 80+80 Rust tests plus 38 core integration tests
+  passed (existing kmeans skip/warnings). No deployment or live-data changes.
+
+## 2026-11-08 — Search coverage (roadmap F)
+
+- REST search always returns coverage with level, optional raw best score,
+  bounded count above min_score before pagination, realm suggestions and a helpful hint.
+  Full/compact/GET/POST paths share the signal, including empty and offset pages.
+- Added default-safe `[search.coverage] high=0.55, partial=0.40` with finite/range/
+  ordering validation. Coverage probes up to 100 uncompressed Qdrant candidates
+  without payloads or a score cutoff and reuses the query embedding on both index
+  paths; raw scores remain distinct from boosted result scores.
+- Realm suggestions rank up to three valid centroids and check current members
+  against realm/tag/visibility filters. Missing/orphan/incompatible/zero centroids
+  are skipped; unavailable realm data degrades hints only. Search combines all
+  filters server-side in Qdrant and checks scope on compressed-index payloads.
+- Both Rust MCP transports retain structured coverage and prepend a standard text
+  first line; Hermes preserves coverage through dispatch and formats it first.
+  Old-server fallback, automatic prefetch and context injection remain compatible.
+- Validation: deterministic disposable-Qdrant known-hit/partial/miss, empty-store/
+  offset/cutoff, bounded-count, raw-vs-boosted, filter, centroid-failure, embedding-
+  reuse and Qdrant/TurboVec parity tests passed, plus Hermes coverage contracts.
+  Formatting/build and 77+77 Rust tests plus 38 core integration tests passed
+  (existing kmeans skip/warnings). Compact retrieval, certification, consolidation/
+  dedup recovery, Hermes, export/import path and bridge regressions passed. No
+  deployment or live-data changes.
+
+## 2026-11-08 — Compact retrieval and batch get (roadmap E)
+
+- Added opt-in `compact=false` search/recall parameters to REST, both Rust MCP
+  transports, and Hermes. A shared projection emits seven metadata fields with
+  Unicode-safe snippets capped at 160 characters, preferring nonblank summaries.
+  Full response shapes, ranking, pagination, and access tracking are preserved.
+- Added GET query search alongside existing POST JSON search and authenticated
+  ordered REST batch get. MCP/Hermes `memex8_get` accepts one of `memory_id`,
+  legacy `id`, or `ids` (1–50), rejects ambiguous arguments, preserves repeated
+  found IDs and lists unavailable IDs in `not_found`. Batch reads full payloads
+  with one Qdrant request. No new config keys or payload migrations.
+- Tool descriptions teach compact search followed by selective full retrieval.
+  Hermes auto-prefetch and `_build_context_block` remain unchanged.
+- Validation: formatting/build and Rust suites passed (74 lib, 74 binary, 38 core
+  integration; existing kmeans skip). Disposable-Qdrant tests passed for REST,
+  stdio MCP, Qdrant/tag-filter/TurboVec paths, Unicode snippets, full payloads,
+  batch ordering/repetitions/missing IDs/limits, auth, and default compatibility.
+  Long-body fixture: full 12,230 vs compact 1,406 serialized UTF-8 JSON bytes (11.5%).
+  Hermes transport/schema/dispatch tests passed. No deployment or live-data changes.
+
+## 2026-11-08 — Safe duplicate removal (roadmap D)
+
+- Full slumber supports archived removal when `dedup_dry_run=false`; the shipped
+  default remains true and `slumber inspect-duplicates` is always read-only.
+  Candidate eligibility adds project-tag scope and restored-point cooldowns.
+- Added backward-compatible dedup journal kinds to the existing archive. Full loser
+  snapshots/vectors and pre-merge winner payloads are verified before mutation.
+  Winner tags/ancestry/evidence and an idempotency marker are written together;
+  per-identity access contributions avoid repeated counting and shared-ancestry
+  inflation. Existing derivation/certification metadata and content are retained.
+- Prepared operations resume after interruption and recheck current vectors,
+  source snapshots, ordering, scope, and protection. Changed operations are
+  cancelled with archives retained. Reports distinguish candidates, actual removals,
+  skipped pairs, and journal IDs. Failures reset slumber status to idle.
+- Added REST/MCP/Hermes duplicate restoration with current-model re-embedding,
+  preservation of existing source edits/certification, retry state, and 30-day
+  dedup/consolidation cooldowns. Winner metadata is retained during restoration.
+  Existing CLI backups carry both journal kinds; old consolidation journals default
+  to their original kind. Consolidation undo accepts appended dedup ancestry and
+  gives its restored sources both cooldowns to prevent immediate removal.
+- Invalidated in-memory/disk search caches before removal/restore; cleaned dangling
+  graph/association references. Added archive kind/state and association keyword
+  indexes, including existing collections, for bounded retrieval of affected records.
+- Validation: formatting/build passed; Rust suites passed (71 lib, 71 binary,
+  38 integration; existing kmeans skip). Seven disposable-Qdrant dedup scenarios,
+  five consolidation recovery scenarios, certification/inspection, Hermes contracts,
+  and backup/path/bridge regressions passed. Existing configuration keys only; no
+  deployment or live-data changes. Independent writer processes require serialization.
+
+## 2026-11-08 — Provenance and recoverable consolidation (roadmap C)
+
+- Added default-safe derivation timestamps, consolidation cooldowns, and evidence
+  fingerprints alongside direct source IDs. Full GET/import/export retain them.
+  Typed consolidation options carry provenance without arbitrary payload overrides.
+- Added durable `consolidation_archive` journals with complete typed source payloads,
+  original vectors, capture-time embedding configuration, and operation state.
+  Archives and replacement summaries are read back before source deletion; deletion
+  rechecks content/type/visibility and certification in Qdrant.
+- REST, both Rust MCP transports, and Hermes expose unconsolidate. Missing sources
+  are re-embedded with the current model; existing source edits/certification survive.
+  All restored/retained sources receive at least a 30-day consolidation cooldown.
+  Sources and cooldowns are read back before deleting the summary. Retrying partial
+  work is safe; completed retries do not resurrect later deliberate deletions.
+- Undo rejects edited/certified summaries, handles preserved/legacy sources, and
+  invalidates local TurboVec memory/disk caches. Existing memory GET now returns
+  404 for missing IDs. Maintenance, edit/import, payload changes, explicit deletion,
+  certification, backup, and undo coordinate through an exclusive local gate.
+- CLI backups include journals; restore accepts older backups without journals and
+  refuses to downgrade existing journal state. Archives are retained without cleanup.
+  Independent writer processes require external serialization.
+- Added failure/retry/cooldown/search/backup recovery integration coverage against
+  disposable Qdrant and local mock models, plus Rust and Hermes contract tests.
+- Validation passed: `cargo build`, `cargo fmt --check`, and Rust tests (68 per
+  unit-test target plus 38 core integration tests, with the existing k-means skip).
+  Five disposable-Qdrant recovery scenarios, certification and read-only duplicate
+  suites, Hermes consolidation/certification/visibility contracts, existing backup,
+  export/import path, and shared-memory bridge tests passed. CI includes the new
+  suites and runs for dependent PRs. Existing compiler warnings remain.
+  No new config keys, deployment, or live-data changes.
+
+## 2026-11-08 — Certified memories (roadmap B)
+
+- Added default-safe certification timestamp, attribution, and note fields; the
+  verification summary now counts certified memories separately. Existing Qdrant
+  collections receive the verification-status keyword index on startup.
+- REST certify/revoke endpoints, both Rust MCP transports, and Hermes support
+  `memex8_certify`. Remember accepts `certified=false` by default and stores explicit
+  certification in the initial point write. Rust also exposes `memex8_remember` as
+  an alias of its existing `memex8_store` tool.
+- Certified memories skip consolidation, prune/auto-archive, importance decay,
+  session reweighting, and verification; recall/search apply no Weibull decay and a
+  1.05 verification multiplier. Realm movements retain their payloads. Qdrant-side
+  filters protect automatic updates/deletes against certification changes from
+  another client. Local maintenance and certification use a shared coordination lock.
+- Edit/import preserve complete metadata and require revocation before replacing
+  an existing certified point. Certification flags reject string/number substitutes.
+  Optional `by` is a caller-provided label, not authenticated identity.
+- Added disposable-Qdrant lifecycle tests (two full slumber runs, revocation,
+  concurrent verification protection, REST/MCP contracts, and import preservation),
+  Hermes contract tests, and CI execution for both disposable-Qdrant suites.
+- Validation: build, formatting, and Rust tests passed (66 tests in each unit-test
+  target plus 38 core integration tests, with the existing k-means skip). Both
+  disposable-Qdrant suites and Hermes certification/visibility contracts passed.
+  Existing export/import, shared-memory bridge, and backup tests also passed.
+  No new configuration keys, live-data maintenance, or deployment.
+
+## 2026-11-08 — Duplicate detection (roadmap A)
+
+- Added read-only `memex8 slumber inspect-duplicates` with original-vector cosine
+  checks, deterministic winners, certified/type/realm/visibility protection, and
+  bounded pair comparisons. Phase 1 now reports candidates separately from actual
+  deletions; removal remains disabled pending durable archives and recovery.
+- Equal file hashes require equal nonempty content for exact-match candidates.
+- Consolidation records direct source IDs, excludes existing summaries and certified
+  input, and skips already summarized source sets. Replacement storage precedes
+  deletion, and only selected sources can be removed. Full archival recovery and
+  certification lifecycle protection remain packages B–D.
+- Config: `slumber.dedup_threshold` (0.95), `dedup_dry_run` (true), and
+  `dedup_max_comparisons_per_realm` (1000000).
+- Validation: `cargo build`, `cargo fmt --check`, and
+  `cargo test -- --skip test_kmeans_simple` passed (62 unit tests in each Rust
+  target, plus 38 core integration tests). The explicitly skipped k-means test
+  remains outside this change. Existing unused-import/mutability warnings remain.
+  `python3 tests/test_dedup_inspection.py` passed against disposable Qdrant,
+  confirming the four-point fixture yields two candidates with unchanged vectors,
+  payloads, and collection list. No live-data maintenance or deployment performed.
+
 > Last updated: 2026-04-13
 
 ## Build Status

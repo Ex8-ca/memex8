@@ -55,6 +55,7 @@ impl Engine {
         key: Option<&str>,
         capture: &CaptureRequest,
     ) -> Result<String, ApiError> {
+        let _guard = self.store.maintenance_guard().await;
         if !self.config.evidence.enabled {
             return Err(ApiError::BadRequest("evidence capture is disabled".into()));
         }
@@ -130,6 +131,17 @@ impl Engine {
             last_verified: None,
             verification_confidence: None,
             verification_status: "unverified".into(),
+            consolidated_from: vec![],
+            derived_by: String::new(),
+            consolidated_at: None,
+            no_consolidate_until: None,
+            consolidated_evidence: vec![],
+            no_dedup_until: None,
+            dedup_applied_operations: vec![],
+            dedup_access_contributions: Default::default(),
+            certified_at: None,
+            certified_by: None,
+            certification_note: None,
             memory_type: "general".into(),
             visibility: record.visibility.clone(),
             evidence_refs: vec![EvidenceRef {

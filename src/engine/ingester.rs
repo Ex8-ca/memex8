@@ -37,7 +37,11 @@ impl Ingester {
         path: &std::path::Path,
         chunk_by: &str,
     ) -> anyhow::Result<Vec<RawChunk>> {
-        let content = std::fs::read_to_string(path)?;
+        let content = crate::engine::redaction::text(&std::fs::read_to_string(path)?);
+        if !crate::engine::redaction::meaningful(&content) {
+            tracing::info!("Skipped file: content empty after redaction");
+            return Ok(Vec::new());
+        }
         let source_hash = Self::hash_content(&content);
         let source_file = path.to_string_lossy().to_string();
 
@@ -46,6 +50,7 @@ impl Ingester {
 
         Ok(chunks
             .into_iter()
+            .filter(|c| crate::engine::redaction::meaningful(&c.content))
             .map(|c| RawChunk {
                 content: c.content,
                 heading: c.heading,

@@ -1,0 +1,4 @@
+[search.hybrid]
+enabled = true
+lexical_weight = 0.25
+lexical_candidates = 50

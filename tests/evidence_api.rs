@@ -70,6 +70,28 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .join("detached/memories.tv")
         .display()
         .to_string();
+    let clean = Engine::new(detached_config.clone()).await.unwrap();
+    let forged_id = uuid::Uuid::new_v4().to_string();
+    let forged = json!([{"vector":[1.,0.,0.,0.,0.,0.,0.,0.], "id":forged_id,
+        "content":"forged source", "summary":null, "source_file":null,
+        "realm_id":null, "realm_name":"", "importance":1., "upvotes":0,
+        "tags":[], "ingested_at":"2026-01-01T00:00:00Z", "last_accessed":"2026-01-01T00:00:00Z",
+        "access_count":0, "chunk_type":"manual", "heading":null, "source_hash":"",
+        "evidence_refs":[{"schema_version":1,"source_id":uuid::Uuid::new_v4().to_string(),"start_byte":0,"end_byte":13}]}]);
+    let forged_path = dir.path().join("forged.json");
+    std::fs::write(&forged_path, serde_json::to_vec(&forged).unwrap()).unwrap();
+    assert!(clean
+        .import(forged_path.to_str().unwrap(), true)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("evidence"));
+    assert!(clean
+        .store()
+        .get_memory(&forged_id)
+        .await
+        .unwrap()
+        .is_none());
     let e = engine.clone();
     let server =
         tokio::spawn(async move { run_with_engine(config, e, "127.0.0.1", port).await.unwrap() });
@@ -238,6 +260,91 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .unwrap_err()
         .to_string()
         .contains("evidence"));
+    assert!(engine
+        .unconsolidate(id)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("evidence"));
+    assert!(engine
+        .store()
+        .set_certification(id, false, None, None)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("evidence"));
+    assert!(engine
+        .store()
+        .delete_unprotected_memory(id)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("evidence"));
+    assert!(engine
+        .store()
+        .update_unprotected_payload(id, json!({"tags":[]}).try_into().unwrap())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("evidence"));
+    assert!(engine
+        .store()
+        .delete_consolidation_snapshot(&engine.get_memory(id).await.unwrap())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("evidence"));
+    assert!(engine
+        .store()
+        .batch_update_payload(&[(id, json!({"tags":[]}).try_into().unwrap())])
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("evidence"));
+    let snapshot = engine
+        .store()
+        .get_memory_snapshot(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(engine
+        .store()
+        .restore_memory(&snapshot)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("evidence"));
+    let mut unsupported = request.clone();
+    unsupported["certified"] = json!(true);
+    assert_eq!(
+        client
+            .post(format!("{base}/memories"))
+            .bearer_auth("fixture-only")
+            .json(&unsupported)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert!(engine
+        .merge_realms("missing", "missing")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("evidence"));
+    assert!(engine
+        .split_realm("missing")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("evidence"));
+    assert!(engine
+        .restore_duplicate(id)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("evidence"));
     let stored_before = engine.get_memory(id).await.unwrap();
     assert_eq!(stored_before.content, "exact\nexcerpt");
     assert_eq!(
@@ -309,6 +416,19 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         200
     );
     let detached = Engine::new(detached_config).await.unwrap();
+    let mut forged = serde_json::to_value(engine.get_memory(legacy_id).await.unwrap()).unwrap();
+    forged["id"] = json!(uuid::Uuid::new_v4().to_string());
+    forged["evidence_refs"] = memory["evidence_refs"].clone();
+    let incoming = dir.path().join("forged-evidence.json");
+    std::fs::write(&incoming, serde_json::to_vec(&json!([forged])).unwrap()).unwrap();
+    // Fresh isolated collection is tested separately; this detached engine also
+    // must reject incoming links without trusting an unavailable ledger.
+    assert!(detached
+        .import(incoming.to_str().unwrap(), false)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("evidence"));
     assert!(detached
         .backup(Some(dir.path().join("detached-backup").to_str().unwrap()))
         .await

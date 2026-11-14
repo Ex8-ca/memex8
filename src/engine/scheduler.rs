@@ -81,6 +81,14 @@ impl Scheduler {
         let mut last_cron_run = Instant::now() - cron_interval;
         let mut last_consolidation: Option<chrono::DateTime<Local>> = None;
 
+        // Dreams use a wall-clock check every minute, not the slumber tick: the
+        // consolidation window assumed 5-minute ticks and went silent when ticks
+        // became hourly (see the test below). One attempt per local day at most, so a
+        // failing backend isn't retried every minute for a whole hour.
+        let mut dream_check = tokio::time::interval(Duration::from_secs(60));
+        dream_check.tick().await;
+        let mut last_dream_attempt: Option<chrono::NaiveDate> = None;
+
         loop {
             tokio::select! {
                 // Check idle timeout every 30 seconds
@@ -117,6 +125,24 @@ impl Scheduler {
 
                         // Reset activity timer so we don't immediately trigger again
                         *self.last_activity.write().await = Instant::now();
+                    }
+                }
+
+                _ = dream_check.tick() => {
+                    let now = Local::now().naive_local();
+                    let due = super::dream::dream_due(
+                        self.engine.dream_config(),
+                        now,
+                        self.engine.dream_store().last_date(),
+                    );
+                    if due && last_dream_attempt != Some(now.date()) {
+                        last_dream_attempt = Some(now.date());
+                        let engine = self.engine.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = engine.dream_now().await {
+                                tracing::warn!("🌙 Scheduled dream failed: {}", e);
+                            }
+                        });
                     }
                 }
 
@@ -333,4 +359,38 @@ fn matches_field(field: &str, value: u64) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    /// Does any tick of a fixed-interval timer started at `start_min` (minutes
+    /// after midnight) land inside `target_min ± tolerance` during one day?
+    /// Mirrors the scheduler: `tokio::time::interval` ticks are offset from
+    /// process start, and `should_run_at_schedule` allows ±CRON_TOLERANCE_MINUTES.
+    fn tick_hits_window(
+        start_min: u32,
+        interval_min: u32,
+        target_min: u32,
+        tolerance: u32,
+    ) -> bool {
+        (0..(24 * 60) / interval_min).any(|i| {
+            let t = (start_min + i * interval_min) % (24 * 60);
+            t.abs_diff(target_min) <= tolerance
+        })
+    }
+
+    /// Regression pin for the silent consolidation (no summaries after Oct 30
+    /// 2026): with 5-minute ticks every start time hits 03:00 ± 5, but with the
+    /// hourly `cron_ingest = "0 * * * *"` only start minutes within ±5 of the
+    /// hour do (11 of 60). Most restarts therefore disabled consolidation.
+    #[test]
+    fn hourly_ticks_usually_miss_the_consolidation_window() {
+        let target = 3 * 60;
+        let tol = super::CRON_TOLERANCE_MINUTES as u32;
+        assert!((0..60).all(|m| tick_hits_window(m, 5, target, tol)));
+        let hits = (0..60)
+            .filter(|m| tick_hits_window(*m, 60, target, tol))
+            .count();
+        assert_eq!(hits, 11);
+    }
 }

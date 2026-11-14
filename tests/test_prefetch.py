@@ -171,6 +171,19 @@ def test_http_timeout_is_bounded_by_remaining_recall_budget():
     assert 0 < request.call_args.kwargs["timeout"] <= 0.08
 
 
+def test_explicit_search_preserves_upstream_filters_with_checkpoint_timeout():
+    client = plugin._Client("fixture-token", "http://fixture.invalid/")
+    with patch.object(client, "request", return_value={"results": []}) as request:
+        client.search("question", 4, "projects", 0.5, True, ["reviewed"], "private", timeout=0.08)
+    request.assert_called_once_with(
+        "POST", "/api/v1/memories/search",
+        json_body={"query": "question", "limit": 4, "min_score": 0.5,
+                   "realm": "projects", "compact": True, "tags": ["reviewed"],
+                   "visibility": "private"},
+        timeout=0.08,
+    )
+
+
 def test_worker_keeps_queued_client_and_config_after_session_switch():
     queued = []
     def delayed_spawn(fn, name=""):

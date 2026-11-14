@@ -182,7 +182,9 @@ def main():
                     "image": args.image,
                     # Preserve the actual container settings, even if Compose
                     # files have since drifted or disagree with each other.
-                    "environment": saved["services"]["memex8"]["config"].get("Env", []),
+                    # Escape "$" so Compose does not interpolate values such as an
+                    # argon2 hash ("$argon2id$v=19$...") when it reads this file.
+                    "environment": [e.replace("$", "$$") for e in saved["services"]["memex8"]["config"].get("Env", [])],
                     "healthcheck": {"test": ["CMD", "curl", "-fsS", "http://localhost:8080/health"], "interval": "5s", "timeout": "3s", "retries": 12}
                 }}}))
                 # Only replace the app. Never upgrade Qdrant or remove volumes.

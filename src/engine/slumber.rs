@@ -5,6 +5,7 @@ use crate::engine::memex8_md::write_digest_md;
 use crate::engine::quantizer::{decide_bit_width, TurboQuantVectorIndex};
 use crate::engine::reactions::reaction_boost;
 use crate::storage::qdrant::{GapPoint, MemoryPoint, QdrantStore, VerificationStatusCounts};
+use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 mod consolidation_tests;
@@ -45,6 +46,19 @@ impl SlumberEngine {
 pub struct SlumberReport {
     pub memories_scanned: usize,
     pub deduplicated: usize,
+    /// Proposed losers; separate from actual deletions for dry-run reporting.
+    #[serde(default)]
+    pub dedup_candidates: usize,
+    #[serde(default)]
+    pub dedup_dry_run: bool,
+    #[serde(default)]
+    pub dedup_protected: usize,
+    #[serde(default)]
+    pub dedup_skipped: usize,
+    #[serde(default)]
+    pub dedup_operation_ids: Vec<String>,
+    #[serde(default)]
+    pub dedup_truncated_realms: Vec<String>,
     pub quantized: usize,
     pub realms_updated: usize,
     pub realms_renamed: usize,
@@ -86,17 +100,18 @@ impl SlumberEngine {
         &self,
         force_consolidation: bool,
     ) -> anyhow::Result<SlumberReport> {
-        let evidence_path = std::path::Path::new(&self.config.turbovec.index_path)
+        let _certification_guard = self.store.maintenance_guard().await;
+        let path = Path::new(&self.config.turbovec.index_path)
             .parent()
-            .unwrap_or_else(|| std::path::Path::new("data"))
+            .unwrap_or_else(|| Path::new("data"))
             .join("evidence.sqlite3");
         anyhow::ensure!(
             !self.config.evidence.enabled,
-            "evidence enabled: slumber unsupported until lineage-safe maintenance exists"
+            "evidence enabled: slumber unsupported"
         );
-        if evidence_path.exists() {
+        if path.exists() {
             anyhow::ensure!(
-                !crate::storage::evidence::EvidenceStore::open(&evidence_path)?.has_records()?,
+                !crate::storage::evidence::EvidenceStore::open(&path)?.has_records()?,
                 "evidence present: slumber unsupported"
             );
         }
@@ -112,9 +127,19 @@ impl SlumberEngine {
 
         // Phase 1: Deduplicate near-identical memories
         tracing::info!("💤 Slumber phase 1: Deduplication");
-        let all = self.store.scroll_all_memories().await?;
-        report.memories_scanned = all.len();
-        report.deduplicated = self.deduplicate().await?;
+        let dedup = if self.config.slumber.dedup_dry_run {
+            self.inspect_duplicates().await?
+        } else {
+            super::dedup_removal::remove_duplicates(&self.store, &self.config).await?
+        };
+        report.memories_scanned = dedup.memories_scanned;
+        report.deduplicated = dedup.deduplicated;
+        report.dedup_candidates = dedup.candidates.len();
+        report.dedup_dry_run = dedup.dry_run;
+        report.dedup_protected = dedup.protected_duplicates;
+        report.dedup_skipped = dedup.skipped;
+        report.dedup_operation_ids = dedup.operation_ids;
+        report.dedup_truncated_realms = dedup.truncated_realms;
 
         // Phase 2: ScalarQuant compression
         tracing::info!("💤 Slumber phase 2: ScalarQuant compression");
@@ -143,7 +168,11 @@ impl SlumberEngine {
         }
 
         // Phase 6: LLM memory consolidation (only run when scheduler signals it)
-        if self.config.slumber.consolidation_schedule.is_empty() {
+        if !self.config.slumber.consolidation.enabled {
+            tracing::debug!(
+                "  Skipping consolidation: disabled (slumber.consolidation.enabled = false)"
+            );
+        } else if self.config.slumber.consolidation_schedule.is_empty() {
             tracing::debug!("  Skipping consolidation: schedule is disabled");
         } else if force_consolidation {
             tracing::info!("💤 Slumber phase 6: Memory consolidation (forced by scheduler)");
@@ -240,44 +269,30 @@ impl SlumberEngine {
 
     // ─── Phase 1: Deduplication ──────────────────────────────────────────────
 
-    /// Find and remove near-duplicate memories (cosine similarity > 0.95).
-    /// Keeps the one with higher importance (upvotes + recency).
-    async fn deduplicate(&self) -> anyhow::Result<usize> {
-        let all = self.store.scroll_all_memories().await?;
-        let mut removed = 0;
-        let _dedup_threshold = 0.95f32;
-
-        // Group by source_hash first (exact duplicates)
-        let mut by_hash: std::collections::HashMap<String, Vec<&MemoryPoint>> =
-            std::collections::HashMap::new();
-        for mem in &all {
-            if !mem.source_hash.is_empty() {
-                by_hash
-                    .entry(mem.source_hash.clone())
-                    .or_default()
-                    .push(mem);
-            }
+    /// Read-only duplicate inspection. This entry point does not initialize
+    /// collections, run other maintenance phases, or mutate any payload/index.
+    pub async fn inspect_duplicates(&self) -> anyhow::Result<super::dedup::DedupReport> {
+        self.config.slumber.validate_dedup()?;
+        let all = self.store.scroll_memories_internal(true).await?;
+        let report = super::dedup::plan_duplicates(&all, &self.config.slumber)?;
+        for candidate in &report.candidates {
+            tracing::info!(
+                winner_id = %candidate.winner_id,
+                loser_id = %candidate.loser_id,
+                cosine = ?candidate.cosine,
+                reason = %candidate.reason,
+                "Duplicate candidate (dry run; no deletion)"
+            );
         }
-
-        // Remove exact duplicates (same source_hash) — keep highest importance
-        for (_hash, group) in &by_hash {
-            if group.len() > 1 {
-                let mut sorted = group.to_vec();
-                sorted.sort_by(|a, b| {
-                    b.importance
-                        .partial_cmp(&a.importance)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                // Keep the first (highest importance), delete the rest
-                for mem in sorted.iter().skip(1) {
-                    self.store.delete_memory(&mem.id).await?;
-                    removed += 1;
-                }
-            }
-        }
-
-        tracing::info!("  Deduplicated {} exact duplicates", removed);
-        Ok(removed)
+        tracing::info!(
+            candidates = report.candidates.len(),
+            protected = report.protected_duplicates,
+            invalid_vectors = report.invalid_vectors,
+            comparisons = report.comparisons,
+            truncated_realms = report.truncated_realms.len(),
+            "Duplicate inspection complete (dry run; no writes)"
+        );
+        Ok(report)
     }
 
     // ─── Phase 2: TurboVec Compression ────────────────────────────────────────
@@ -656,15 +671,16 @@ impl SlumberEngine {
     }
 
     /// Merge realms whose centroids are very similar.
-    /// Uses a lower threshold (0.6) for text embeddings where even
-    /// different topics can have moderate cosine similarity.
+    /// Threshold is read from `[realms] merge_threshold` in config.toml
+    /// (default 0.85; the value 0.35 hardcoded here previously broke
+    /// personal-knowledge isolation — fixed 2026-10-04 after the realm
+    /// merge at 0.47 similarity destroyed Marc's stored facts).
     async fn merge_similar_realms(&self) -> anyhow::Result<usize> {
         let realms = self.store.list_realms().await?;
         let mut merged = 0;
 
-        // Lower threshold for text embeddings: 0.35 instead of 0.85
-        // Text embeddings from different topics typically have 0.2-0.4 cosine similarity
-        let merge_threshold = 0.35f32;
+        // Use the config value so users can tune it. Default 0.85.
+        let merge_threshold = self.config.realms.merge_threshold;
 
         for i in 0..realms.len() {
             for j in (i + 1)..realms.len() {
@@ -1567,7 +1583,7 @@ impl SlumberEngine {
 
         for mem in &all {
             // Skip protected memories
-            if mem.upvotes > 0 || mem.access_count > 5 {
+            if mem.is_certified() || mem.upvotes > 0 || mem.access_count > 5 {
                 continue;
             }
 
@@ -1631,7 +1647,14 @@ impl SlumberEngine {
                 // stops crowding recall. Mirrors `Engine::archive_memory`
                 // (engine/mod.rs): set importance via the store's
                 // update_upvotes primitive.
-                if let Err(e) = self.store.update_upvotes(&mem.id, 0, 0.01).await {
+                if let Err(e) = self
+                    .store
+                    .update_unprotected_payload(
+                        &mem.id,
+                        serde_json::json!({"upvotes": 0, "importance": 0.01}).try_into()?,
+                    )
+                    .await
+                {
                     tracing::warn!("  Prune-archive failed for id={}: {}", mem.id, e);
                     // Continue — don't abort the whole phase on one
                     // transient failure.
@@ -1648,21 +1671,44 @@ impl SlumberEngine {
     // ─── Phase 5: MEMEX8.md Write-Back ───────────────────────────────────────
 
     /// Write top memories as MEMEX8.md files to watched directories.
+    ///
+    /// Memories are grouped by their `source_file`, but `source_file` is not
+    /// always a filesystem path — in the plugin-backed deployment it is a
+    /// source *label* ("hermes", "hermes-sync", "manual"), and occasionally a
+    /// URL. Treating those as paths produced nonsense targets: a bare label
+    /// resolved to a relative "MEMEX8.md" (written against the process working
+    /// directory, which is read-only in the container), and a URL resolved to a
+    /// path like "https://youtu.be/MEMEX8.md" that can never exist.
+    ///
+    /// Resolution rules:
+    ///   1. A real path whose parent directory exists → write MEMEX8.md beside
+    ///      it, preserving the original "context file next to the content"
+    ///      behaviour. Inside the container the watched path is already
+    ///      `/watch/...`, so the file lands on the host via the bind mount.
+    ///   2. A label or URL → sanitize it to a safe directory name and write to
+    ///      `<output_dir>/<label>/MEMEX8.md`.
+    ///   3. Empty or missing source → skipped; there is no grouping key.
     async fn update_memex8_md(&self) -> anyhow::Result<usize> {
         let max_memories = self.config.memex8_md.max_memories as usize;
+        let output_dir = std::path::Path::new(&self.config.memex8_md.output_dir);
         let mut written = 0;
 
         let all = self.store.scroll_all_memories().await?;
-        let mut by_dir: std::collections::HashMap<String, Vec<&MemoryPoint>> =
+        let mut by_dir: std::collections::HashMap<PathBuf, Vec<&MemoryPoint>> =
             std::collections::HashMap::new();
 
         for mem in &all {
-            if let Some(ref source) = mem.source_file {
-                if let Some(parent) = std::path::Path::new(source).parent() {
-                    let dir = parent.to_string_lossy().to_string();
-                    by_dir.entry(dir).or_default().push(mem);
-                }
+            let Some(ref source) = mem.source_file else {
+                continue;
+            };
+            let source = source.trim();
+            if source.is_empty() {
+                continue;
             }
+            let Some(dir) = Self::resolve_memex8_md_dir(source, output_dir) else {
+                continue;
+            };
+            by_dir.entry(dir).or_default().push(mem);
         }
 
         for (dir, mut memories) in by_dir {
@@ -1674,7 +1720,19 @@ impl SlumberEngine {
             });
             memories.truncate(max_memories);
 
-            let md_path = std::path::Path::new(&dir).join("MEMEX8.md");
+            // Only create directories we own (the label-grouped ones under
+            // output_dir). Never create directories for real source paths —
+            // if their parent does not exist, that source is not writable and
+            // creating it would fabricate a path that was never there.
+            let is_label_group = dir.starts_with(output_dir) && dir.parent() == Some(output_dir);
+            if is_label_group {
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    tracing::warn!("Failed to create directory {:?}: {}", dir, e);
+                    continue;
+                }
+            }
+
+            let md_path = dir.join("MEMEX8.md");
             let content = Self::format_memex8_md(&memories);
 
             if let Err(e) = std::fs::write(&md_path, &content) {
@@ -1687,6 +1745,80 @@ impl SlumberEngine {
 
         tracing::info!("  Wrote {} MEMEX8.md files", written);
         Ok(written)
+    }
+
+    /// Resolve the directory a memory's MEMEX8.md should be written into.
+    ///
+    /// Returns `None` when the source carries no usable grouping key.
+    fn resolve_memex8_md_dir(source: &str, output_dir: &Path) -> Option<PathBuf> {
+        let path = Path::new(source);
+
+        // Rule 1: a real absolute path whose parent directory exists.
+        //
+        // Restricted to absolute paths with no `..` component: the file
+        // ingester records absolute paths, so that is the only shape a
+        // genuine "write beside the content" case takes. A relative path
+        // containing `..` is treated as untrusted and falls through to the
+        // label rule, where it is sanitized into a harmless directory name
+        // instead of escaping the output directory.
+        if path.is_absolute()
+            && !path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() && parent.is_dir() {
+                    return Some(parent.to_path_buf());
+                }
+            }
+        }
+
+        // Rule 2: label, URL, or unusable path → sanitized directory under
+        // output_dir. The sanitizer guarantees a single path component with
+        // no separators, so this can never escape output_dir.
+        let label = Self::sanitize_memex8_md_label(source);
+        if label.is_empty() {
+            return None;
+        }
+        Some(output_dir.join(label))
+    }
+
+    /// Turn an arbitrary source label into a safe single path component.
+    ///
+    /// Replaces every character outside `[A-Za-z0-9._-]` with `-`, collapses
+    /// repeated dashes, strips leading/trailing dashes and dots, and caps the
+    /// length. This prevents path traversal ("../..") and keeps URL-shaped
+    /// sources from producing URL-shaped directories.
+    fn sanitize_memex8_md_label(source: &str) -> String {
+        // Drop a URL scheme and host so "https://youtu.be/abc" becomes
+        // "youtu.be-abc" rather than "--https---youtu.be-abc".
+        let stripped = match source.find("://") {
+            Some(idx) => &source[idx + 3..],
+            None => source,
+        };
+
+        let mut out = String::with_capacity(stripped.len());
+        let mut last_dash = false;
+        for ch in stripped.chars() {
+            let keep = ch.is_ascii_alphanumeric() || ch == '.' || ch == '_';
+            if keep {
+                out.push(ch);
+                last_dash = false;
+            } else if !last_dash {
+                out.push('-');
+                last_dash = true;
+            }
+        }
+
+        // Trim separators that would create empty or traversal components.
+        let trimmed = out.trim_matches(|c: char| c == '-' || c == '.').to_string();
+
+        // Cap the length, preserving a readable prefix.
+        if trimmed.chars().count() > 64 {
+            trimmed.chars().take(64).collect()
+        } else {
+            trimmed
+        }
     }
 
     /// Format memories as a MEMEX8.md file.
@@ -1740,8 +1872,8 @@ impl SlumberEngine {
     // ─── Phase 6: LLM Memory Consolidation ────────────────────────────────────
 
     /// Use an LLM to consolidate raw conversation fragments into clean summaries.
-    /// Opt-in additive summaries, bounded to ten source records per compatible
-    /// realm/visibility group. Originals are never retired or deleted here.
+    /// Groups memories by realm, sends batches to local LLM (Qwen 3.6 via Unsloth),
+    /// then replaces fragmented memories with clean summaries.
     async fn llm_consolidate(&self) -> anyhow::Result<usize> {
         if !self.config.slumber.consolidation.enabled {
             return Ok(0);
@@ -1751,33 +1883,25 @@ impl SlumberEngine {
 
         // Group memories by realm
         let all = self.store.scroll_all_memories().await?;
-        let mut by_realm: std::collections::HashMap<
-            (String, Option<String>, String),
-            Vec<&MemoryPoint>,
-        > = std::collections::HashMap::new();
-
+        let mut by_realm: std::collections::BTreeMap<_, Vec<&MemoryPoint>> =
+            std::collections::BTreeMap::new();
         for mem in &all {
-            // No generic scope contract exists yet: skip all tagged sources,
-            // including project records, rather than discarding restrictions.
-            if !mem.tags.is_empty() || mem.chunk_type == "consolidated" {
+            // Scoped tags lack a generic compatibility contract; skip them.
+            if mem.tags.iter().any(|tag| tag.contains(':')) {
                 continue;
             }
-            let visibility = match mem.visibility.as_str() {
-                "" | "private" => "private",
-                "public" => "public",
-                _ => continue,
-            };
-            let realm = (
-                mem.realm_name.clone(),
+            let key = (
                 mem.realm_id.clone(),
-                visibility.into(),
+                mem.realm_name.clone(),
+                crate::storage::qdrant::normalize_visibility(&mem.visibility),
             );
-            by_realm.entry(realm).or_default().push(mem);
+            by_realm.entry(key).or_default().push(mem);
         }
 
         let mut consolidated = 0;
 
-        for ((realm_name, _, visibility), memories) in &by_realm {
+        for ((realm_id, realm_name, visibility), members) in &by_realm {
+            let memories = super::dedup::consolidation_inputs(members);
             // Only consolidate realms with 2+ memories
             if memories.len() < 2 {
                 continue;
@@ -1790,38 +1914,31 @@ impl SlumberEngine {
                 backend
             );
 
-            // Build the prompt (limit to top 10 memories by importance)
+            // Build the prompt (limit to top memories by importance)
+            // Use config max_cluster_size (default 20, lowered to 6 for
+            // finer-grained consolidation; the value 10 hardcoded here
+            // previously was a dead config — fixed 2026-10-04).
+            let max_cluster = self.config.slumber.summarize.max_cluster_size as usize;
             let mut sorted = memories.to_vec();
+            let covered: std::collections::HashSet<_> = members
+                .iter()
+                .flat_map(|m| m.consolidated_evidence.iter())
+                .collect();
             sorted.sort_by(|a, b| {
-                b.importance
-                    .partial_cmp(&a.importance)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.id.cmp(&b.id))
+                let a_covered = covered.contains(&super::dedup::source_fingerprint(&[a]));
+                let b_covered = covered.contains(&super::dedup::source_fingerprint(&[b]));
+                a_covered.cmp(&b_covered).then_with(|| {
+                    b.importance
+                        .partial_cmp(&a.importance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
             });
-            sorted.truncate(10);
-            // Identity and prompt order depend on the selected set, not rank.
-            sorted.sort_by(|a, b| a.id.cmp(&b.id));
-
-            // Stable identity for the exact bounded input snapshot. This also
-            // makes concurrent/retried upserts converge without deleting data.
-            use sha2::{Digest, Sha256};
-            let snapshot = serde_json::to_vec(&(
-                "consolidation-v1",
-                realm_name,
-                &sorted[0].realm_id,
-                visibility,
-                sorted
-                    .iter()
-                    .map(|m| (&m.id, &m.content))
-                    .collect::<Vec<_>>(),
-            ))?;
-            let hash = Sha256::digest(&snapshot);
-            let mut bytes = [0u8; 16];
-            bytes.copy_from_slice(&hash[..16]);
-            let id = uuid::Uuid::from_bytes(bytes).to_string();
-            if all.iter().any(|m| m.id == id) {
+            sorted.truncate(max_cluster.max(2));
+            if super::dedup::already_consolidated(&sorted, members) {
+                tracing::debug!("Skipping consolidation: source set already summarized");
                 continue;
             }
+            let source_ids: Vec<String> = sorted.iter().map(|m| m.id.clone()).collect();
 
             let memory_texts: Vec<String> = sorted
                 .iter()
@@ -1889,14 +2006,14 @@ impl SlumberEngine {
             };
 
             let summary = match summary {
-                Ok(s) => s,
+                Ok(s) => super::redaction::text(&s),
                 Err(e) => {
                     tracing::warn!("  Consolidation failed for '{}': {}", realm_name, e);
                     continue;
                 }
             };
 
-            if summary.trim().is_empty() {
+            if !super::redaction::meaningful(&summary) {
                 continue;
             }
 
@@ -1909,21 +2026,119 @@ impl SlumberEngine {
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to embed summary: {}", e))?;
 
-            // Consolidation is additive: originals remain even if saving fails.
+            // Collect IDs to delete
+            // Respect config preserve_originals (default true). When
+            // false, the original memories are deleted and replaced by
+            // the summary; when true, the originals are kept and the
+            // summary is added alongside. The value `false` hardcoded
+            // here previously made preserve_originals a dead config —
+            // fixed 2026-10-04.
+            let preserve_originals = self.config.slumber.summarize.preserve_originals;
+            let ids_to_delete: Vec<String> = if preserve_originals {
+                Vec::new()
+            } else {
+                source_ids.clone()
+            };
 
-            // Store the consolidated summary with its own embedded vector
+            // Store the consolidated summary with its own embedded vector.
+            // Inherit memory_type from the source memories so the summary's
+            // Weibull decay matches the originals' (e.g. a summary of
+            // profile/preference memories won't decay after 7 days just
+            // because we hardcoded "general" for new memory_type).
+            // Type priority picks the most stable: profile > preference
+            // > relationship > entity > setup > pattern > fact > project.
+            let type_priority = |t: &str| -> u8 {
+                match t {
+                    "profile" => 9,
+                    "preference" => 8,
+                    "relationship" => 8,
+                    "entity" => 7,
+                    "setup" => 6,
+                    "pattern" => 5,
+                    "fact" => 4,
+                    "project" => 3,
+                    "observation" => 2,
+                    "learning" => 2,
+                    "instruction" => 2,
+                    "general" => 1,
+                    _ => 0,
+                }
+            };
+            let inherited_type = sorted
+                .iter()
+                .map(|m| m.memory_type.as_str())
+                .max_by_key(|t| type_priority(t))
+                .unwrap_or("general");
+
+            // Re-read complete sources and original vectors immediately before
+            // archiving. Never delete data from a stale prompt snapshot.
+            let mut sources = Vec::new();
+            for source_id in &source_ids {
+                let Some(snapshot) = self.store.get_memory_snapshot(source_id).await? else {
+                    break;
+                };
+                if snapshot.memory.is_certified()
+                    || super::dedup::consolidation_on_cooldown(&snapshot.memory)
+                {
+                    break;
+                }
+                sources.push(snapshot);
+            }
+            let current: Vec<_> = sources.iter().map(|s| &s.memory).collect();
+            if sources.len() != source_ids.len()
+                || current.iter().any(|m| {
+                    crate::storage::qdrant::normalize_visibility(&m.visibility) != *visibility
+                        || m.realm_id != *realm_id
+                        || m.realm_name != *realm_name
+                })
+                || super::dedup::source_fingerprint(&current)
+                    != super::dedup::source_fingerprint(&sorted)
+            {
+                continue;
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            let provider = std::env::var("EMBEDDING_PROVIDER")
+                .unwrap_or_else(|_| self.config.embedding.provider.clone());
+            let model = if provider == "openai" || provider == "openai-compatible" {
+                self.config.embedding.openai.model.clone()
+            } else {
+                std::env::var("EMBEDDING_MODEL")
+                    .unwrap_or_else(|_| self.config.embedding.model.clone())
+            };
+            let mut operation = crate::storage::qdrant::ConsolidationOperation {
+                version: 1,
+                kind: "consolidation".into(),
+                dedup_winner: None,
+                summary_id: id.clone(),
+                summary_hash: crate::storage::qdrant::content_hash(&summary),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                state: "prepared".into(),
+                preserve_originals,
+                embedding_provider: provider,
+                embedding_model: model,
+                embedding_dimensions: sources[0].vector.len(),
+                sources,
+                cooldown_until: None,
+            };
+            self.store.archive_consolidation(&operation).await?;
+            tracing::info!(summary_id = %id, sources = source_ids.len(), "Consolidation sources archived");
             if let Err(e) = self
                 .store
                 .store_memory_with_vector(
                     &id,
                     &summary,
                     &summary_vector,
-                    sorted[0].realm_id.as_deref(),
+                    realm_id.as_deref(),
                     Some(realm_name),
                     1.0,
-                    None,
-                    visibility,
-                    &sorted.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+                    None, // source_file: consolidated summaries have no file origin
+                    Some(inherited_type), // inherit memory_type from sources for matching Weibull decay
+                    &crate::storage::qdrant::ConsolidationMetadata {
+                        source_ids: source_ids.clone(),
+                        source_fingerprint: super::dedup::source_fingerprint(&sorted),
+                        visibility: visibility.to_string(),
+                        evidence: super::dedup::evidence_fingerprints(&sorted),
+                    },
                 )
                 .await
             {
@@ -1935,9 +2150,30 @@ impl SlumberEngine {
                 continue;
             }
 
+            // Never delete sources before the replacement was durably stored.
+            let stored = self
+                .store
+                .get_memory(&id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Consolidated summary failed read-back"))?;
+            anyhow::ensure!(
+                stored.content == summary && stored.consolidated_from == source_ids,
+                "Consolidated summary read-back mismatch"
+            );
+            for source in &operation.sources {
+                if ids_to_delete.contains(&source.memory.id) {
+                    self.store
+                        .delete_consolidation_snapshot(&source.memory)
+                        .await?;
+                }
+            }
+            self.store
+                .update_consolidation_state(&mut operation, "complete")
+                .await?;
+
             tracing::info!(
                 "  Consolidated {} memories → 1 summary in '{}'",
-                memories.len(),
+                sorted.len(),
                 realm_name
             );
             consolidated += 1;
@@ -2005,6 +2241,7 @@ impl SlumberEngine {
         model: &str,
         prompt: &str,
     ) -> anyhow::Result<String> {
+        let prompt = super::redaction::text(prompt);
         let client = reqwest::Client::new();
         let response = client
             .post("https://api.openai.com/v1/chat/completions")
@@ -2024,8 +2261,7 @@ impl SlumberEngine {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("OpenAI API error ({}): {}", status, body));
+            return Err(anyhow::anyhow!("OpenAI API error ({})", status));
         }
 
         let body: serde_json::Value = response.json().await?;
@@ -2049,6 +2285,7 @@ impl SlumberEngine {
         model: Option<&str>,
         prompt: &str,
     ) -> anyhow::Result<String> {
+        let prompt = super::redaction::text(prompt);
         let client = reqwest::Client::new();
         let url = base_url.trim_end_matches('/');
         let mut req = client
@@ -2076,12 +2313,7 @@ impl SlumberEngine {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "Local LLM API error ({}): {}",
-                status,
-                body
-            ));
+            return Err(anyhow::anyhow!("Local LLM API error ({})", status));
         }
 
         let body: serde_json::Value = response.json().await?;
@@ -2112,6 +2344,9 @@ impl SlumberEngine {
         let mut updates: Vec<(&str, qdrant_client::Payload)> = Vec::new();
 
         for mem in &all {
+            if mem.is_certified() {
+                continue;
+            }
             let last_accessed = chrono::DateTime::parse_from_rfc3339(&mem.last_accessed)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| now);
@@ -2147,7 +2382,7 @@ impl SlumberEngine {
             // Batch update in chunks to avoid overwhelming Qdrant
             const BATCH_SIZE: usize = 100;
             for chunk in updates.chunks(BATCH_SIZE) {
-                if let Err(e) = self.store.batch_update_payload(chunk).await {
+                if let Err(e) = self.store.batch_update_unprotected_payload(chunk).await {
                     tracing::warn!("  Batch decay update failed: {}", e);
                 }
             }
@@ -2360,7 +2595,7 @@ impl SlumberEngine {
         // Find session summary memories (chunk_type = "session_summary")
         let session_summaries: Vec<_> = all
             .iter()
-            .filter(|m| m.chunk_type == "session_summary")
+            .filter(|m| m.chunk_type == "session_summary" && !m.is_certified())
             .collect();
 
         if session_summaries.is_empty() {
@@ -2405,7 +2640,10 @@ impl SlumberEngine {
 
             if (new_importance - current_importance).abs() > 0.01 {
                 self.store
-                    .set_memory_importance(&mem.id, new_importance)
+                    .update_unprotected_payload(
+                        &mem.id,
+                        serde_json::json!({"importance": new_importance}).try_into()?,
+                    )
                     .await?;
                 tracing::debug!(
                     "  Session {} importance: {:.2} → {:.2}",
@@ -2461,7 +2699,7 @@ impl SlumberEngine {
         let eligible: Vec<&MemoryPoint> = all
             .iter()
             .filter(|m| {
-                if m.content.trim().is_empty() {
+                if m.is_certified() || m.content.trim().is_empty() {
                     return false;
                 }
                 match &m.last_verified {
@@ -2669,7 +2907,7 @@ impl SlumberEngine {
 
         const BATCH_SIZE: usize = 100;
         for chunk in updates.chunks(BATCH_SIZE) {
-            if let Err(e) = self.store.batch_update_payload(chunk).await {
+            if let Err(e) = self.store.batch_update_unprotected_payload(chunk).await {
                 tracing::warn!("  Batch verification update failed: {}", e);
             }
         }
@@ -2680,6 +2918,7 @@ impl SlumberEngine {
             stale: n_stale as u64,
             contradicted: n_contra as u64,
             unverified: 0,
+            certified: 0,
         };
         tracing::info!(
             "  Verification sweep: {} rated — {} verified, {} stale, {} contradicted",
@@ -2794,4 +3033,112 @@ fn kmeans_split_2(vectors: &[Vec<f32>], max_iter: usize) -> (Vec<f32>, Vec<f32>,
     }
 
     (c1, c2, assignments)
+}
+
+#[cfg(test)]
+mod memex8_md_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn resolve(source: &str) -> Option<PathBuf> {
+        SlumberEngine::resolve_memex8_md_dir(source, Path::new("/watch"))
+    }
+
+    fn sanitize(source: &str) -> String {
+        SlumberEngine::sanitize_memex8_md_label(source)
+    }
+
+    /// A bare source label must not resolve to a relative "MEMEX8.md" written
+    /// against the process working directory. This was the bug that made the
+    /// phase log "Permission denied" every cycle and write zero files.
+    #[test]
+    fn test_bare_label_resolves_under_output_dir() {
+        let dir = resolve("hermes").expect("label must resolve");
+        assert_eq!(dir, Path::new("/watch/hermes"));
+        assert!(
+            dir.is_absolute(),
+            "label target must be absolute, got {:?}",
+            dir
+        );
+    }
+
+    #[test]
+    fn test_hyphenated_label_resolves_under_output_dir() {
+        assert_eq!(
+            resolve("hermes-sync").expect("label must resolve"),
+            Path::new("/watch/hermes-sync")
+        );
+    }
+
+    /// A URL source must not produce a URL-shaped path.
+    #[test]
+    fn test_url_source_is_sanitized_not_used_verbatim() {
+        let dir = resolve("https://youtu.be/dQw4w9WgXcQ").expect("url must resolve");
+        assert!(
+            dir.is_absolute(),
+            "url target must be absolute, got {:?}",
+            dir
+        );
+        assert!(
+            !dir.to_string_lossy().contains("://"),
+            "url target must not contain a scheme, got {:?}",
+            dir
+        );
+        assert_eq!(dir, Path::new("/watch/youtu.be-dQw4w9WgXcQ"));
+    }
+
+    /// Path traversal must be impossible via a crafted source label.
+    #[test]
+    fn test_path_traversal_is_neutralized() {
+        let dir = resolve("../../etc/passwd").expect("must resolve somewhere safe");
+        assert!(
+            dir.starts_with("/watch"),
+            "traversal escaped output_dir: {:?}",
+            dir
+        );
+        assert_eq!(dir, Path::new("/watch/etc-passwd"));
+    }
+
+    #[test]
+    fn test_sanitize_rejects_empty_and_dot_only() {
+        assert_eq!(sanitize(""), "");
+        assert_eq!(sanitize("..."), "");
+        assert_eq!(sanitize("/"), "");
+    }
+
+    #[test]
+    fn test_sanitize_collapses_and_trims() {
+        assert_eq!(sanitize("  hermes  "), "hermes");
+        assert_eq!(sanitize("a///b"), "a-b");
+        assert_eq!(sanitize("--lead--"), "lead");
+    }
+
+    #[test]
+    fn test_sanitize_caps_length() {
+        let long = "x".repeat(200);
+        assert_eq!(sanitize(&long).len(), 64);
+    }
+
+    /// An absolute path whose parent exists must win over the label rule —
+    /// that preserves "MEMEX8.md sits beside the content it describes".
+    #[test]
+    fn test_real_path_with_existing_parent_is_used_directly() {
+        let dir = resolve("/tmp/example.md").expect("existing dir must resolve");
+        assert_eq!(dir, Path::new("/tmp"));
+    }
+
+    /// An absolute path whose parent does not exist cannot be written beside
+    /// the content, so it degrades to a label directory under output_dir
+    /// rather than being dropped — the memory still reaches the write-back.
+    #[test]
+    fn test_real_path_with_missing_parent_falls_back_to_label() {
+        let dir = resolve("/nonexistent-dir-xyz/file.md")
+            .expect("must degrade to a label, not be dropped");
+        assert!(
+            dir.starts_with("/watch"),
+            "must stay under output_dir: {:?}",
+            dir
+        );
+        assert_eq!(dir, Path::new("/watch/nonexistent-dir-xyz-file.md"));
+    }
 }

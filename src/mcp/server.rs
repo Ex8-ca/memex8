@@ -126,10 +126,17 @@ async fn handle_tool_call(
         .ok_or_else(|| anyhow::anyhow!("Missing tool name"))?;
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    tracing::info!("MCP tool call: {} {:?}", name, arguments);
+    tracing::info!("MCP tool call: {}", name);
 
     match name {
+        "memex8_timeline" => {
+            let request = serde_json::from_value(arguments.clone())?;
+            Ok(serde_json::to_value(
+                engine.timeline_request(request).await?,
+            )?)
+        }
         "memex8_search" => {
+            let compact = super::tools::boolean_argument(&arguments, "compact")?;
             let query = arguments
                 .get("query")
                 .and_then(|v| v.as_str())
@@ -144,12 +151,25 @@ async fn handle_tool_call(
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.3) as f32;
 
-            let results = engine
-                .search(query, realm, None, limit, 0, min_score)
+            let tags: Option<Vec<String>> = arguments
+                .get("tags")
+                .map(|v| serde_json::from_value(v.clone()))
+                .transpose()?;
+            let visibility = arguments.get("visibility").and_then(|v| v.as_str());
+            let outcome = engine
+                .search_with_coverage(
+                    query,
+                    realm,
+                    tags.as_deref(),
+                    limit,
+                    0,
+                    min_score,
+                    visibility,
+                )
                 .await?;
-            Ok(format_results(results))
+            super::tools::with_coverage(format_results(outcome.results, compact), &outcome.coverage)
         }
-        "memex8_store" => {
+        "memex8_store" | "memex8_remember" => {
             let content = arguments
                 .get("content")
                 .and_then(|v| v.as_str())
@@ -165,19 +185,55 @@ async fn handle_tool_call(
             // everything it touches to the A2A bridge.
             let visibility = arguments.get("visibility").and_then(|v| v.as_str());
 
+            let memory_type = arguments.get("memory_type").and_then(|v| v.as_str());
             let source = arguments.get("source").and_then(|v| v.as_str());
+            let certified = super::tools::boolean_argument(&arguments, "certified")?;
             let id = engine
-                .store_memory(
+                .store_memory_with_certification(
                     content,
                     tags,
                     realm_hint,
                     source.or(Some("mcp")),
                     visibility,
+                    memory_type,
+                    certified,
                 )
                 .await?;
             Ok(json!({ "id": id, "status": "stored" }))
         }
+        "memex8_restore_duplicate" => {
+            let operation_id = arguments
+                .get("operation_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("operation_id is required"))?;
+            let result = engine.restore_duplicate(operation_id).await?;
+            Ok(json!({"content": [{"type": "text", "text": serde_json::to_string(&result)?}]}))
+        }
+        "memex8_unconsolidate" => {
+            let memory_id = arguments
+                .get("memory_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("memory_id is required"))?;
+            let result = engine.unconsolidate(memory_id).await?;
+            Ok(json!({"content": [{"type": "text", "text": serde_json::to_string(&result)?}]}))
+        }
+        "memex8_certify" => {
+            let memory_id = arguments
+                .get("memory_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("memory_id is required"))?;
+            let revoke = super::tools::boolean_argument(&arguments, "revoke")?;
+            let by = arguments.get("by").and_then(|v| v.as_str());
+            let note = arguments.get("note").and_then(|v| v.as_str());
+            let memory = engine
+                .store()
+                .set_certification(memory_id, revoke, by, note)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", memory_id))?;
+            Ok(json!({"content": [{"type": "text", "text": serde_json::to_string(&memory)?}]}))
+        }
         "memex8_recall" => {
+            let compact = super::tools::boolean_argument(&arguments, "compact")?;
             let limit = arguments
                 .get("limit")
                 .and_then(|v| v.as_u64())
@@ -185,16 +241,9 @@ async fn handle_tool_call(
             let realm = arguments.get("realm").and_then(|v| v.as_str());
 
             let results = engine.recall(limit, realm).await?;
-            Ok(format_results(results))
+            Ok(format_results(results, compact))
         }
-        "memex8_get" => {
-            let id = arguments
-                .get("id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Missing 'id' parameter"))?;
-            let memory = engine.get_memory(id).await?;
-            Ok(json!({ "memory": memory }))
-        }
+        "memex8_get" => super::tools::get_memories(engine, &arguments).await,
         "memex8_ingest" => {
             let path = arguments
                 .get("path")
@@ -211,6 +260,8 @@ async fn handle_tool_call(
         }
         "memex8_realms_list" => {
             let realms = engine.list_realms().await?;
+            let realms: Vec<crate::api::routes::realms::RealmSummary> =
+                realms.into_iter().map(Into::into).collect();
             Ok(json!({ "realms": realms }))
         }
         "memex8_realms_show" => {
@@ -219,6 +270,7 @@ async fn handle_tool_call(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Missing 'name' parameter"))?;
             let realm = engine.show_realm(name).await?;
+            let realm: crate::api::routes::realms::RealmSummary = realm.into();
             Ok(json!({ "realm": realm }))
         }
         "memex8_upvote" => {
@@ -279,7 +331,11 @@ async fn handle_tool_call(
     }
 }
 
-fn format_results(results: Vec<crate::engine::MemoryResult>) -> serde_json::Value {
+fn format_results(results: Vec<crate::engine::MemoryResult>, compact: bool) -> serde_json::Value {
+    if compact {
+        let count = results.len();
+        return json!({"results": crate::engine::retrieval::RetrievalResults::new(results, true), "count": count});
+    }
     json!({
         "results": results.iter().map(|r| json!({
             "id": r.id,

@@ -62,6 +62,8 @@ impl Fixture {
         config.embedding.dimensions = 3;
         config.slumber.consolidation.backend = "local".into();
         config.slumber.consolidation.enabled = true;
+        config.slumber.summarize.max_cluster_size = 10;
+        config.slumber.summarize.preserve_originals = true;
         Self {
             engine: SlumberEngine::new(config, store),
             prompts,
@@ -128,10 +130,10 @@ async fn consolidation_preserves_unrepresented_sources() {
     let mut expected: Vec<_> = ids
         .iter()
         .filter(|id| f.prompts.lock().unwrap()[0].contains(id.as_str()))
-        .map(|id| format!("consolidation-input:{id}"))
+        .cloned()
         .collect();
     expected.sort();
-    let mut actual = summary.tags.clone();
+    let mut actual = summary.consolidated_from.clone();
     actual.sort();
     assert_eq!(
         actual, expected,
@@ -213,17 +215,12 @@ async fn consolidation_excludes_legacy_summaries() {
 #[ignore = "requires disposable Qdrant; run serially with MEMEX8_TEST_QDRANT_URL"]
 async fn consolidation_does_not_repeat_identical_inputs() {
     let f = Fixture::new(vec![1.0, 0.0, 0.0]).await;
-    let ids = f.seed(12).await;
+    let ids = f.seed(10).await;
     assert_eq!(f.engine.llm_consolidate().await.unwrap(), 1);
     // Ranking changes within the same ten inputs must not regenerate a summary.
     let all = f.engine.store.scroll_all_memories().await.unwrap();
     let summary = all.iter().find(|m| m.chunk_type == "consolidated").unwrap();
-    let input = summary
-        .tags
-        .last()
-        .unwrap()
-        .strip_prefix("consolidation-input:")
-        .unwrap();
+    let input = summary.consolidated_from.last().unwrap();
     f.engine
         .store
         .set_memory_importance(input, 100.0)
@@ -234,7 +231,7 @@ async fn consolidation_does_not_repeat_identical_inputs() {
     assert_eq!(f.prompts.lock().unwrap().len(), 1);
     assert_eq!(
         f.engine.store.scroll_all_memories().await.unwrap().len(),
-        13
+        11
     );
 }
 

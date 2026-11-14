@@ -97,11 +97,13 @@ impl OllamaEmbedder {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await?;
-            anyhow::bail!("Ollama API error ({}): {}", status, body);
+            anyhow::bail!("Ollama API error ({})", status);
         }
 
-        let result: OllamaResponse = resp.json().await?;
+        let result: OllamaResponse = resp
+            .json()
+            .await
+            .map_err(|_| anyhow::anyhow!("Invalid embedding response"))?;
         Ok(result.embeddings.into_iter().next().unwrap_or_default())
     }
 }

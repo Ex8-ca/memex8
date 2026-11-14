@@ -1,5 +1,6 @@
 use crate::api::error::ApiError;
 use crate::api::server::AppState;
+use crate::engine::retrieval::{validate_batch_ids, BatchGetResult, RetrievalResults};
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,14 @@ pub struct StoreRequest {
     pub visibility: Option<String>,
     pub evidence: Option<crate::storage::evidence::CaptureRequest>,
     pub idempotency_key: Option<String>,
+    /// Weibull decay type: profile|preference|entity|relationship|setup
+    /// |pattern|fact|project|observation|learning|general (default).
+    /// Personal-knowledge memories should pass a long-lived type to
+    /// avoid the 7-day general-type auto-archive.
+    pub memory_type: Option<String>,
+    /// Only opt in when the user explicitly confirms this memory.
+    #[serde(default)]
+    pub certified: bool,
 }
 
 #[derive(Deserialize)]
@@ -27,6 +36,8 @@ pub struct SearchRequest {
     pub realm: Option<String>,
     pub tags: Option<Vec<String>>,
     pub min_score: Option<f32>,
+    #[serde(default)]
+    pub compact: bool,
     /// Optional visibility filter ("private" | "public").
     pub visibility: Option<String>,
 }
@@ -49,6 +60,11 @@ pub async fn store(
     Json(req): Json<StoreRequest>,
 ) -> Result<Json<StoreResponse>, crate::api::error::ApiError> {
     if let Some(capture) = req.evidence {
+        if req.certified || req.memory_type.is_some() {
+            return Err(ApiError::BadRequest(
+                "evidence capture does not yet support certification or memory_type".into(),
+            ));
+        }
         let id = state
             .engine
             .store_with_evidence(
@@ -73,12 +89,14 @@ pub async fn store(
     }
     let id = state
         .engine
-        .store_memory(
+        .store_memory_with_certification(
             &req.content,
             req.tags,
             req.realm_hint.as_deref(),
             req.source.as_deref(),
             req.visibility.as_deref(),
+            req.memory_type.as_deref(),
+            req.certified,
         )
         .await?;
     Ok(Json(StoreResponse {
@@ -96,27 +114,80 @@ pub async fn evidence(
     ))
 }
 
+pub async fn restore_duplicate(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::engine::dedup_removal::DuplicateRestoreResult>, ApiError> {
+    Ok(Json(state.engine.restore_duplicate(&id).await?))
+}
+
+pub async fn unconsolidate(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::storage::qdrant::UnconsolidateResult>, ApiError> {
+    Ok(Json(state.engine.unconsolidate(&id).await?))
+}
+
+#[derive(Default, Deserialize)]
+pub struct CertifyRequest {
+    pub by: Option<String>,
+    pub note: Option<String>,
+}
+
+pub async fn certify(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<CertifyRequest>>,
+) -> Result<Json<crate::storage::qdrant::MemoryPoint>, ApiError> {
+    let Json(req) = body.unwrap_or_default();
+    let memory = state
+        .engine
+        .store()
+        .set_certification(&id, false, req.by.as_deref(), req.note.as_deref())
+        .await?
+        .ok_or_else(|| ApiError::NotFound(id))?;
+    Ok(Json(memory))
+}
+
+pub async fn revoke_certification(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::storage::qdrant::MemoryPoint>, ApiError> {
+    let memory = state
+        .engine
+        .store()
+        .set_certification(&id, true, None, None)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(id))?;
+    Ok(Json(memory))
+}
+
 pub async fn search(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, crate::api::error::ApiError> {
+    if req.min_score.is_some_and(|score| !score.is_finite()) {
+        return Err(ApiError::BadRequest("min_score must be finite".into()));
+    }
     let limit = req.limit.unwrap_or(10);
     let offset = req.offset.unwrap_or(0);
     let tags_ref = req.tags.clone();
-    let results = state
+    let outcome = state
         .engine
-        .search(
+        .search_with_coverage(
             &req.query,
             req.realm.as_deref(),
             tags_ref.as_deref().map(|t| t.as_ref()),
             limit,
             offset,
             req.min_score.unwrap_or(0.3),
+            req.visibility.as_deref(),
         )
         .await?;
-    let total = results.len();
+    let total = outcome.results.len();
     Ok(Json(SearchResponse {
-        results,
+        coverage: outcome.coverage,
+        results: RetrievalResults::new(outcome.results, req.compact),
         total,
         limit,
         offset,
@@ -125,17 +196,44 @@ pub async fn search(
 
 #[derive(Serialize)]
 pub struct SearchResponse {
-    pub results: Vec<crate::engine::MemoryResult>,
+    pub coverage: crate::engine::coverage::SearchCoverage,
+    pub results: RetrievalResults,
     pub total: usize,
     pub limit: usize,
     pub offset: usize,
+}
+
+/// GET query form complements the existing POST JSON search.
+pub async fn search_get(
+    state: State<Arc<AppState>>,
+    Query(req): Query<SearchRequest>,
+) -> Result<Json<SearchResponse>, ApiError> {
+    search(state, Json(req)).await
+}
+
+#[derive(Deserialize)]
+pub struct BatchGetRequest {
+    pub ids: Vec<String>,
+}
+
+pub async fn batch_get(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BatchGetRequest>,
+) -> Result<Json<BatchGetResult>, ApiError> {
+    validate_batch_ids(&req.ids).map_err(|message| ApiError::BadRequest(message.into()))?;
+    Ok(Json(state.engine.batch_get(&req.ids).await?))
 }
 
 pub async fn get(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::storage::qdrant::MemoryPoint>, crate::api::error::ApiError> {
-    let memory = state.engine.get_memory(&id).await?;
+    let memory = state
+        .engine
+        .store()
+        .get_memory(&id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(id))?;
     Ok(Json(memory))
 }
 
@@ -165,7 +263,7 @@ pub async fn recall(
     let total = all_results.len();
     let results: Vec<_> = all_results.into_iter().skip(offset).take(limit).collect();
     Ok(Json(RecallResponse {
-        results,
+        results: RetrievalResults::new(results, params.compact),
         total,
         limit,
         offset,
@@ -174,7 +272,7 @@ pub async fn recall(
 
 #[derive(Serialize)]
 pub struct RecallResponse {
-    pub results: Vec<crate::engine::MemoryResult>,
+    pub results: RetrievalResults,
     pub total: usize,
     pub limit: usize,
     pub offset: usize,
@@ -207,6 +305,8 @@ pub struct TagSuggestion {
 
 #[derive(Deserialize)]
 pub struct RecallParams {
+    #[serde(default)]
+    pub compact: bool,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub realm: Option<String>,
@@ -478,4 +578,11 @@ pub struct UpvoteByContentRequest {
     /// Minimum cosine similarity (0-1, default 0.7) required for the top match.
     /// 404 returned if nothing clears this bar.
     pub min_score: Option<f32>,
+}
+
+pub async fn timeline(
+    State(state): State<Arc<AppState>>,
+    Query(request): Query<crate::engine::timeline::TimelineRequest>,
+) -> Result<Json<crate::engine::timeline::TimelineResponse>, ApiError> {
+    Ok(Json(state.engine.timeline_request(request).await?))
 }

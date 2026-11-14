@@ -79,6 +79,46 @@ _CRON_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Hermes prepends this hint to every scheduled cron prompt. Searched (not
+# anchored) because skill-loading jobs can put skill text ahead of it.
+_CRON_HINT_RE = re.compile(
+    r"\[IMPORTANT:\s*You\s+are\s+running\s+as\s+a\s+scheduled\s+cron\s+job",
+    re.IGNORECASE,
+)
+# Silence tokens Hermes' cron lane honours (gateway.response_filters).
+_CRON_SILENCE_TOKENS = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"})
+_CRON_FAILURE_TOKEN = "[CRON_FAILURE]"
+_CRON_FINDING_MAX_CHARS = 2000
+
+
+def _is_cron_turn(user_content: str, session_id: str = "") -> bool:
+    """True when the turn is a scheduled cron run rather than a user message."""
+    if session_id and session_id.startswith("cron_"):
+        return True
+    return bool(user_content and _CRON_HINT_RE.search(user_content))
+
+
+def _cron_finding(assistant_content: str) -> Optional[str]:
+    """Return the cron run's reportable output, or None when there is nothing
+    worth remembering.
+
+    Mirrors Hermes' autonomous-lane silence rule: a silence token as the whole
+    response, its first line, or its last line (or a response opening with the
+    bracketed ``[SILENT]``) means "nothing new". ``[CRON_FAILURE]`` runs are
+    about the job itself, not a finding, so they are dropped too.
+    """
+    text = (assistant_content or "").strip()
+    if not text:
+        return None
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if text.upper().startswith("[SILENT]"):
+        return None
+    if any(c.upper() in _CRON_SILENCE_TOKENS for c in (text, lines[0], lines[-1])):
+        return None
+    if lines[0] == _CRON_FAILURE_TOKEN:
+        return None
+    return text[:_CRON_FINDING_MAX_CHARS]
+
 # Feature 2: memory-type classifiers
 # Decision/decision-verb pattern (kept conservative — anchored on whole words,
 # excludes the "I decided to ask about X" non-load-bearing sense)
@@ -270,14 +310,22 @@ class _Client:
             raise RuntimeError(f"memex8 {method} {path} failed ({resp.status_code}): {msg or payload}")
         return payload
 
-    def search(self, query: str, top_k: int = 8, realm: Optional[str] = None, min_score: float = 0.3, *, timeout: Optional[float] = None) -> dict:
+    def search(self, query: str, top_k: int = 8, realm: Optional[str] = None, min_score: float = 0.3, compact: bool = False, tags: Optional[list] = None, visibility: Optional[str] = None, *, timeout: Optional[float] = None) -> dict:
         body = {"query": query, "limit": top_k, "min_score": min_score}
+        if tags is not None:
+            body["tags"] = tags
+        if visibility is not None:
+            body["visibility"] = visibility
+        if compact:
+            body["compact"] = True
         if realm:
             body["realm"] = realm
         return self.request("POST", "/api/v1/memories/search", json_body=body, timeout=_DEFAULT_SEARCH_TIMEOUT if timeout is None else timeout)
 
-    def recall(self, top_k: int = 8, realm: str = None) -> dict:
+    def recall(self, top_k: int = 8, realm: str = None, compact: bool = False) -> dict:
         params = {"limit": top_k}
+        if compact:
+            params["compact"] = "true"
         if realm:
             params["realm"] = realm
         return self.request("GET", "/api/v1/memories/recall", params=params)
@@ -290,6 +338,7 @@ class _Client:
         source: str = None,
         memory_type: str = None,
         visibility: str = None,
+        certified: bool = False,
     ) -> dict:
         """Store a memory. Pass ``visibility="public"`` to make it
         eligible for sharing via the Hermes-A2A bridge; the default
@@ -297,7 +346,11 @@ class _Client:
         forgetful caller can never accidentally mark a memory
         shareable.
         """
+        if not isinstance(certified, bool):
+            raise ValueError("certified must be a boolean")
         body = {"content": content}
+        if certified:
+            body["certified"] = True
         if realm_hint:
             body["realm_hint"] = realm_hint
         if tags:
@@ -313,8 +366,57 @@ class _Client:
             body["visibility"] = visibility
         return self.request("POST", "/api/v1/memories", json_body=body)
 
+    def timeline(self, **params) -> dict:
+        return self.request("GET", "/api/v1/memories/timeline",
+                            params={k: v for k, v in params.items() if v is not None})
+
+    def batch_get(self, ids: list) -> dict:
+        return self.request("POST", "/api/v1/memories/batch-get", json_body={"ids": ids})
+
+    def restore_duplicate(self, operation_id: str) -> dict:
+        return self.request("POST", f"/api/v1/dedup/{operation_id}/restore")
+
+    def unconsolidate(self, memory_id: str) -> dict:
+        return self.request("POST", f"/api/v1/memories/{memory_id}/unconsolidate")
+
+    def certify(self, memory_id: str, revoke: bool = False, by: str = None, note: str = None) -> dict:
+        if not isinstance(revoke, bool):
+            raise ValueError("revoke must be a boolean")
+        if revoke:
+            return self.request("DELETE", f"/api/v1/memories/{memory_id}/certify")
+        body = {}
+        if by is not None:
+            body["by"] = by
+        if note is not None:
+            body["note"] = note
+        return self.request("POST", f"/api/v1/memories/{memory_id}/certify", json_body=body)
+
     def delete(self, memory_id: str) -> dict:
         return self.request("DELETE", f"/api/v1/memories/{memory_id}")
+
+    # ---- dreams (a dream is not a memory; these are separate endpoints) ----
+
+    def dreams_pending(self) -> dict:
+        """The newest pending dream in full, plus how many are waiting."""
+        try:
+            listing = self.request("GET", "/api/v1/dreams", params={"status": "pending", "limit": 5})
+        except RuntimeError as e:
+            if "(404)" in str(e):
+                return {"error": "This memex8 server has no dreams API; upgrade memex8 to a version with dreams."}
+            raise
+        dreams = listing.get("dreams") or []
+        if not dreams:
+            return {"pending": 0, "dream": None}
+        full = self.request("GET", f"/api/v1/dreams/{dreams[0]['id']}")
+        return {"pending": listing.get("pending", len(dreams)), "dream": full}
+
+    def dream_keep(self, dream_id: str, remember: bool = False) -> dict:
+        if not isinstance(remember, bool):
+            raise ValueError("remember must be a boolean")
+        return self.request("POST", f"/api/v1/dreams/{dream_id}/keep", json_body={"remember": remember})
+
+    def dream_discard(self, dream_id: str) -> dict:
+        return self.request("DELETE", f"/api/v1/dreams/{dream_id}")
 
     def get_memory(self, memory_id: str) -> dict:
         return self.request("GET", f"/api/v1/memories/{memory_id}")
@@ -388,17 +490,48 @@ class _Client:
 # Tool Schemas
 # ---------------------------------------------------------------------------
 
+def _coverage_first_line(coverage: dict) -> str:
+    best = coverage.get("best_score")
+    best = f"{best:.2f}" if isinstance(best, (int, float)) else "null"
+    realms = ", ".join(str(r).replace("\n", " ").replace("\r", " ") for r in coverage.get("suggested_realms", [])) or "none"
+    return (f"coverage={coverage.get('level', 'none')} best={best} "
+            f"results_above_min={coverage.get('results_above_min', 0)} try realms: {realms} (retrieval heuristic)")
+
+
+TIMELINE_SCHEMA = {
+    "name": "memex8_timeline",
+    "description": "Chronological compact neighbors around exactly one id, query, or RFC3339 at timestamp. Includes ID/query anchor. Time mode has no synthetic row. score=0; truncated=true indicates the 10,000-row scan budget. Use memex8_get for full bodies.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "format": "uuid"},
+            "query": {"type": "string", "minLength": 1},
+            "at": {"type": "string", "format": "date-time"},
+            "before": {"type": "integer", "minimum": 0, "maximum": 50, "default": 5},
+            "after": {"type": "integer", "minimum": 0, "maximum": 50, "default": 5},
+            "realm": {"type": "string"},
+            "visibility": {"type": "string", "enum": ["private", "public"]},
+        },
+        "oneOf": [{"required": ["id"]}, {"required": ["query"]}, {"required": ["at"]}],
+    },
+}
+
 SEARCH_SCHEMA = {
     "name": "memex8_search",
     "description": (
         "Search your long-term memory by meaning. Finds relevant facts, "
         "project context, and user preferences stored across all past sessions. "
-        "Use this before making decisions to check existing knowledge."
+        "Returns a retrieval-strength coverage heuristic, not proof of answerability. "
+        "Use this before making decisions to check existing knowledge. "
+        "Use compact=true, then memex8_get(ids=[...]) for the ones that matter."
     ),
     "parameters": {
         "type": "object",
         "properties": {
+            "compact": {"type": "boolean", "default": False},
             "query": {"type": "string", "description": "What to search for."},
+            "tags": {"type": "array", "items": {"type": "string"}, "description": "Require all tags."},
+            "visibility": {"type": "string", "enum": ["private", "public"]},
             "top_k": {"type": "integer", "description": "Max results (default: 8, max: 20)."},
             "realm": {"type": "string", "description": "Filter to a specific realm (optional)."},
             "min_score": {"type": "number", "description": "Minimum similarity 0-1 (default: 0.3)."},
@@ -412,11 +545,13 @@ RECALL_SCHEMA = {
     "description": (
         "Get high-importance memories — a summary of what matters most. "
         "Good for session startup context or when you need a refresher on "
-        "the user's preferences and environment."
+        "the user's preferences and environment. "
+        "Use compact=true, then memex8_get(ids=[...]) for the ones that matter."
     ),
     "parameters": {
         "type": "object",
         "properties": {
+            "compact": {"type": "boolean", "default": False},
             "top_k": {"type": "integer", "description": "Max results (default: 8, max: 20)."},
             "realm": {"type": "string", "description": "Filter to a specific realm (optional)."},
         },
@@ -426,6 +561,7 @@ RECALL_SCHEMA = {
 REMEMBER_SCHEMA = {
     "name": "memex8_remember",
     "description": (
+        "Text inside <private>...</private> is removed before embedding/storage. "
         "Store a durable fact in long-term memory. Use when the user asks you "
         "to remember something, shares a preference, corrects you, or reveals "
         "important context about their environment or projects. Stored content "
@@ -438,6 +574,11 @@ REMEMBER_SCHEMA = {
                 "type": "string",
                 "description": "The fact, decision, or observation to remember. Be specific and concise."
             },
+            "certified": {
+                "type": "boolean", "default": False,
+                "description": "Protect from automatic rewriting and decay. Set true only when the user explicitly asks to remember or confirm this fact; ordinary capture stays uncertified."
+            },
+            "memory_type": {"type": "string", "description": "Semantic type, e.g. profile, preference, fact, event."},
             "realm_hint": {
                 "type": "string",
                 "description": "Suggested realm: 'personal', 'environment', 'projects', 'troubleshooting'. Auto-assigned if omitted."
@@ -457,6 +598,38 @@ REMEMBER_SCHEMA = {
             },
         },
         "required": ["content"],
+    },
+}
+
+RESTORE_DUPLICATE_SCHEMA = {
+    "name": "memex8_restore_duplicate",
+    "description": "Restore a removed duplicate from its slumber operation journal. Keeps the current winner and newer edits, applies 30-day dedup/consolidation cooldowns, and is safe to retry. Use an operation ID from the slumber report/log.",
+    "parameters": {"type": "object", "properties": {"operation_id": {"type": "string"}},
+                   "required": ["operation_id"]},
+}
+
+UNCONSOLIDATE_SCHEMA = {
+    "name": "memex8_unconsolidate",
+    "description": "Undo a consolidated summary from its durable archive. Restores missing originals, retains newer edits, and deletes the summary after restoration. Sources get a 30-day consolidation cooldown. Safe to retry a partial failure.",
+    "parameters": {
+        "type": "object",
+        "properties": {"memory_id": {"type": "string", "description": "Summary/journal ID"}},
+        "required": ["memory_id"],
+    },
+}
+
+CERTIFY_SCHEMA = {
+    "name": "memex8_certify",
+    "description": "Protect a user-confirmed memory from automatic rewriting, pruning, decay, and verification. Only certify with explicit user intent. Set revoke=true to resume normal lifecycle.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "memory_id": {"type": "string"},
+            "revoke": {"type": "boolean", "default": False},
+            "by": {"type": "string", "description": "Optional attribution label, not authenticated identity."},
+            "note": {"type": "string", "description": "Optional certification note."},
+        },
+        "required": ["memory_id"],
     },
 }
 
@@ -488,15 +661,38 @@ REALMS_SCHEMA = {
     },
 }
 
-GET_SCHEMA = {
-    "name": "memex8_get",
-    "description": "Retrieve a specific memory by its ID.",
+DREAMS_SCHEMA = {
+    "name": "memex8_dreams",
+    "description": (
+        "Review dreams memex8 generated from the user's memories. A dream is fiction woven from "
+        "memories, not a memory; it never appears in search. action=pending returns the newest "
+        "unreviewed dream (title, dream, waking note) and how many are waiting, or pending=0. Show "
+        "it to the user and ask whether to keep it. action=keep marks it kept (remember=true also "
+        "stores it as a hidden memory, only if the user asks). action=discard deletes it. Never "
+        "keep or discard without the user's answer."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
-            "memory_id": {"type": "string", "description": "Memory UUID to retrieve."},
+            "action": {"type": "string", "enum": ["pending", "keep", "discard"]},
+            "dream_id": {"type": "string", "description": "Required for keep and discard."},
+            "remember": {"type": "boolean", "default": False, "description": "keep only: also store the dream as a hidden memory."},
         },
-        "required": ["memory_id"],
+        "required": ["action"],
+    },
+}
+
+GET_SCHEMA = {
+    "name": "memex8_get",
+    "description": "Fetch full memories selected from compact search/recall. Pass memory_id (legacy id also accepted) or ids (1–50). Batch results preserve order and report unavailable IDs in not_found.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "memory_id": {"type": "string", "minLength": 1},
+            "id": {"type": "string", "minLength": 1, "description": "Alias for memory_id."},
+            "ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 50},
+        },
+        "oneOf": [{"required": ["memory_id"]}, {"required": ["id"]}, {"required": ["ids"]}],
     },
 }
 
@@ -1151,6 +1347,13 @@ class Memex8MemoryProvider(MemoryProvider):
         if not user_content or _TRIVIAL_RE.match(user_content.strip()):
             return
 
+        # Scheduled cron run: keep only what the job actually found. The
+        # prompt, [SILENT] runs and [CRON_FAILURE] runs are job mechanics,
+        # not knowledge, and previously made up ~70% of the corpus.
+        if _is_cron_turn(user_content, session_id or self._session_id):
+            self._store_cron_finding(assistant_content, session_id or self._session_id)
+            return
+
         # Skip auto-generated cron / A2A / agent-internal messages. These
         # look like user input to the plugin but aren't — storing them
         # produces hundreds of near-identical "summary of cron run"
@@ -1205,6 +1408,39 @@ class Memex8MemoryProvider(MemoryProvider):
         )
         self._sync_thread.start()
 
+    def _store_cron_finding(self, assistant_content: str, session_id: str = "") -> None:
+        """Store a cron run's reportable output (never the prompt) as one memory."""
+        finding = _cron_finding(assistant_content)
+        if finding is None:
+            logger.debug("memex8 cron turn skipped (silent/failure/empty)")
+            return
+        job_id = ""
+        if session_id.startswith("cron_"):
+            # cron_<job_id>_<YYYYmmdd>_<HHMMSS>
+            job_id = session_id[len("cron_"):].rsplit("_", 2)[0]
+        tags = ["cron-finding", "auto-stored"]
+        if job_id:
+            tags.append(f"cron-job:{job_id}")
+
+        def _sync():
+            try:
+                self._get_client().store(
+                    finding,
+                    realm_hint="cron-findings",
+                    tags=tags,
+                    source="hermes-cron",
+                    memory_type="event",
+                )
+                self._record_success()
+            except Exception as e:
+                self._record_failure(str(e))
+                logger.debug("memex8 cron finding store failed: %s", e)
+
+        if self._sync_thread and self._sync_thread.is_alive():
+            self._sync_thread.join(timeout=5.0)
+        self._sync_thread = spawn_context_thread(_sync, name="memex8-cron-finding")
+        self._sync_thread.start()
+
     # -- Session end --
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
@@ -1217,6 +1453,17 @@ class Memex8MemoryProvider(MemoryProvider):
         with self._dedup_lock:
             self._injected_this_session = set()
         if not messages or self._is_breaker_open():
+            return
+
+        # Cron sessions: the finding (if any) was already stored by sync_turn.
+        # A session summary would just re-store the cron prompt.
+        if _is_cron_turn("", self._session_id) or any(
+            m.get("role") == "user"
+            and isinstance(m.get("content"), str)
+            and _CRON_HINT_RE.search(m["content"])
+            for m in messages
+        ):
+            logger.debug("memex8 session-end skipped (cron session)")
             return
 
         def _ingest():
@@ -1299,6 +1546,20 @@ class Memex8MemoryProvider(MemoryProvider):
         # fail-closed behavior — bypass the breaker so a single bad outage
         # doesn't silently trigger the rewrite.
         if self._is_breaker_open() and not require_checkpoint:
+            return ""
+
+        # Cron sessions aren't worth archiving (findings go through sync_turn).
+        # Only skip when the checkpoint is optional — skipping a required one
+        # would block compression.
+        if not require_checkpoint and (
+            _is_cron_turn("", self._session_id)
+            or any(
+                m.get("role") == "user"
+                and isinstance(m.get("content"), str)
+                and _CRON_HINT_RE.search(m["content"])
+                for m in messages
+            )
+        ):
             return ""
 
         # Build the durable summary we want to archive. Use the same shape as
@@ -1562,7 +1823,7 @@ class Memex8MemoryProvider(MemoryProvider):
     # -- Tools --
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [SEARCH_SCHEMA, RECALL_SCHEMA, REMEMBER_SCHEMA, FORGET_SCHEMA, REALMS_SCHEMA, GET_SCHEMA]
+        return [TIMELINE_SCHEMA, SEARCH_SCHEMA, RECALL_SCHEMA, REMEMBER_SCHEMA, CERTIFY_SCHEMA, UNCONSOLIDATE_SCHEMA, RESTORE_DUPLICATE_SCHEMA, FORGET_SCHEMA, REALMS_SCHEMA, GET_SCHEMA, DREAMS_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._is_breaker_open():
@@ -1579,13 +1840,33 @@ class Memex8MemoryProvider(MemoryProvider):
         try:
             result = self._dispatch(client, tool_name, args)
             self._record_success()
+            if tool_name == "memex8_search" and isinstance(result, dict) and isinstance(result.get("coverage"), dict):
+                return _coverage_first_line(result["coverage"]) + "\n" + json.dumps(result, ensure_ascii=False)
             return json.dumps(result, ensure_ascii=False)
         except Exception as e:
             self._record_failure(str(e))
             return tool_error(str(e))
 
     def _dispatch(self, client: _Client, tool_name: str, args: dict) -> Any:
+        if tool_name == "memex8_timeline":
+            if sum(args.get(k) is not None for k in ("id", "query", "at")) != 1:
+                return {"error": "Pass exactly one of id, query, or at"}
+            for key in ("before", "after"):
+                value = args.get(key, 5)
+                if type(value) is not int or not 0 <= value <= 50:
+                    return {"error": "before and after must be integers between 0 and 50"}
+            for key in ("id", "query", "at", "realm"):
+                if key in args and (not isinstance(args[key], str) or not args[key].strip()):
+                    return {"error": key + " must be a nonempty string"}
+            if "visibility" in args and args["visibility"] not in ("private", "public"):
+                return {"error": "visibility must be private or public"}
+            return client.timeline(**{k: args[k] for k in
+                ("id", "query", "at", "before", "after", "realm", "visibility") if k in args})
+
         if tool_name == "memex8_search":
+            compact = args.get("compact", False)
+            if not isinstance(compact, bool):
+                return {"error": "compact must be a boolean"}
             query = args.get("query", "")
             if not query:
                 return {"error": "query is required"}
@@ -1594,13 +1875,22 @@ class Memex8MemoryProvider(MemoryProvider):
                 top_k=min(int(args.get("top_k", _DEFAULT_SEARCH_TOP_K)), 20),
                 realm=args.get("realm"),
                 min_score=float(args.get("min_score", _DEFAULT_RECALL_MIN_SCORE)),
+                **({"compact": True} if compact else {}),
+                **({"tags": args["tags"]} if "tags" in args else {}),
+                **({"visibility": args["visibility"]} if "visibility" in args else {}),
             )
+            if isinstance(results, dict) and "coverage" in results:
+                return results
             return results.get("results", results) if isinstance(results, dict) else results
 
         if tool_name == "memex8_recall":
+            compact = args.get("compact", False)
+            if not isinstance(compact, bool):
+                return {"error": "compact must be a boolean"}
             results = client.recall(
                 top_k=min(int(args.get("top_k", _DEFAULT_RECALL_TOP_K)), 20),
                 realm=args.get("realm"),
+                **({"compact": True} if compact else {}),
             )
             return results.get("results", results) if isinstance(results, dict) else results
 
@@ -1612,11 +1902,45 @@ class Memex8MemoryProvider(MemoryProvider):
                 content,
                 realm_hint=args.get("realm_hint"),
                 source="hermes-tool",
+                memory_type=args.get("memory_type"),
+                certified=args.get("certified", False),
                 # Server treats None as "private"; pass through whatever
                 # the model sent (including "public") so the schema's
                 # enum constraint is the only gate.
                 visibility=args.get("visibility"),
             )
+
+        if tool_name == "memex8_restore_duplicate":
+            operation_id = args.get("operation_id", "")
+            if not operation_id:
+                return {"error": "operation_id is required"}
+            return client.restore_duplicate(operation_id)
+
+        if tool_name == "memex8_unconsolidate":
+            memory_id = args.get("memory_id", "")
+            if not memory_id:
+                return {"error": "memory_id is required"}
+            return client.unconsolidate(memory_id)
+
+        if tool_name == "memex8_certify":
+            memory_id = args.get("memory_id", "")
+            if not memory_id:
+                return {"error": "memory_id is required"}
+            return client.certify(memory_id, revoke=args.get("revoke", False),
+                                  by=args.get("by"), note=args.get("note"))
+
+        if tool_name == "memex8_dreams":
+            action = args.get("action")
+            if action == "pending":
+                return client.dreams_pending()
+            if action in ("keep", "discard"):
+                dream_id = args.get("dream_id", "")
+                if not dream_id:
+                    return {"error": f"dream_id is required for {action}"}
+                if action == "keep":
+                    return client.dream_keep(dream_id, remember=args.get("remember", False))
+                return client.dream_discard(dream_id)
+            return {"error": "action must be one of: pending, keep, discard"}
 
         if tool_name == "memex8_forget":
             memory_id = args.get("memory_id", "")
@@ -1625,12 +1949,27 @@ class Memex8MemoryProvider(MemoryProvider):
             return client.delete(memory_id)
 
         if tool_name == "memex8_realms":
-            return client.realms()
+            # The server drops centroids as of the realms-summary fix; strip
+            # them here too so an older server can't flood the context.
+            realms = client.realms()
+            if isinstance(realms, list):
+                realms = [
+                    {k: v for k, v in r.items() if k != "centroid"} if isinstance(r, dict) else r
+                    for r in realms
+                ]
+            return realms
 
         if tool_name == "memex8_get":
-            memory_id = args.get("memory_id", "")
-            if not memory_id:
-                return {"error": "memory_id is required"}
+            if sum(key in args for key in ("memory_id", "id", "ids")) != 1:
+                return {"error": "Pass exactly one of memory_id, id, or ids"}
+            if "ids" in args:
+                ids = args["ids"]
+                if not isinstance(ids, list) or not 1 <= len(ids) <= 50 or not all(isinstance(id_, str) for id_ in ids):
+                    return {"error": "ids must contain between 1 and 50 string memory IDs"}
+                return client.batch_get(ids)
+            memory_id = args.get("memory_id", args.get("id"))
+            if not isinstance(memory_id, str) or not memory_id:
+                return {"error": "memory_id must be a nonempty string"}
             return client.get_memory(memory_id)
 
         return {"error": f"Unknown tool: {tool_name}"}
