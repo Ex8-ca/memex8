@@ -474,6 +474,33 @@ impl std::error::Error for DreamError {}
 
 // ─────────────────────────────── LLM backend ──────────────────────────────
 
+/// The chat-completions request body for a backend.
+///
+/// OpenAI's current models (gpt-5 and later) reject `max_tokens` and any
+/// non-default `temperature`, and their hidden reasoning is billed against
+/// `max_completion_tokens`, so the budget is generous. A local llama-server takes
+/// `max_tokens` and is told not to think: a dream doesn't need it, and a reasoning
+/// model can otherwise burn minutes.
+pub fn request_body(backend: &str, system: &str, user: &str, model: &str) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    });
+    if backend == "local" {
+        body["max_tokens"] = serde_json::json!(2500);
+        body["temperature"] = serde_json::json!(1.0);
+        body["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
+    } else {
+        body["max_completion_tokens"] = serde_json::json!(6000);
+    }
+    if !model.is_empty() {
+        body["model"] = serde_json::json!(model);
+    }
+    body
+}
+
 /// One chat completion against the backend chosen for consolidation
 /// (`slumber.consolidation.backend`: "openai" or "local"), with `dream.model`
 /// overriding the model. Returns (reply, model used).
@@ -491,14 +518,6 @@ pub async fn call_llm(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(240))
         .build()?;
-    let mut body = serde_json::json!({
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "max_tokens": 2500,
-        "temperature": 1.0,
-    });
     let (url, key, model) = match backend {
         "openai" => {
             let key = std::env::var("OPENAI_API_KEY")
@@ -514,8 +533,6 @@ pub async fn call_llm(
         "local" => {
             let base = std::env::var("LOCAL_LLM_URL")
                 .map_err(|_| DreamError::Backend("LOCAL_LLM_URL is not set".into()))?;
-            // Reasoning models burn minutes on hidden thinking; a dream doesn't need it.
-            body["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
             (
                 format!("{}/v1/chat/completions", base.trim_end_matches('/')),
                 std::env::var("LOCAL_LLM_API_KEY").ok(),
@@ -526,9 +543,7 @@ pub async fn call_llm(
             return Err(DreamError::Backend(format!("unknown backend '{other}'")).into());
         }
     };
-    if !model.is_empty() {
-        body["model"] = serde_json::json!(model);
-    }
+    let body = request_body(backend, system, user, &model);
     let mut req = client.post(url).json(&body);
     if let Some(k) = key {
         req = req.bearer_auth(k);
@@ -909,6 +924,30 @@ mod tests {
             Some("mem-123")
         );
         let _ = std::fs::remove_dir_all(s.dir());
+    }
+
+    // ---- LLM request shape ----
+
+    #[test]
+    fn openai_body_uses_max_completion_tokens_and_no_temperature() {
+        // gpt-5/6 models reject `max_tokens` and any non-default temperature, and spend
+        // hidden reasoning tokens from the same budget, so it must leave room.
+        let b = request_body("openai", "sys", "user", "gpt-6-sol");
+        assert_eq!(b["model"], "gpt-6-sol");
+        assert!(b.get("max_tokens").is_none());
+        assert!(b.get("temperature").is_none());
+        assert!(b["max_completion_tokens"].as_u64().unwrap() >= 4000);
+        assert_eq!(b["messages"][0]["role"], "system");
+        assert_eq!(b["messages"][1]["content"], "user");
+    }
+
+    #[test]
+    fn local_body_keeps_max_tokens_and_turns_thinking_off() {
+        let b = request_body("local", "sys", "user", "");
+        assert!(b.get("max_completion_tokens").is_none());
+        assert!(b["max_tokens"].as_u64().unwrap() > 0);
+        assert_eq!(b["chat_template_kwargs"]["enable_thinking"], false);
+        assert!(b.get("model").is_none(), "no model name means none is sent");
     }
 
     // ---- parsing ----
