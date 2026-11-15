@@ -208,7 +208,7 @@ impl Engine {
         let anchor_id = anchor_memory.as_ref().map(|m| m.id.clone());
         let mut budget = Budget::default();
         let bucket = if before + after > 0 {
-            self.timeline_equal(time, realm, visibility, &mut budget)
+            self.timeline_equal(time, realm, visibility, &erased, &mut budget)
                 .await?
         } else {
             vec![]
@@ -237,6 +237,7 @@ impl Engine {
                     before - older.len(),
                     realm,
                     visibility,
+                    &erased,
                     &mut budget,
                 )
                 .await?,
@@ -250,6 +251,7 @@ impl Engine {
                     after - newer.len(),
                     realm,
                     visibility,
+                    &erased,
                     &mut budget,
                 )
                 .await?,
@@ -263,7 +265,6 @@ impl Engine {
         selected.extend(ordered(newer).into_iter().take(after));
         let results = ordered(selected)
             .into_iter()
-            .filter(|m| !erased.contains(&m.id))
             .map(|mut m| {
                 m.ingested_at = key(&m)
                     .unwrap()
@@ -286,6 +287,7 @@ impl Engine {
         time: DateTime<Utc>,
         realm: Option<&str>,
         visibility: Option<&str>,
+        erased: &std::collections::HashSet<String>,
         budget: &mut Budget,
     ) -> anyhow::Result<Vec<MemoryPoint>> {
         let mut rows = Vec::new();
@@ -307,7 +309,7 @@ impl Engine {
                 )
                 .await?;
             budget.scanned += page.len();
-            rows.extend(page);
+            rows.extend(page.into_iter().filter(|m| !erased.contains(&m.id)));
             offset = next;
             if offset.is_none() {
                 break;
@@ -323,6 +325,7 @@ impl Engine {
         count: usize,
         realm: Option<&str>,
         visibility: Option<&str>,
+        erased: &std::collections::HashSet<String>,
         budget: &mut Budget,
     ) -> anyhow::Result<Vec<MemoryPoint>> {
         if count == 0 {
@@ -343,22 +346,35 @@ impl Engine {
                 ..Default::default()
             }
         };
-        let (mut rows, _) = self
-            .store
-            .timeline_page(
-                range,
-                Some(if before {
-                    Direction::Desc
-                } else {
-                    Direction::Asc
-                }),
-                count.min(budget.remaining()),
-                None,
-                realm,
-                visibility,
-            )
-            .await?;
-        budget.scanned += rows.len();
+        let mut rows = Vec::new();
+        let mut offset = None;
+        loop {
+            if budget.remaining() == 0 {
+                budget.truncated = true;
+                break;
+            }
+            let (page, next) = self
+                .store
+                .timeline_page(
+                    range.clone(),
+                    Some(if before {
+                        Direction::Desc
+                    } else {
+                        Direction::Asc
+                    }),
+                    count.max(PAGE_SIZE).min(budget.remaining()),
+                    offset,
+                    realm,
+                    visibility,
+                )
+                .await?;
+            budget.scanned += page.len();
+            rows.extend(page.into_iter().filter(|m| !erased.contains(&m.id)));
+            offset = next;
+            if rows.len() >= count || offset.is_none() {
+                break;
+            }
+        }
         if let Some(boundary) = rows.iter().filter_map(key).map(|k| k.0).reduce(|a, b| {
             if before {
                 a.min(b)
@@ -369,7 +385,7 @@ impl Engine {
             // Ordered scroll can cut a timestamp tie arbitrarily. Read its complete
             // bucket with ID pagination before choosing the deterministic cutoff.
             rows.extend(
-                self.timeline_equal(boundary, realm, visibility, budget)
+                self.timeline_equal(boundary, realm, visibility, erased, budget)
                     .await?,
             );
         }

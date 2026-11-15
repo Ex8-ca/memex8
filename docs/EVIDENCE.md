@@ -38,7 +38,7 @@ Legacy create operations without `evidence` remain unchanged. Capture is disable
 
 Until safe lifecycle support exists:
 
-- Evidence-linked memory edits and deletion are refused. Do not use this feature for information that must be erasable yet.
+- Evidence-linked memory edits are refused; explicit memory DELETE now creates a durable erasure intent and removes the active source/projection. It is not physical erasure of historical backups, WAL, or copied responses.
 - Slumber is refused when evidence is enabled or its ledger has records.
 - Generic logical export/import remains refused. Paired logical backup/restore is now supported under the stopped-writer and empty-target restrictions in [the recovery checkpoint](EVIDENCE-RECOVERY-CHECKPOINT.md). A schema-1 paired archive with evidence rows is **refused by default**: it predates erasure intents and may restore evidence subsequently deleted. For an exceptional isolated recovery onto a fresh empty target, `memex8 restore <archive> --acknowledge-legacy-evidence-resurrection` explicitly accepts that risk; `--force` only skips the existing-memory prompt and does not bypass this gate. Empty schema-1 evidence ledgers and archives without evidence remain compatible. An opt-in restore does not reconcile later erasures and must not be treated as safe production recovery.
 - A Qdrant copy without the matching SQLite ledger is not a complete evidence backup.
@@ -46,6 +46,12 @@ Until safe lifecycle support exists:
 Stopped-writer paired volume backups remain an option, with SQLite inside the archived writable mount and no external writers. The new paired logical recovery path is independently tested locally, but a production paired-volume restore drill has **not** been completed.
 
 The replay barrier uses a randomly generated 256-bit HMAC secret stored in `evidence.replay-key` beside `evidence.sqlite3` (0600 on Unix), not inside SQLite. Keep both together in volume backups; paired logical archives include both. Losing the key for a version-3 ledger prevents opening it, even if its intents are currently empty. Do not create a replacement key: previous erased-key replay checks would be invalid. Version-2 ledgers with unkeyed SHA256 erasure intents are refused rather than migrated; recover from a pre-erasure backup instead. Archives with version-3 evidence but no key are refused before restore writes. Treat paired archives as sensitive secrets and restrict their access and retention. Standalone `EvidenceStore::snapshot` snapshots only SQLite; its caller must copy the matching key before reopening the snapshot.
+
+## Read/erase linearization boundary
+
+For REST memory GETs, the shared maintenance guard now spans handler execution **and Axum response construction**, including `Json` serialization. Evidence DELETE takes the exclusive guard before committing the durable SQLite intent. Thus a response already fetched before DELETE can be constructed first; DELETE cannot complete before that construction. A read starting after the intent cannot include the erased memory. The guard is released before socket delivery: an already-constructed response may arrive at a slow client *after* DELETE. This is snapshot/response-construction ordering, **not** a promise to retract bytes already queued, sent, cached, or copied. Do not use DELETE completion as a network-delivery revocation barrier.
+
+MCP stdio serializes calls and writes on one request loop. MCP-over-SSE queues serialized tool results for an independently paced SSE stream; it likewise can deliver a pre-erase snapshot later. The engine's read guards protect retrieval through value construction; transport queues do not extend that boundary. Direct Qdrant/SQLite access and independent server processes are outside this in-process guard; keep a single writer and a matched ledger. Timeline filters pending intents while scanning (before before/after quotas); its bounded scan can still mark `truncated` when erased rows consume the work limit. Graph traversal/neighbors and the graph-search fallback filter pending intents, but graph statistics are aggregate historical edge counts, not evidence-bearing reads.
 
 ## Not implemented
 

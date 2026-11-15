@@ -1525,12 +1525,15 @@ impl Engine {
     ) -> anyhow::Result<Vec<serde_json::Value>> {
         // TODO: implement knowledge graph traversal
         // For now, fall back to semantic search and wrap results
+        let _read = self.store.maintenance_read_guard().await;
+        let erased = self.erased_ids()?;
         let embedder = self.make_embedder()?;
         let query_vector = embedder.embed(entity).await?;
         let results = self.store.search(&query_vector, 10, 0.3, None).await?;
 
         let output: Vec<serde_json::Value> = results
             .iter()
+            .filter(|r| !erased.contains(&r.payload.id))
             .map(|r| {
                 serde_json::json!({
                     "entity": r.payload.heading.as_ref().unwrap_or(&String::new()),

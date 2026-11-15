@@ -979,6 +979,85 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         400
     );
     // A legacy memory has no ledger row: use a new evidence capture for the crash fixture.
+    // Deterministic ordering: fetch -> writer queued -> response construction -> erase.
+    let race_id = engine
+        .store_with_evidence(
+            "publication race",
+            vec![],
+            None,
+            None,
+            None,
+            Some("publication-race"),
+            &serde_json::from_value(request["evidence"].clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+    let fetched = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let race_engine = engine.clone();
+    let race_fetched = fetched.clone();
+    let race_release = release.clone();
+    let route_id = race_id.clone();
+    let race_route = axum::Router::new()
+        .route(
+            "/race",
+            axum::routing::get(move || {
+                let engine = race_engine.clone();
+                let fetched = race_fetched.clone();
+                let release = race_release.clone();
+                let id = route_id.clone();
+                async move {
+                    let memory = engine.get_memory(&id).await.unwrap();
+                    fetched.notify_one();
+                    release.notified().await;
+                    axum::Json(memory)
+                }
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(memex8::api::server::AppState {
+                engine: engine.clone(),
+                config: engine.config().clone(),
+            }),
+            memex8::api::server::memory_read_response_gate,
+        ));
+    let race_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let race_url = format!("http://{}/race", race_listener.local_addr().unwrap());
+    let race_server =
+        tokio::spawn(async move { axum::serve(race_listener, race_route).await.unwrap() });
+    let race_response = tokio::spawn({
+        let client = client.clone();
+        async move {
+            client
+                .get(race_url)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        }
+    });
+    fetched.notified().await;
+    let erase_engine = engine.clone();
+    let erase_id = race_id.clone();
+    let erase_started = Arc::new(tokio::sync::Notify::new());
+    let started = erase_started.clone();
+    let erase = tokio::spawn(async move {
+        started.notify_one();
+        erase_engine.delete_memory(&erase_id).await.unwrap()
+    });
+    erase_started.notified().await;
+    tokio::task::yield_now().await;
+    assert!(
+        !erase.is_finished(),
+        "erase passed a fetched but unpublished response"
+    );
+    release.notify_one();
+    assert!(race_response.await.unwrap().contains("publication race"));
+    erase.await.unwrap();
+    assert!(engine.get_memory(&race_id).await.is_err());
+    race_server.abort();
     let crash_request = json!({"content":"crash fixture unique phrase", "idempotency_key":"crash-fixture", "evidence":request["evidence"]});
     let crash: Value = client
         .post(format!("{base}/memories"))
@@ -1017,6 +1096,23 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
             &engine.config().turbovec.id_map_path,
         )
         .unwrap();
+    // Pending intent keeps Qdrant payload but must not leak into timeline or graph.
+    let neighbor = engine
+        .store_memory("graph neighbor", None, None, None, None, None)
+        .await
+        .unwrap();
+    engine
+        .store()
+        .store_graph_edge(&memex8::storage::qdrant::GraphEdge {
+            from_memory_id: crash_id.to_owned(),
+            to_memory_id: neighbor.clone(),
+            relation_type: "references".into(),
+            weight: 1.0,
+        })
+        .await
+        .unwrap();
+    let graph_before = engine.graph_traverse(&neighbor, 2).await.unwrap();
+    assert!(graph_before.iter().any(|r| r.memory_id == crash_id));
     // A read waiting behind the writer cannot observe a stale Qdrant point
     // once the durable intent is committed, even while deletion is delayed.
     let write = engine.store().maintenance_guard().await;
@@ -1028,6 +1124,62 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     drop(write);
     assert!(racing.await.unwrap().is_err());
     assert!(engine.store().get_memory(crash_id).await.unwrap().is_some());
+    assert!(engine
+        .timeline(
+            memex8::engine::timeline::Anchor::MemoryId(crash_id.to_owned()),
+            1,
+            1,
+            None,
+            None
+        )
+        .await
+        .is_err());
+    assert!(engine.graph_traverse(crash_id, 2).await.unwrap().is_empty());
+    assert!(engine
+        .graph_traverse(&neighbor, 2)
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.memory_id != crash_id
+            && r.path
+                .iter()
+                .all(|s| s.from_id != crash_id && s.to_id != crash_id)));
+    assert!(engine
+        .graph_neighbors(&neighbor)
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.from_id != crash_id && r.to_id != crash_id));
+    let anchor_time = chrono::DateTime::parse_from_rfc3339(&snapshot.memory.ingested_at)
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let around = engine
+        .timeline(
+            memex8::engine::timeline::Anchor::Time(anchor_time),
+            2,
+            2,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(around.results.iter().all(|r| r.id != crash_id));
+    let filled = engine
+        .timeline(
+            memex8::engine::timeline::Anchor::MemoryId(neighbor.clone()),
+            1,
+            0,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        filled.results.len(),
+        2,
+        "erased nearest neighbor must not consume before quota"
+    );
+    assert!(filled.results.iter().all(|r| r.id != crash_id));
     // Simulate a stalled/failed Qdrant delete while the serving engine still
     // holds its lexical cache. Pending intents must hide every projection.
     assert!(engine.get_memory(crash_id).await.is_err());

@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::engine::Engine;
-use axum::Router;
+use axum::{extract::State, http::Request, middleware::Next, response::Response, Router};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -8,6 +8,21 @@ use tower_http::trace::TraceLayer;
 pub struct AppState {
     pub engine: Arc<Engine>,
     pub config: AppConfig,
+}
+
+/// Serialize REST memory reads through response construction, not network delivery.
+/// Axum converts `Json` handler results to response bytes within `next.run`.
+/// A slow client can still receive previously constructed bytes after deletion.
+pub async fn memory_read_response_gate(
+    State(state): State<Arc<AppState>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if request.method() != axum::http::Method::GET {
+        return next.run(request).await;
+    }
+    let _read = state.engine.store().maintenance_read_guard().await;
+    next.run(request).await
 }
 
 pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()> {
@@ -66,10 +81,14 @@ pub async fn run_with_engine(
     // 401 "API key not configured" when no key is set, which is what
     // we want by default. `allow_no_api_key` strips the middleware for
     // local dev only.
+    let guarded_routes = api_routes().layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        memory_read_response_gate,
+    ));
     let api_router = if allow_no_api_key && !has_key {
-        api_routes()
+        guarded_routes
     } else {
-        api_routes().layer(axum::middleware::from_fn_with_state(
+        guarded_routes.layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::api::auth::auth_middleware,
         ))
