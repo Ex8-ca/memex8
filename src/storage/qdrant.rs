@@ -2022,14 +2022,27 @@ impl QdrantStore {
         .try_into()
         .unwrap_or_default();
 
+        // Gaps don't need real vectors, but the collection is created with a
+        // vector config, so a zero vector of the collection's dims keeps writes
+        // working (an empty vec is rejected: "expected dim: N, got 0"). Same
+        // approach as store_graph_edge.
+        let info = self.client.collection_info(GAPS).await?;
+        let dims = match info
+            .result
+            .and_then(|i| i.config)
+            .and_then(|c| c.params)
+            .and_then(|p| p.vectors_config)
+            .and_then(|v| v.config)
+        {
+            Some(qdrant_client::qdrant::vectors_config::Config::Params(p)) => p.size as usize,
+            _ => anyhow::bail!("unsupported gap vector configuration"),
+        };
+        let vector = vec![0.0f32; dims];
+
         self.client
             .upsert_points(UpsertPointsBuilder::new(
                 GAPS,
-                vec![PointStruct::new(
-                    gap.id.clone(),
-                    gap.vector.clone(),
-                    payload,
-                )],
+                vec![PointStruct::new(gap.id.clone(), vector, payload)],
             ))
             .await?;
         Ok(())
