@@ -358,6 +358,13 @@ impl EvidenceStore {
             |r| r.get(0),
         )?)
     }
+    /// Pending and completed intents are permanent read barriers.
+    pub fn erased_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare("SELECT memory_id FROM erasure_intents")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<std::collections::HashSet<_>>>()?)
+    }
     pub fn has_records(&self) -> Result<bool> {
         Ok(self
             .connection()?

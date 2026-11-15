@@ -991,6 +991,15 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .await
         .unwrap();
     let crash_id = crash["id"].as_str().unwrap();
+    let crash_source = engine
+        .store()
+        .get_memory(crash_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .evidence_refs[0]
+        .source_id
+        .clone();
     assert_ne!(crash_id, legacy_id);
     // Persist a stale TurboVec index containing the doomed point; startup must
     // still reconcile and searches must not return its Qdrant payload.
@@ -1008,8 +1017,97 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
             &engine.config().turbovec.id_map_path,
         )
         .unwrap();
+    // A read waiting behind the writer cannot observe a stale Qdrant point
+    // once the durable intent is committed, even while deletion is delayed.
+    let write = engine.store().maintenance_guard().await;
+    let racing_engine = engine.clone();
+    let racing_id = crash_id.to_owned();
+    let racing = tokio::spawn(async move { racing_engine.get_memory(&racing_id).await });
+    tokio::task::yield_now().await;
     ledger.begin_erase(crash_id).unwrap();
+    drop(write);
+    assert!(racing.await.unwrap().is_err());
     assert!(engine.store().get_memory(crash_id).await.unwrap().is_some());
+    // Simulate a stalled/failed Qdrant delete while the serving engine still
+    // holds its lexical cache. Pending intents must hide every projection.
+    assert!(engine.get_memory(crash_id).await.is_err());
+    assert!(engine
+        .read_evidence(crash_id, crash_source.as_str())
+        .await
+        .is_err());
+    assert!(engine
+        .batch_get(&[crash_id.to_owned()])
+        .await
+        .unwrap()
+        .memories
+        .is_empty());
+    assert!(engine
+        .list_memories(None, "ingested_at", true, None)
+        .await
+        .unwrap()
+        .iter()
+        .all(|m| m.id != crash_id));
+    assert!(engine
+        .recall(100, None)
+        .await
+        .unwrap()
+        .iter()
+        .all(|m| m.id != crash_id));
+    assert!(engine
+        .search("crash fixture unique phrase", None, None, 100, 0, 0.0)
+        .await
+        .unwrap()
+        .iter()
+        .all(|m| m.id != crash_id));
+    for path in [
+        format!("{base}/memories/{crash_id}"),
+        format!(
+            "{base}/memories/{crash_id}/evidence/{}",
+            crash_source.as_str()
+        ),
+    ] {
+        assert_eq!(
+            client
+                .get(path)
+                .bearer_auth("fixture-only")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
+    }
+    for (method, path, body) in [
+        ("GET", format!("{base}/memories"), None),
+        ("GET", format!("{base}/memories/recall?limit=100"), None),
+        (
+            "POST",
+            format!("{base}/memories/batch-get"),
+            Some(json!({"ids":[crash_id]})),
+        ),
+        (
+            "POST",
+            format!("{base}/memories/search"),
+            Some(json!({"query":"crash fixture unique phrase","min_score":0.0})),
+        ),
+    ] {
+        let mut request = client
+            .request(method.parse().unwrap(), &path)
+            .bearer_auth("fixture-only");
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await.unwrap();
+        assert!(response.status().is_success(), "{}", response.status());
+        let text = response.text().await.unwrap();
+        assert!(
+            !text.contains(crash_id)
+                || (path.ends_with("/batch-get")
+                    && text.contains("\"memories\":[]")
+                    && text.contains("\"not_found\"")),
+            "erased ID leaked via {method}: {text}"
+        );
+    }
     server.abort();
     let restarted = Engine::new(engine.config().clone()).await.unwrap();
     assert!(restarted

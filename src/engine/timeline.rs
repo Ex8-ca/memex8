@@ -164,9 +164,33 @@ impl Engine {
             visibility.is_none_or(|v| matches!(v, "private" | "public")),
             TimelineError::Invalid("visibility must be private or public")
         );
+        let anchor = match anchor {
+            Anchor::Query(query) => {
+                let vector = self.make_embedder()?.embed(&query).await?;
+                let hits = self
+                    .search_embedded(&query, realm, None, 1, 0, 0.3, visibility, &vector)
+                    .await?;
+                match hits.first() {
+                    Some(hit) => Anchor::MemoryId(hit.id.clone()),
+                    None => {
+                        return Ok(TimelineResponse {
+                            anchor_id: None,
+                            anchor_at: None,
+                            results: vec![],
+                            no_match: true,
+                            truncated: false,
+                        })
+                    }
+                }
+            }
+            other => other,
+        };
+        let _read = self.store.maintenance_read_guard().await;
+        let erased = self.erased_ids()?;
         let (anchor_memory, time) = match anchor {
             Anchor::Time(time) => (None, time),
             Anchor::MemoryId(id) => {
+                anyhow::ensure!(!erased.contains(&id), TimelineError::NotFound);
                 let memory = self
                     .store
                     .get_memory(&id)
@@ -179,32 +203,7 @@ impl Engine {
                 let time = key(&memory).ok_or(TimelineError::InvalidAnchorTime)?.0;
                 (Some(memory), time)
             }
-            Anchor::Query(query) => {
-                let vector = self.make_embedder()?.embed(&query).await?;
-                let hits = self
-                    .search_embedded(&query, realm, None, 1, 0, 0.3, visibility, &vector)
-                    .await?;
-                let Some(hit) = hits.first() else {
-                    return Ok(TimelineResponse {
-                        anchor_id: None,
-                        anchor_at: None,
-                        results: vec![],
-                        no_match: true,
-                        truncated: false,
-                    });
-                };
-                let memory = self
-                    .store
-                    .get_memory(&hit.id)
-                    .await?
-                    .filter(|m| {
-                        realm.is_none_or(|r| m.realm_name == r)
-                            && visibility.is_none_or(|v| m.visibility == v)
-                    })
-                    .ok_or(TimelineError::NotFound)?;
-                let time = key(&memory).ok_or(TimelineError::InvalidAnchorTime)?.0;
-                (Some(memory), time)
-            }
+            Anchor::Query(_) => unreachable!(),
         };
         let anchor_id = anchor_memory.as_ref().map(|m| m.id.clone());
         let mut budget = Budget::default();
@@ -264,6 +263,7 @@ impl Engine {
         selected.extend(ordered(newer).into_iter().take(after));
         let results = ordered(selected)
             .into_iter()
+            .filter(|m| !erased.contains(&m.id))
             .map(|mut m| {
                 m.ingested_at = key(&m)
                     .unwrap()

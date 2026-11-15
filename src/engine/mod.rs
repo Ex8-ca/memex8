@@ -782,6 +782,8 @@ impl Engine {
         visibility: Option<&str>,
         query_vector: &[f32],
     ) -> anyhow::Result<Vec<MemoryResult>> {
+        let _read = self.store.maintenance_read_guard().await;
+        let erased = self.erased_ids()?;
         let tv_guard = self.turbovec_index.read().await;
         let results = if let Some(tv) = tv_guard
             .as_ref()
@@ -870,7 +872,10 @@ impl Engine {
 
         // Kept-and-remembered dreams are real memories of type `dream`; keep them out of
         // every search unless the caller explicitly filters on the `dream` tag.
-        let results = dream::exclude_dream_memories(results, tags);
+        let results: Vec<_> = dream::exclude_dream_memories(results, tags)
+            .into_iter()
+            .filter(|(_, p)| !erased.contains(&p.id))
+            .collect();
 
         // Phase A.2: soft down-weight by verification status. Applies to ALL
         // retrieval paths above (TurboVec, Qdrant fallback, tag-filter).
@@ -978,6 +983,8 @@ impl Engine {
         &self,
         id: &str,
     ) -> anyhow::Result<crate::storage::qdrant::MemoryPoint> {
+        let _read = self.store.maintenance_read_guard().await;
+        anyhow::ensure!(!self.erased_ids()?.contains(id), "Memory not found: {}", id);
         self.store
             .get_memory(id)
             .await?
@@ -989,12 +996,15 @@ impl Engine {
         limit: usize,
         realm: Option<&str>,
     ) -> anyhow::Result<Vec<MemoryResult>> {
+        let _read = self.store.maintenance_read_guard().await;
+        let erased = self.erased_ids()?;
         // Scroll all memories and sort by importance × recency score
         let memories = self.store.scroll_all_memories().await?;
 
         let now = chrono::Utc::now().timestamp() as f64;
         let mut scored: Vec<_> = memories
             .into_iter()
+            .filter(|m| !erased.contains(&m.id))
             .filter(|m| realm.as_deref().map_or(true, |r| m.realm_name == r))
             .filter(|m| m.memory_type != dream::DREAM_TYPE)
             .map(|m| {
@@ -1080,6 +1090,8 @@ impl Engine {
         descending: bool,
         visibility: Option<&str>,
     ) -> anyhow::Result<Vec<crate::storage::qdrant::MemoryPoint>> {
+        let _read = self.store.maintenance_read_guard().await;
+        let erased = self.erased_ids()?;
         // Visibility filter applied server-side when set (faster than
         // post-scroll in-memory filtering on large stores).
         let all = match visibility {
@@ -1093,7 +1105,10 @@ impl Engine {
             None => all,
         };
 
-        let mut sorted = filtered;
+        let mut sorted: Vec<_> = filtered
+            .into_iter()
+            .filter(|m| !erased.contains(&m.id))
+            .collect();
         sort_memories(&mut sorted, sort, descending);
         Ok(sorted)
     }
@@ -1269,7 +1284,11 @@ impl Engine {
         let new_content = clean_content.as_str();
         let _guard = self.store.maintenance_guard().await;
         self.refuse_evidence_mutation(id).await?;
-        let mut existing = self.get_memory(id).await?;
+        let mut existing = self
+            .store
+            .get_memory(id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", id))?;
         if existing.is_certified() {
             return Err(crate::storage::qdrant::CertifiedMemoryError.into());
         }
@@ -1761,8 +1780,23 @@ impl Engine {
         memory_id: &str,
         depth: usize,
     ) -> anyhow::Result<Vec<graph::GraphTraversalResult>> {
+        let _read = self.store.maintenance_read_guard().await;
+        let erased = self.erased_ids()?;
+        if erased.contains(memory_id) {
+            return Ok(vec![]);
+        }
         let graph = graph::KnowledgeGraph::new(self.store.clone());
-        graph.search_graph(memory_id, depth).await
+        Ok(graph
+            .search_graph(memory_id, depth)
+            .await?
+            .into_iter()
+            .filter(|r| {
+                !erased.contains(&r.memory_id)
+                    && r.path
+                        .iter()
+                        .all(|s| !erased.contains(&s.from_id) && !erased.contains(&s.to_id))
+            })
+            .collect())
     }
 
     /// Get directly connected memories for a given memory.
@@ -1770,8 +1804,18 @@ impl Engine {
         &self,
         memory_id: &str,
     ) -> anyhow::Result<Vec<graph::Relationship>> {
+        let _read = self.store.maintenance_read_guard().await;
+        let erased = self.erased_ids()?;
+        if erased.contains(memory_id) {
+            return Ok(vec![]);
+        }
         let graph = graph::KnowledgeGraph::new(self.store.clone());
-        graph.get_neighbors(memory_id).await
+        Ok(graph
+            .get_neighbors(memory_id)
+            .await?
+            .into_iter()
+            .filter(|r| !erased.contains(&r.from_id) && !erased.contains(&r.to_id))
+            .collect())
     }
 
     /// Get statistics about the knowledge graph.

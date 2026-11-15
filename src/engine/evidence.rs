@@ -4,6 +4,11 @@ use crate::api::error::ApiError;
 use crate::storage::evidence::{CaptureRequest, EvidenceRef, EvidenceStore, SourceRecord};
 
 impl Engine {
+    pub(super) fn erased_ids(&self) -> anyhow::Result<std::collections::HashSet<String>> {
+        Ok(self
+            .evidence_store()?
+            .map_or(Ok(Default::default()), |s| s.erased_ids())?)
+    }
     pub(super) fn evidence_path(&self) -> std::path::PathBuf {
         std::path::Path::new(&self.config.turbovec.index_path)
             .parent()
@@ -180,10 +185,14 @@ impl Engine {
         memory_id: &str,
         source_id: &str,
     ) -> Result<SourceRecord, ApiError> {
+        let _read = self.store.maintenance_read_guard().await;
         if uuid::Uuid::parse_str(memory_id).is_err() || uuid::Uuid::parse_str(source_id).is_err() {
             return Err(ApiError::BadRequest("expected UUID identifiers".into()));
         }
         let not_found = || ApiError::NotFound("evidence".into());
+        if self.erased_ids()?.contains(memory_id) {
+            return Err(not_found());
+        }
         let memory = self
             .store
             .get_memory(memory_id)

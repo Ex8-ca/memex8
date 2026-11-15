@@ -870,6 +870,9 @@ impl QdrantStore {
     pub async fn maintenance_guard(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
         self.certification_gate.write().await
     }
+    pub async fn maintenance_read_guard(&self) -> tokio::sync::RwLockReadGuard<'_, ()> {
+        self.certification_gate.read().await
+    }
 
     pub async fn set_certification(
         &self,

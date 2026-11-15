@@ -228,12 +228,13 @@ pub async fn get(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::storage::qdrant::MemoryPoint>, crate::api::error::ApiError> {
-    let memory = state
-        .engine
-        .store()
-        .get_memory(&id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(id))?;
+    let memory = state.engine.get_memory(&id).await.map_err(|e| {
+        if e.to_string().starts_with("Memory not found:") {
+            ApiError::NotFound(id)
+        } else {
+            ApiError::Internal(e)
+        }
+    })?;
     Ok(Json(memory))
 }
 
