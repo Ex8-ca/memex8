@@ -18,7 +18,14 @@ pub async fn memory_read_response_gate(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    if request.method() != axum::http::Method::GET {
+    // Axum strips the `/api/v1` prefix before the nested route middleware.
+    // Only these POST methods are reads; do not hold the guard across writers.
+    let retrieval_post = request.method() == axum::http::Method::POST
+        && matches!(
+            request.uri().path(),
+            "/memories/search" | "/memories/batch-get"
+        );
+    if request.method() != axum::http::Method::GET && !retrieval_post {
         return next.run(request).await;
     }
     let _read = state.engine.store().maintenance_read_guard().await;

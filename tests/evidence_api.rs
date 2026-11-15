@@ -1058,6 +1058,87 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     erase.await.unwrap();
     assert!(engine.get_memory(&race_id).await.is_err());
     race_server.abort();
+    // POST retrievals must keep the response gate until Json bytes exist too.
+    // Use the actual nested API paths so the middleware's path matching is exercised.
+    for path in ["/memories/search", "/memories/batch-get"] {
+        let race_id = engine
+            .store_with_evidence(
+                "post publication race",
+                vec![],
+                None,
+                None,
+                None,
+                Some(path),
+                &serde_json::from_value(request["evidence"].clone()).unwrap(),
+            )
+            .await
+            .unwrap();
+        let fetched = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let route_engine = engine.clone();
+        let route_id = race_id.clone();
+        let route_fetched = fetched.clone();
+        let route_release = release.clone();
+        let route = axum::routing::post(move || {
+            let engine = route_engine.clone();
+            let id = route_id.clone();
+            let fetched = route_fetched.clone();
+            let release = route_release.clone();
+            async move {
+                let memory = engine.get_memory(&id).await.unwrap();
+                fetched.notify_one();
+                release.notified().await;
+                axum::Json(memory)
+            }
+        });
+        let state = Arc::new(memex8::api::server::AppState {
+            engine: engine.clone(),
+            config: engine.config().clone(),
+        });
+        let app = axum::Router::new().nest(
+            "/api/v1",
+            axum::Router::new()
+                .route(path, route)
+                .layer(axum::middleware::from_fn_with_state(
+                    state,
+                    memex8::api::server::memory_read_response_gate,
+                )),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}{}",
+            listener.local_addr().unwrap(),
+            format!("/api/v1{path}")
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = tokio::spawn({
+            let client = client.clone();
+            async move { client.post(url).send().await.unwrap().text().await.unwrap() }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), fetched.notified())
+            .await
+            .expect("POST handler fetched memory");
+        let erase_engine = engine.clone();
+        let erase_id = race_id.clone();
+        let erase_started = Arc::new(tokio::sync::Notify::new());
+        let started = erase_started.clone();
+        let erase = tokio::spawn(async move {
+            started.notify_one();
+            erase_engine.delete_memory(&erase_id).await.unwrap()
+        });
+        erase_started.notified().await;
+        // A free writer finishes against local Qdrant; a gated one stays queued.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !erase.is_finished(),
+            "{path}: erase passed unpublished POST response"
+        );
+        release.notify_one();
+        assert!(response.await.unwrap().contains("post publication race"));
+        erase.await.unwrap();
+        assert!(engine.get_memory(&race_id).await.is_err());
+        server.abort();
+    }
     let crash_request = json!({"content":"crash fixture unique phrase", "idempotency_key":"crash-fixture", "evidence":request["evidence"]});
     let crash: Value = client
         .post(format!("{base}/memories"))
