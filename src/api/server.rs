@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::engine::Engine;
-use axum::Router;
+use axum::{extract::State, http::Request, middleware::Next, response::Response, Router};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -8,6 +8,45 @@ use tower_http::trace::TraceLayer;
 pub struct AppState {
     pub engine: Arc<Engine>,
     pub config: AppConfig,
+}
+
+/// POST endpoints that fetch memory content and must therefore keep the read
+/// gate across handler execution *and* response construction.
+///
+/// Writer tools stay out of this list. Some of them take the exclusive side of
+/// the same gate (certification, edit, deletion) and would deadlock behind the
+/// read scope; the rest take no guard but still do not need the read guarantee.
+/// `upvote-by-content` belongs here even though it writes: its upvote takes no
+/// exclusive maintenance guard, and it returns fetched `content_head`, so its
+/// search and response construction must be ordered against erasure. Its own
+/// search/get calls take nested read permits (the gate is re-entrant), so
+/// holding the read side here cannot deadlock it.
+pub fn is_gated_retrieval_post(path: &str) -> bool {
+    matches!(
+        path,
+        "/memories/search" | "/memories/batch-get" | "/memories/upvote-by-content"
+    )
+}
+
+/// Serialize REST memory reads through response construction, not network delivery.
+/// Axum converts `Json` handler results to response bytes within `next.run`.
+/// A slow client can still receive previously constructed bytes after deletion.
+/// `read_gated` is re-entrant, so the engine's nested read guards cannot queue
+/// behind the erasure this middleware is blocking.
+pub async fn memory_read_response_gate(
+    State(state): State<Arc<AppState>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    // Axum strips the `/api/v1` prefix before the nested route middleware.
+    // Only these POST methods are reads (or content-publishing reads); do not
+    // hold the guard across writers that take the exclusive side.
+    let retrieval_post = request.method() == axum::http::Method::POST
+        && is_gated_retrieval_post(request.uri().path());
+    if request.method() != axum::http::Method::GET && !retrieval_post {
+        return next.run(request).await;
+    }
+    state.engine.store().read_gated(next.run(request)).await
 }
 
 pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()> {
@@ -66,10 +105,14 @@ pub async fn run_with_engine(
     // 401 "API key not configured" when no key is set, which is what
     // we want by default. `allow_no_api_key` strips the middleware for
     // local dev only.
+    let guarded_routes = api_routes().layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        memory_read_response_gate,
+    ));
     let api_router = if allow_no_api_key && !has_key {
-        api_routes()
+        guarded_routes
     } else {
-        api_routes().layer(axum::middleware::from_fn_with_state(
+        guarded_routes.layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::api::auth::auth_middleware,
         ))

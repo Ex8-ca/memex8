@@ -9,7 +9,6 @@ use qdrant_client::Payload;
 use qdrant_client::Qdrant;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[path = "consolidation.rs"]
 mod consolidation;
@@ -212,7 +211,7 @@ pub struct GraphEdge {
 pub struct QdrantStore {
     client: Qdrant,
     /// Serialize certification with content replacement and local maintenance.
-    certification_gate: Arc<RwLock<()>>,
+    certification_gate: Arc<super::gate::MaintenanceGate>,
 }
 
 const MEMORIES: &str = "memories";
@@ -528,7 +527,7 @@ impl QdrantStore {
         let client = Qdrant::from_url(url).skip_compatibility_check().build()?;
         Ok(Self {
             client,
-            certification_gate: Arc::new(RwLock::new(())),
+            certification_gate: Arc::new(super::gate::MaintenanceGate::new()),
         })
     }
 
@@ -870,6 +869,20 @@ impl QdrantStore {
     pub async fn maintenance_guard(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
         self.certification_gate.write().await
     }
+    pub async fn maintenance_read_guard(&self) -> super::gate::ReadPermit<'_> {
+        self.certification_gate.read().await
+    }
+
+    /// Shared gate handle, for transport boundaries that must hold the read
+    /// side through response construction.
+    pub fn gate(&self) -> &super::gate::MaintenanceGate {
+        &self.certification_gate
+    }
+
+    /// Run `future` under the maintenance read gate (re-entrant for nested reads).
+    pub async fn read_gated<F: std::future::Future>(&self, future: F) -> F::Output {
+        self.certification_gate.read_gated(future).await
+    }
 
     pub async fn set_certification(
         &self,
@@ -1191,6 +1204,14 @@ impl QdrantStore {
 
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
         self.refuse_evidence_mutation(id).await?;
+        self.delete_projection_after_erasure_intent(id).await
+    }
+
+    /// Internal projection step; the engine must first persist an erasure intent.
+    pub(crate) async fn delete_projection_after_erasure_intent(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<()> {
         self.client
             .delete_points(
                 DeletePointsBuilder::new(MEMORIES)

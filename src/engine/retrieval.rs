@@ -90,7 +90,29 @@ pub fn validate_batch_ids(ids: &[String]) -> Result<(), &'static str> {
 impl Engine {
     pub async fn batch_get(&self, ids: &[String]) -> anyhow::Result<BatchGetResult> {
         validate_batch_ids(ids).map_err(anyhow::Error::msg)?;
-        self.store.get_memories(ids).await
+        let _read = self.store.maintenance_read_guard().await;
+        let erased = self.erased_ids()?;
+        let mut result = self.store.get_memories(ids).await?;
+        result.memories.retain(|m| !erased.contains(&m.id));
+        let mut present = std::collections::HashMap::<&str, usize>::new();
+        for m in &result.memories {
+            *present.entry(&m.id).or_default() += 1;
+        }
+        result.not_found = ids
+            .iter()
+            .filter(|id| {
+                let normalized = uuid::Uuid::parse_str(id).ok().map(|u| u.to_string());
+                match normalized.as_deref().and_then(|id| present.get_mut(id)) {
+                    Some(count) if *count > 0 => {
+                        *count -= 1;
+                        false
+                    }
+                    _ => true,
+                }
+            })
+            .cloned()
+            .collect();
+        Ok(result)
     }
 }
 

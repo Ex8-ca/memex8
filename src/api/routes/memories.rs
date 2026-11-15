@@ -228,12 +228,13 @@ pub async fn get(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::storage::qdrant::MemoryPoint>, crate::api::error::ApiError> {
-    let memory = state
-        .engine
-        .store()
-        .get_memory(&id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(id))?;
+    let memory = state.engine.get_memory(&id).await.map_err(|e| {
+        if e.to_string().starts_with("Memory not found:") {
+            ApiError::NotFound(id)
+        } else {
+            ApiError::Internal(e)
+        }
+    })?;
     Ok(Json(memory))
 }
 
@@ -241,11 +242,6 @@ pub async fn delete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, crate::api::error::ApiError> {
-    state
-        .engine
-        .refuse_evidence_mutation(&id)
-        .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     state.engine.delete_memory(&id).await?;
     Ok(Json(serde_json::json!({"deleted": id})))
 }
@@ -537,6 +533,12 @@ pub async fn archive(
 /// similarity score falls below `min_score` so accidental upvotes of unrelated
 /// memories are impossible. Returns the matched ID, score, content head,
 /// and the new upvote count so callers can confirm what got hit.
+///
+/// This handler both reads (`content_head`) and writes (the upvote), and its
+/// upvote takes no exclusive maintenance guard. It is therefore registered as a
+/// gated retrieval POST in [`crate::api::server::is_gated_retrieval_post`], so
+/// the read scope spans the search, this tombstone re-check, the write and the
+/// serialized response; its nested engine reads take re-entrant permits.
 pub async fn upvote_by_content(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpvoteByContentRequest>,
@@ -561,6 +563,16 @@ pub async fn upvote_by_content(
     }
 
     let id = top.id.clone();
+    // Re-check the durable tombstone before echoing content or writing. Search
+    // already filters erased IDs, but the barrier must not depend on one query
+    // path or on the transport wrapper being installed.
+    state.engine.refuse_erased(&id).await.map_err(|e| {
+        if e.to_string().starts_with("Memory not found:") {
+            ApiError::NotFound(id.clone())
+        } else {
+            ApiError::Internal(e)
+        }
+    })?;
     let before = top.upvotes;
     state.engine.upvote(&id).await?;
     Ok(Json(serde_json::json!({

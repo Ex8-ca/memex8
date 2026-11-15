@@ -30,11 +30,17 @@ fn digest(path: &Path) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(fs::read(path)?)))
 }
 pub(super) fn write_manifest(dir: &Path, evidence: bool) -> Result<()> {
+    let schema = if evidence {
+        Some(evidence_version(dir)?)
+    } else {
+        None
+    };
     let mut files = BTreeMap::new();
     for name in BASE
         .iter()
         .copied()
         .chain(evidence.then_some("evidence.sqlite3"))
+        .chain((schema == Some(3)).then_some("evidence.replay-key"))
     {
         files.insert(name.to_owned(), digest(&dir.join(name))?);
     }
@@ -47,11 +53,41 @@ pub(super) fn write_manifest(dir: &Path, evidence: bool) -> Result<()> {
                 "consolidation-dedup-v1".into(),
                 "timeline-payload-v1".into(),
             ],
-            evidence_schema: evidence.then_some(1),
+            evidence_schema: schema,
             files,
         })?,
     )?;
     Ok(())
+}
+/// Restore-only gate. A schema-1 ledger has no erasure history, so a populated
+/// archive may resurrect evidence erased after that archive was made.
+pub(super) fn validate_restore_archive(
+    dir: &Path,
+    memories: &[MemoryWithVector],
+    acknowledge_legacy_evidence_resurrection: bool,
+) -> Result<bool> {
+    let paired = validate_archive(dir, memories)?;
+    if paired && evidence_version(dir)? == 1 && !acknowledge_legacy_evidence_resurrection {
+        let conn = rusqlite::Connection::open_with_flags(
+            dir.join("evidence.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let has_sources: bool =
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM sources)", [], |r| r.get(0))?;
+        ensure!(
+            !has_sources && memories.iter().all(|m| m.memory.evidence_refs.is_empty()),
+            "legacy pre-erasure evidence archive can resurrect erased data; restore only with --acknowledge-legacy-evidence-resurrection on an isolated, fresh target after reviewing the risk"
+        );
+    }
+    Ok(paired)
+}
+
+fn evidence_version(dir: &Path) -> Result<u32> {
+    let conn = rusqlite::Connection::open_with_flags(
+        dir.join("evidence.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
 }
 pub(super) fn validate_archive(dir: &Path, memories: &[MemoryWithVector]) -> Result<bool> {
     let mut ids = std::collections::HashSet::new();
@@ -159,7 +195,7 @@ pub(super) fn validate_archive(dir: &Path, memories: &[MemoryWithVector]) -> Res
             }
         }
     }
-    let paired = if dir.join("manifest.json").exists() {
+    let (paired, manifest_schema) = if dir.join("manifest.json").exists() {
         let manifest: Manifest = serde_json::from_slice(&fs::read(dir.join("manifest.json"))?)?;
         ensure!(
             manifest.version == 1
@@ -172,7 +208,7 @@ pub(super) fn validate_archive(dir: &Path, memories: &[MemoryWithVector]) -> Res
             "unsupported backup capabilities/version"
         );
         ensure!(
-            manifest.evidence_schema.is_none() || manifest.evidence_schema == Some(1),
+            manifest.evidence_schema.is_none() || matches!(manifest.evidence_schema, Some(1 | 3)),
             "unsupported evidence schema"
         );
         let paired = manifest.evidence_schema.is_some();
@@ -180,19 +216,24 @@ pub(super) fn validate_archive(dir: &Path, memories: &[MemoryWithVector]) -> Res
             .iter()
             .copied()
             .chain(paired.then_some("evidence.sqlite3"))
+            .chain((manifest.evidence_schema == Some(3)).then_some("evidence.replay-key"))
             .map(|name| Ok((name.to_owned(), digest(&dir.join(name))?)))
             .collect::<Result<_>>()?;
         ensure!(
             manifest.files == required,
             "backup component integrity mismatch"
         );
-        paired
+        (paired, manifest.evidence_schema)
     } else {
-        false
+        (false, None)
     };
     ensure!(
         paired || !dir.join("evidence.sqlite3").exists(),
         "evidence database requires manifest"
+    );
+    ensure!(
+        paired || !dir.join("evidence.replay-key").exists(),
+        "orphan replay key in archive"
     );
     if !paired {
         ensure!(
@@ -205,10 +246,20 @@ pub(super) fn validate_archive(dir: &Path, memories: &[MemoryWithVector]) -> Res
         dir.join("evidence.sqlite3"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
+    let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    ensure!(matches!(version, 1 | 3), "unsupported evidence schema");
     ensure!(
-        conn.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))? == 1,
-        "unsupported evidence schema"
+        manifest_schema == Some(version),
+        "manifest evidence schema mismatch"
     );
+    if version == 3 {
+        crate::storage::evidence::read_replay_key(&dir.join("evidence.sqlite3"))?;
+    } else {
+        ensure!(
+            !dir.join("evidence.replay-key").exists(),
+            "unexpected replay key for legacy ledger"
+        );
+    }
     ensure!(
         conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))? == "ok",
         "evidence integrity check failed"
@@ -220,9 +271,40 @@ pub(super) fn validate_archive(dir: &Path, memories: &[MemoryWithVector]) -> Res
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     ensure!(
-        objects == vec![("table".into(), "sources".into())],
+        objects
+            == if version == 1 {
+                vec![("table".into(), "sources".into())]
+            } else {
+                vec![
+                    ("table".into(), "erasure_intents".into()),
+                    ("table".into(), "sources".into()),
+                ]
+            },
         "unsupported evidence schema objects"
     );
+    crate::storage::evidence::validate_schema(&conn, version)?;
+    if version == 3 {
+        let mut stmt =
+            conn.prepare("SELECT memory_id,source_id,key_digest,complete FROM erasure_intents")?;
+        for row in stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })? {
+            let (memory, source, digest, complete) = row?;
+            uuid::Uuid::parse_str(&memory)?;
+            uuid::Uuid::parse_str(&source)?;
+            ensure!(
+                digest.len() == 64
+                    && digest.bytes().all(|c| c.is_ascii_hexdigit())
+                    && matches!(complete, 0 | 1),
+                "invalid erasure intent"
+            );
+        }
+    }
     let columns: Vec<(String, String)> = conn
         .prepare("PRAGMA table_info(sources)")?
         .query_map([], |r| Ok((r.get(1)?, r.get(2)?)))?
@@ -253,6 +335,13 @@ pub(super) fn validate_archive(dir: &Path, memories: &[MemoryWithVector]) -> Res
     let mut records = HashMap::new();
     let mut memory_ids = std::collections::HashSet::new();
     let mut keys = std::collections::HashSet::new();
+    let replay_key = if version == 3 {
+        Some(crate::storage::evidence::read_replay_key(
+            &dir.join("evidence.sqlite3"),
+        )?)
+    } else {
+        None
+    };
     for row in rows {
         let (source, memory, key, request, record) = row?;
         let r: SourceRecord = serde_json::from_str(&record)?;
@@ -287,6 +376,20 @@ pub(super) fn validate_archive(dir: &Path, memories: &[MemoryWithVector]) -> Res
             records.insert(source, r).is_none() && memory_ids.insert(memory) && keys.insert(key),
             "duplicate evidence identity"
         );
+    }
+    if let Some(secret) = replay_key {
+        use hmac::{Hmac, Mac};
+        for key in &keys {
+            let mut mac = Hmac::<Sha256>::new_from_slice(&secret)?;
+            mac.update(key.as_bytes());
+            let digest = format!("{:x}", mac.finalize().into_bytes());
+            let collision: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM erasure_intents WHERE key_digest=?1)",
+                [&digest],
+                |r| r.get(0),
+            )?;
+            ensure!(!collision, "active source reuses erased key");
+        }
     }
     let mut ids = std::collections::HashSet::new();
     for snapshot in memories {

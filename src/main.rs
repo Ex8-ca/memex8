@@ -244,6 +244,9 @@ enum Commands {
         /// Skip confirmation
         #[arg(long)]
         force: bool,
+        /// Explicitly permit restoring pre-erasure evidence that may resurrect erased data
+        #[arg(long)]
+        acknowledge_legacy_evidence_resurrection: bool,
     },
 
     /// List available backups
@@ -403,43 +406,67 @@ async fn main() -> anyhow::Result<()> {
             min_score,
         } => {
             let engine = engine::Engine::new(config).await?;
-            let results = engine
-                .search(&query, realm.as_deref(), None, limit, 0, min_score)
+            // Hold the maintenance read gate through result construction so an
+            // erasure cannot commit between the fetch and this output string.
+            // Standard output delivery afterwards is not covered by the guard.
+            let output = engine
+                .store()
+                .read_gated(async {
+                    let results = engine
+                        .search(&query, realm.as_deref(), None, limit, 0, min_score)
+                        .await?;
+                    let mut output = String::new();
+                    for (i, result) in results.iter().enumerate() {
+                        output.push_str(&format!(
+                            "{}. [{}] {:.2} — {}\n",
+                            i + 1,
+                            result.realm_name,
+                            result.score,
+                            result
+                                .heading
+                                .as_deref()
+                                .unwrap_or(&result.content.chars().take(80).collect::<String>())
+                        ));
+                        output.push_str(&format!("   ID: {}\n\n", result.id));
+                    }
+                    output.push_str(&format!("{} result(s)\n", results.len()));
+                    anyhow::Ok(output)
+                })
                 .await?;
-            for (i, result) in results.iter().enumerate() {
-                println!(
-                    "{}. [{}] {:.2} — {}",
-                    i + 1,
-                    result.realm_name,
-                    result.score,
-                    result
-                        .heading
-                        .as_deref()
-                        .unwrap_or(&result.content.chars().take(80).collect::<String>())
-                );
-                println!("   ID: {}", result.id);
-                println!();
-            }
-            println!("{} result(s)", results.len());
+            print!("{output}");
         }
         Commands::Get { id } => {
             let engine = engine::Engine::new(config).await?;
-            let memory = engine.get_memory(&id).await?;
-            println!("{}", serde_json::to_string_pretty(&memory)?);
+            let output = engine
+                .store()
+                .read_gated(async {
+                    let memory = engine.get_memory(&id).await?;
+                    anyhow::Ok(serde_json::to_string_pretty(&memory)?)
+                })
+                .await?;
+            println!("{output}");
         }
         Commands::Recall { limit, realm } => {
             let engine = engine::Engine::new(config).await?;
-            let memories = engine.recall(limit, realm.as_deref()).await?;
-            for m in &memories {
-                println!(
-                    "• [{}] (importance: {:.2}) {}",
-                    m.realm_name,
-                    m.importance,
-                    m.heading
-                        .as_deref()
-                        .unwrap_or(&m.content.chars().take(80).collect::<String>())
-                );
-            }
+            let output = engine
+                .store()
+                .read_gated(async {
+                    let memories = engine.recall(limit, realm.as_deref()).await?;
+                    let mut output = String::new();
+                    for m in &memories {
+                        output.push_str(&format!(
+                            "• [{}] (importance: {:.2}) {}\n",
+                            m.realm_name,
+                            m.importance,
+                            m.heading
+                                .as_deref()
+                                .unwrap_or(&m.content.chars().take(80).collect::<String>())
+                        ));
+                    }
+                    anyhow::Ok(output)
+                })
+                .await?;
+            print!("{output}");
         }
         Commands::Realms { action } => {
             let engine = engine::Engine::new(config).await?;
@@ -808,9 +835,15 @@ async fn main() -> anyhow::Result<()> {
             let backup_path = engine.backup(path.as_deref()).await?;
             println!("📦 Backup created: {}", backup_path);
         }
-        Commands::Restore { path, force } => {
+        Commands::Restore {
+            path,
+            force,
+            acknowledge_legacy_evidence_resurrection,
+        } => {
             let engine = engine::Engine::new(config).await?;
-            let count = engine.restore(&path, force).await?;
+            let count = engine
+                .restore(&path, force, acknowledge_legacy_evidence_resurrection)
+                .await?;
             println!("📥 Restored {} items from: {}", count, path);
         }
         Commands::BackupList { dir } => {

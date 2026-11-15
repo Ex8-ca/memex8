@@ -227,6 +227,8 @@ impl Engine {
             dreams,
             dream_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
+        // Reconcile before loading any searchable index or exposing this engine.
+        engine.reconcile_pending_erasures().await?;
         if let Err(e) = engine.rebuild_lexical_index().await {
             tracing::warn!(
                 "Lexical index not built ({e}); search stays vector-only until the next rebuild"
@@ -780,6 +782,8 @@ impl Engine {
         visibility: Option<&str>,
         query_vector: &[f32],
     ) -> anyhow::Result<Vec<MemoryResult>> {
+        let _read = self.store.maintenance_read_guard().await;
+        let erased = self.erased_ids()?;
         let tv_guard = self.turbovec_index.read().await;
         let results = if let Some(tv) = tv_guard
             .as_ref()
@@ -868,7 +872,10 @@ impl Engine {
 
         // Kept-and-remembered dreams are real memories of type `dream`; keep them out of
         // every search unless the caller explicitly filters on the `dream` tag.
-        let results = dream::exclude_dream_memories(results, tags);
+        let results: Vec<_> = dream::exclude_dream_memories(results, tags)
+            .into_iter()
+            .filter(|(_, p)| !erased.contains(&p.id))
+            .collect();
 
         // Phase A.2: soft down-weight by verification status. Applies to ALL
         // retrieval paths above (TurboVec, Qdrant fallback, tag-filter).
@@ -976,10 +983,26 @@ impl Engine {
         &self,
         id: &str,
     ) -> anyhow::Result<crate::storage::qdrant::MemoryPoint> {
+        let _read = self.store.maintenance_read_guard().await;
+        anyhow::ensure!(!self.erased_ids()?.contains(id), "Memory not found: {}", id);
         self.store
             .get_memory(id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", id))
+    }
+
+    /// Fail if `id` has a pending or completed erasure intent.
+    ///
+    /// Erasure intents are permanent read barriers even before the projection
+    /// deletion finishes. Transport handlers call this after fetching content
+    /// and before publishing it, so a tombstoned memory can be neither echoed
+    /// nor upvoted even if the transport gate is bypassed. Takes the shared
+    /// maintenance guard itself, so it is safe standalone and nested inside a
+    /// transport read scope.
+    pub async fn refuse_erased(&self, id: &str) -> anyhow::Result<()> {
+        let _read = self.store.maintenance_read_guard().await;
+        anyhow::ensure!(!self.erased_ids()?.contains(id), "Memory not found: {}", id);
+        Ok(())
     }
 
     pub async fn recall(
@@ -987,12 +1010,15 @@ impl Engine {
         limit: usize,
         realm: Option<&str>,
     ) -> anyhow::Result<Vec<MemoryResult>> {
+        let _read = self.store.maintenance_read_guard().await;
+        let erased = self.erased_ids()?;
         // Scroll all memories and sort by importance × recency score
         let memories = self.store.scroll_all_memories().await?;
 
         let now = chrono::Utc::now().timestamp() as f64;
         let mut scored: Vec<_> = memories
             .into_iter()
+            .filter(|m| !erased.contains(&m.id))
             .filter(|m| realm.as_deref().map_or(true, |r| m.realm_name == r))
             .filter(|m| m.memory_type != dream::DREAM_TYPE)
             .map(|m| {
@@ -1078,6 +1104,8 @@ impl Engine {
         descending: bool,
         visibility: Option<&str>,
     ) -> anyhow::Result<Vec<crate::storage::qdrant::MemoryPoint>> {
+        let _read = self.store.maintenance_read_guard().await;
+        let erased = self.erased_ids()?;
         // Visibility filter applied server-side when set (faster than
         // post-scroll in-memory filtering on large stores).
         let all = match visibility {
@@ -1091,7 +1119,10 @@ impl Engine {
             None => all,
         };
 
-        let mut sorted = filtered;
+        let mut sorted: Vec<_> = filtered
+            .into_iter()
+            .filter(|m| !erased.contains(&m.id))
+            .collect();
         sort_memories(&mut sorted, sort, descending);
         Ok(sorted)
     }
@@ -1169,6 +1200,12 @@ impl Engine {
         Ok(())
     }
 
+    /// Bump a memory's upvote count and importance.
+    ///
+    /// Deliberately takes no exclusive maintenance guard: REST
+    /// `upvote-by-content` runs under the retrieval read gate and calls this, so
+    /// acquiring the write side here would deadlock that handler behind its own
+    /// read scope. It still fails closed for erased IDs via `get_memory`.
     pub async fn upvote(&self, id: &str) -> anyhow::Result<()> {
         let memory = self.get_memory(id).await?;
         let new_upvotes = memory.upvotes + 1;
@@ -1239,19 +1276,39 @@ impl Engine {
     }
 
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
-        self.refuse_evidence_mutation(id).await?;
+        anyhow::ensure!(
+            uuid::Uuid::parse_str(id).is_ok(),
+            "expected UUID memory identifier"
+        );
         let _guard = self.store.maintenance_guard().await;
+        if let Some(ledger) = self.evidence_store()? {
+            if ledger.begin_erase(id)?.is_some() {
+                self.store
+                    .delete_projection_after_erasure_intent(id)
+                    .await?;
+                ledger.finish_erase(id)?;
+                self.lexical.write().await.remove(id);
+                // TurboVec has no per-ID removal; never retain a stale candidate map.
+                *self.turbovec_index.write().await = None;
+                return Ok(());
+            }
+        }
         self.store.delete_memory(id).await?;
         self.lexical.write().await.remove(id);
+        *self.turbovec_index.write().await = None;
         Ok(())
     }
 
     pub async fn edit_memory(&self, id: &str, new_content: &str) -> anyhow::Result<()> {
-        self.refuse_evidence_mutation(id).await?;
         let clean_content = redaction::required(new_content)?;
         let new_content = clean_content.as_str();
         let _guard = self.store.maintenance_guard().await;
-        let mut existing = self.get_memory(id).await?;
+        self.refuse_evidence_mutation(id).await?;
+        let mut existing = self
+            .store
+            .get_memory(id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", id))?;
         if existing.is_certified() {
             return Err(crate::storage::qdrant::CertifiedMemoryError.into());
         }
@@ -1488,12 +1545,15 @@ impl Engine {
     ) -> anyhow::Result<Vec<serde_json::Value>> {
         // TODO: implement knowledge graph traversal
         // For now, fall back to semantic search and wrap results
+        let _read = self.store.maintenance_read_guard().await;
+        let erased = self.erased_ids()?;
         let embedder = self.make_embedder()?;
         let query_vector = embedder.embed(entity).await?;
         let results = self.store.search(&query_vector, 10, 0.3, None).await?;
 
         let output: Vec<serde_json::Value> = results
             .iter()
+            .filter(|r| !erased.contains(&r.payload.id))
             .map(|r| {
                 serde_json::json!({
                     "entity": r.payload.heading.as_ref().unwrap_or(&String::new()),
@@ -1743,8 +1803,23 @@ impl Engine {
         memory_id: &str,
         depth: usize,
     ) -> anyhow::Result<Vec<graph::GraphTraversalResult>> {
+        let _read = self.store.maintenance_read_guard().await;
+        let erased = self.erased_ids()?;
+        if erased.contains(memory_id) {
+            return Ok(vec![]);
+        }
         let graph = graph::KnowledgeGraph::new(self.store.clone());
-        graph.search_graph(memory_id, depth).await
+        Ok(graph
+            .search_graph(memory_id, depth)
+            .await?
+            .into_iter()
+            .filter(|r| {
+                !erased.contains(&r.memory_id)
+                    && r.path
+                        .iter()
+                        .all(|s| !erased.contains(&s.from_id) && !erased.contains(&s.to_id))
+            })
+            .collect())
     }
 
     /// Get directly connected memories for a given memory.
@@ -1752,8 +1827,18 @@ impl Engine {
         &self,
         memory_id: &str,
     ) -> anyhow::Result<Vec<graph::Relationship>> {
+        let _read = self.store.maintenance_read_guard().await;
+        let erased = self.erased_ids()?;
+        if erased.contains(memory_id) {
+            return Ok(vec![]);
+        }
         let graph = graph::KnowledgeGraph::new(self.store.clone());
-        graph.get_neighbors(memory_id).await
+        Ok(graph
+            .get_neighbors(memory_id)
+            .await?
+            .into_iter()
+            .filter(|r| !erased.contains(&r.from_id) && !erased.contains(&r.to_id))
+            .collect())
     }
 
     /// Get statistics about the knowledge graph.
@@ -1770,8 +1855,19 @@ impl Engine {
     }
 
     /// Restore memories, realms, and graph edges from a backup tarball.
-    pub async fn restore(&self, backup_path: &str, force: bool) -> anyhow::Result<usize> {
-        let n = backup::restore(self, backup_path, force).await?;
+    pub async fn restore(
+        &self,
+        backup_path: &str,
+        force: bool,
+        acknowledge_legacy_evidence_resurrection: bool,
+    ) -> anyhow::Result<usize> {
+        let n = backup::restore(
+            self,
+            backup_path,
+            force,
+            acknowledge_legacy_evidence_resurrection,
+        )
+        .await?;
         if let Err(e) = self.rebuild_lexical_index().await {
             tracing::warn!("Lexical index rebuild after restore failed: {e}");
         }

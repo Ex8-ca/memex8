@@ -190,12 +190,11 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     assert_eq!(
         client
             .delete(format!("{base}/memories/{id}"))
-            .bearer_auth("fixture-only")
             .send()
             .await
             .unwrap()
             .status(),
-        400
+        401
     );
     let pending_capture: memex8::storage::evidence::CaptureRequest =
         serde_json::from_value(request["evidence"].clone()).unwrap();
@@ -323,7 +322,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     output.into_inner().unwrap().finish().unwrap();
     assert_eq!(
         target
-            .restore(legacy_archive.to_str().unwrap(), true)
+            .restore(legacy_archive.to_str().unwrap(), true, false)
             .await
             .unwrap(),
         1
@@ -366,7 +365,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         }
         output.into_inner().unwrap().finish().unwrap();
         assert!(target
-            .restore(broken.to_str().unwrap(), true)
+            .restore(broken.to_str().unwrap(), true, false)
             .await
             .is_err());
         assert!(target
@@ -472,7 +471,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         output.into_inner().unwrap().finish().unwrap();
         assert!(
             target
-                .restore(broken.to_str().unwrap(), true)
+                .restore(broken.to_str().unwrap(), true, false)
                 .await
                 .is_err(),
             "{kind}"
@@ -536,7 +535,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     let failing = Engine::new(failure_config).await.unwrap();
     armed.store(true, std::sync::atomic::Ordering::SeqCst);
     let error = failing
-        .restore(&paired_backup, true)
+        .restore(&paired_backup, true, false)
         .await
         .unwrap_err()
         .to_string();
@@ -555,7 +554,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
             > 0
     );
     assert!(failing
-        .restore(&paired_backup, true)
+        .restore(&paired_backup, true, false)
         .await
         .unwrap_err()
         .to_string()
@@ -565,7 +564,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     for memory in target.store().scroll_all_memories().await.unwrap() {
         target.store().delete_memory(&memory.id).await.unwrap();
     }
-    assert!(target.restore(&paired_backup, true).await.unwrap() >= 2);
+    assert!(target.restore(&paired_backup, true, false).await.unwrap() >= 2);
     assert_eq!(target.store().get_all_graph_edges().await.unwrap().len(), 1);
     let restored_realms = target.store().list_realms().await.unwrap();
     assert_eq!(restored_realms.len(), expected_realms.len());
@@ -650,7 +649,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     assert_eq!(readback, evidence);
     target_server.abort();
     assert!(target
-        .restore(&paired_backup, true)
+        .restore(&paired_backup, true, false)
         .await
         .unwrap_err()
         .to_string()
@@ -662,7 +661,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .to_string()
         .contains("evidence"));
     assert!(engine
-        .restore("missing.tar.gz", true)
+        .restore("missing.tar.gz", true, false)
         .await
         .unwrap_err()
         .to_string()
@@ -893,6 +892,506 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .unwrap_err()
         .to_string()
         .contains("evidence"));
+    // Cross-store deletion: API auth, projection, source, replay and search paths.
+    assert_eq!(
+        client
+            .delete(format!("{base}/memories/{id}"))
+            .bearer_auth("fixture-only")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/memories/{id}"))
+            .bearer_auth("fixture-only")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    assert_eq!(
+        client
+            .get(&endpoint)
+            .bearer_auth("fixture-only")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    assert!(engine.store().get_memory(id).await.unwrap().is_none());
+    assert!(engine.read_evidence(id, source).await.is_err());
+    assert_eq!(
+        client
+            .post(format!("{base}/memories"))
+            .bearer_auth("fixture-only")
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(
+        client
+            .delete(format!("{base}/memories/{id}"))
+            .bearer_auth("fixture-only")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert!(engine
+        .search("exact excerpt", None, None, 20, 0, 0.0)
+        .await
+        .unwrap()
+        .iter()
+        .all(|m| m.id != id));
+    let ledger =
+        memex8::storage::evidence::EvidenceStore::open(&dir.path().join("evidence.sqlite3"))
+            .unwrap();
+    assert!(!ledger.contains_memory(id).unwrap());
+    // Prepared-only deletion and interrupted intent are reconciled before Engine::new returns.
+    assert_eq!(
+        client
+            .delete(format!("{base}/memories/{memory_pending}"))
+            .bearer_auth("fixture-only")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/memories"))
+            .bearer_auth("fixture-only")
+            .json(&interrupted)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    // A legacy memory has no ledger row: use a new evidence capture for the crash fixture.
+    // Deterministic ordering: fetch -> writer queued -> response construction -> erase.
+    let race_id = engine
+        .store_with_evidence(
+            "publication race",
+            vec![],
+            None,
+            None,
+            None,
+            Some("publication-race"),
+            &serde_json::from_value(request["evidence"].clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+    // The real upvote-by-content handler must serve under the retrieval read
+    // gate: its search and its upvote (which takes no exclusive guard) both run
+    // inside the middleware scope without deadlocking.
+    let upvote: Value = client
+        .post(format!("{base}/memories/upvote-by-content"))
+        .bearer_auth("fixture-only")
+        .json(&json!({"query": "publication race", "min_score": 0.0}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        upvote["upvoted"].is_string(),
+        "upvote-by-content returned no match: {upvote}"
+    );
+    assert!(upvote["content_head"].is_string());
+    assert!(engine.refuse_erased(&race_id).await.is_ok());
+    let fetched = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let race_engine = engine.clone();
+    let race_fetched = fetched.clone();
+    let race_release = release.clone();
+    let route_id = race_id.clone();
+    let race_route = axum::Router::new()
+        .route(
+            "/race",
+            axum::routing::get(move || {
+                let engine = race_engine.clone();
+                let fetched = race_fetched.clone();
+                let release = race_release.clone();
+                let id = route_id.clone();
+                async move {
+                    let memory = engine.get_memory(&id).await.unwrap();
+                    fetched.notify_one();
+                    release.notified().await;
+                    axum::Json(memory)
+                }
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(memex8::api::server::AppState {
+                engine: engine.clone(),
+                config: engine.config().clone(),
+            }),
+            memex8::api::server::memory_read_response_gate,
+        ));
+    let race_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let race_url = format!("http://{}/race", race_listener.local_addr().unwrap());
+    let race_server =
+        tokio::spawn(async move { axum::serve(race_listener, race_route).await.unwrap() });
+    let race_response = tokio::spawn({
+        let client = client.clone();
+        async move {
+            client
+                .get(race_url)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        }
+    });
+    fetched.notified().await;
+    let erase_engine = engine.clone();
+    let erase_id = race_id.clone();
+    let erase_started = Arc::new(tokio::sync::Notify::new());
+    let started = erase_started.clone();
+    let erase = tokio::spawn(async move {
+        started.notify_one();
+        erase_engine.delete_memory(&erase_id).await.unwrap()
+    });
+    erase_started.notified().await;
+    tokio::task::yield_now().await;
+    assert!(
+        !erase.is_finished(),
+        "erase passed a fetched but unpublished response"
+    );
+    release.notify_one();
+    assert!(race_response.await.unwrap().contains("publication race"));
+    erase.await.unwrap();
+    assert!(engine.get_memory(&race_id).await.is_err());
+    // The durable tombstone is a read barrier even though the projection is gone.
+    assert!(engine.refuse_erased(&race_id).await.is_err());
+    race_server.abort();
+    // POST retrievals must keep the response gate until Json bytes exist too.
+    // Use the actual nested API paths so the middleware's path matching is exercised.
+    for path in [
+        "/memories/search",
+        "/memories/batch-get",
+        "/memories/upvote-by-content",
+    ] {
+        let race_id = engine
+            .store_with_evidence(
+                "post publication race",
+                vec![],
+                None,
+                None,
+                None,
+                Some(path),
+                &serde_json::from_value(request["evidence"].clone()).unwrap(),
+            )
+            .await
+            .unwrap();
+        let fetched = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let route_engine = engine.clone();
+        let route_id = race_id.clone();
+        let route_fetched = fetched.clone();
+        let route_release = release.clone();
+        let route = axum::routing::post(move || {
+            let engine = route_engine.clone();
+            let id = route_id.clone();
+            let fetched = route_fetched.clone();
+            let release = route_release.clone();
+            async move {
+                let memory = engine.get_memory(&id).await.unwrap();
+                fetched.notify_one();
+                release.notified().await;
+                axum::Json(memory)
+            }
+        });
+        let state = Arc::new(memex8::api::server::AppState {
+            engine: engine.clone(),
+            config: engine.config().clone(),
+        });
+        let app = axum::Router::new().nest(
+            "/api/v1",
+            axum::Router::new()
+                .route(path, route)
+                .layer(axum::middleware::from_fn_with_state(
+                    state,
+                    memex8::api::server::memory_read_response_gate,
+                )),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}{}",
+            listener.local_addr().unwrap(),
+            format!("/api/v1{path}")
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = tokio::spawn({
+            let client = client.clone();
+            async move { client.post(url).send().await.unwrap().text().await.unwrap() }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), fetched.notified())
+            .await
+            .expect("POST handler fetched memory");
+        let erase_engine = engine.clone();
+        let erase_id = race_id.clone();
+        let erase_started = Arc::new(tokio::sync::Notify::new());
+        let started = erase_started.clone();
+        let erase = tokio::spawn(async move {
+            started.notify_one();
+            erase_engine.delete_memory(&erase_id).await.unwrap()
+        });
+        erase_started.notified().await;
+        // A free writer finishes against local Qdrant; a gated one stays queued.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !erase.is_finished(),
+            "{path}: erase passed unpublished POST response"
+        );
+        release.notify_one();
+        assert!(response.await.unwrap().contains("post publication race"));
+        erase.await.unwrap();
+        assert!(engine.get_memory(&race_id).await.is_err());
+        server.abort();
+    }
+    let crash_request = json!({"content":"crash fixture unique phrase", "idempotency_key":"crash-fixture", "evidence":request["evidence"]});
+    let crash: Value = client
+        .post(format!("{base}/memories"))
+        .bearer_auth("fixture-only")
+        .json(&crash_request)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let crash_id = crash["id"].as_str().unwrap();
+    let crash_source = engine
+        .store()
+        .get_memory(crash_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .evidence_refs[0]
+        .source_id
+        .clone();
+    assert_ne!(crash_id, legacy_id);
+    // Persist a stale TurboVec index containing the doomed point; startup must
+    // still reconcile and searches must not return its Qdrant payload.
+    let snapshot = engine
+        .store()
+        .get_memory_snapshot(crash_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut stale = memex8::engine::quantizer::TurboQuantVectorIndex::new(8, 4);
+    stale.add_batch(&[crash_id.to_owned()], &[snapshot.vector]);
+    stale
+        .save(
+            &engine.config().turbovec.index_path,
+            &engine.config().turbovec.id_map_path,
+        )
+        .unwrap();
+    // Pending intent keeps Qdrant payload but must not leak into timeline or graph.
+    let neighbor = engine
+        .store_memory("graph neighbor", None, None, None, None, None)
+        .await
+        .unwrap();
+    engine
+        .store()
+        .store_graph_edge(&memex8::storage::qdrant::GraphEdge {
+            from_memory_id: crash_id.to_owned(),
+            to_memory_id: neighbor.clone(),
+            relation_type: "references".into(),
+            weight: 1.0,
+        })
+        .await
+        .unwrap();
+    let graph_before = engine.graph_traverse(&neighbor, 2).await.unwrap();
+    assert!(graph_before.iter().any(|r| r.memory_id == crash_id));
+    // A read waiting behind the writer cannot observe a stale Qdrant point
+    // once the durable intent is committed, even while deletion is delayed.
+    let write = engine.store().maintenance_guard().await;
+    let racing_engine = engine.clone();
+    let racing_id = crash_id.to_owned();
+    let racing = tokio::spawn(async move { racing_engine.get_memory(&racing_id).await });
+    tokio::task::yield_now().await;
+    ledger.begin_erase(crash_id).unwrap();
+    drop(write);
+    assert!(racing.await.unwrap().is_err());
+    assert!(engine.store().get_memory(crash_id).await.unwrap().is_some());
+    assert!(engine
+        .timeline(
+            memex8::engine::timeline::Anchor::MemoryId(crash_id.to_owned()),
+            1,
+            1,
+            None,
+            None
+        )
+        .await
+        .is_err());
+    assert!(engine.graph_traverse(crash_id, 2).await.unwrap().is_empty());
+    assert!(engine
+        .graph_traverse(&neighbor, 2)
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.memory_id != crash_id
+            && r.path
+                .iter()
+                .all(|s| s.from_id != crash_id && s.to_id != crash_id)));
+    assert!(engine
+        .graph_neighbors(&neighbor)
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.from_id != crash_id && r.to_id != crash_id));
+    let anchor_time = chrono::DateTime::parse_from_rfc3339(&snapshot.memory.ingested_at)
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let around = engine
+        .timeline(
+            memex8::engine::timeline::Anchor::Time(anchor_time),
+            2,
+            2,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(around.results.iter().all(|r| r.id != crash_id));
+    let filled = engine
+        .timeline(
+            memex8::engine::timeline::Anchor::MemoryId(neighbor.clone()),
+            1,
+            0,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        filled.results.len(),
+        2,
+        "erased nearest neighbor must not consume before quota"
+    );
+    assert!(filled.results.iter().all(|r| r.id != crash_id));
+    // Simulate a stalled/failed Qdrant delete while the serving engine still
+    // holds its lexical cache. Pending intents must hide every projection.
+    assert!(engine.get_memory(crash_id).await.is_err());
+    assert!(engine
+        .read_evidence(crash_id, crash_source.as_str())
+        .await
+        .is_err());
+    assert!(engine
+        .batch_get(&[crash_id.to_owned()])
+        .await
+        .unwrap()
+        .memories
+        .is_empty());
+    assert!(engine
+        .list_memories(None, "ingested_at", true, None)
+        .await
+        .unwrap()
+        .iter()
+        .all(|m| m.id != crash_id));
+    assert!(engine
+        .recall(100, None)
+        .await
+        .unwrap()
+        .iter()
+        .all(|m| m.id != crash_id));
+    assert!(engine
+        .search("crash fixture unique phrase", None, None, 100, 0, 0.0)
+        .await
+        .unwrap()
+        .iter()
+        .all(|m| m.id != crash_id));
+    for path in [
+        format!("{base}/memories/{crash_id}"),
+        format!(
+            "{base}/memories/{crash_id}/evidence/{}",
+            crash_source.as_str()
+        ),
+    ] {
+        assert_eq!(
+            client
+                .get(path)
+                .bearer_auth("fixture-only")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
+    }
+    for (method, path, body) in [
+        ("GET", format!("{base}/memories"), None),
+        ("GET", format!("{base}/memories/recall?limit=100"), None),
+        (
+            "POST",
+            format!("{base}/memories/batch-get"),
+            Some(json!({"ids":[crash_id]})),
+        ),
+        (
+            "POST",
+            format!("{base}/memories/search"),
+            Some(json!({"query":"crash fixture unique phrase","min_score":0.0})),
+        ),
+    ] {
+        let mut request = client
+            .request(method.parse().unwrap(), &path)
+            .bearer_auth("fixture-only");
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await.unwrap();
+        assert!(response.status().is_success(), "{}", response.status());
+        let text = response.text().await.unwrap();
+        assert!(
+            !text.contains(crash_id)
+                || (path.ends_with("/batch-get")
+                    && text.contains("\"memories\":[]")
+                    && text.contains("\"not_found\"")),
+            "erased ID leaked via {method}: {text}"
+        );
+    }
     server.abort();
+    let restarted = Engine::new(engine.config().clone()).await.unwrap();
+    assert!(restarted
+        .store()
+        .get_memory(crash_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(ledger.pending_erasures().unwrap().is_empty());
+    assert!(restarted
+        .search("crash fixture unique phrase", None, None, 20, 0, 0.0)
+        .await
+        .unwrap()
+        .iter()
+        .all(|m| m.id != crash_id));
+    assert!(restarted
+        .store_with_evidence(
+            "crash fixture unique phrase",
+            vec![],
+            None,
+            None,
+            None,
+            Some("crash-fixture"),
+            &pending_capture
+        )
+        .await
+        .is_err());
     fixture.abort();
 }

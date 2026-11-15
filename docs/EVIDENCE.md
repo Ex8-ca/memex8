@@ -1,6 +1,6 @@
 # Experimental explicit REST evidence
 
-Status: first local M1 slice, opt-in; not a complete evidence rollout. Do not activate against production until backup/restore and erasure gates are complete.
+Status: first local M1 slice, opt-in; not a complete evidence rollout. A local erasure checkpoint (durable intents, keyed replay barrier, coordinated projection deletion, response-construction ordering, and legacy-archive refusal) is implemented and tested on disposable backends, but physical-byte retention, a stopped-writer paired-volume restore drill and production activation gates remain open.
 
 ## What works
 
@@ -38,17 +38,52 @@ Legacy create operations without `evidence` remain unchanged. Capture is disable
 
 Until safe lifecycle support exists:
 
-- Evidence-linked memory edits and deletion are refused. Do not use this feature for information that must be erasable yet.
+- Evidence-linked memory edits are refused; explicit memory DELETE now creates a durable erasure intent and removes the active source/projection. It is not physical erasure of historical backups, WAL, or copied responses.
 - Slumber is refused when evidence is enabled or its ledger has records.
-- Generic logical export/import remains refused. Paired logical backup/restore is now supported under the stopped-writer and empty-target restrictions in [the recovery checkpoint](EVIDENCE-RECOVERY-CHECKPOINT.md).
+- Generic logical export/import remains refused. Paired logical backup/restore is now supported under the stopped-writer and empty-target restrictions in [the recovery checkpoint](EVIDENCE-RECOVERY-CHECKPOINT.md). A schema-1 paired archive with evidence rows is **refused by default**: it predates erasure intents and may restore evidence subsequently deleted. For an exceptional isolated recovery onto a fresh empty target, `memex8 restore <archive> --acknowledge-legacy-evidence-resurrection` explicitly accepts that risk; `--force` only skips the existing-memory prompt and does not bypass this gate. Empty schema-1 evidence ledgers and archives without evidence remain compatible. An opt-in restore does not reconcile later erasures and must not be treated as safe production recovery.
 - A Qdrant copy without the matching SQLite ledger is not a complete evidence backup.
 
 Stopped-writer paired volume backups remain an option, with SQLite inside the archived writable mount and no external writers. The new paired logical recovery path is independently tested locally, but a production paired-volume restore drill has **not** been completed.
 
+The replay barrier uses a randomly generated 256-bit HMAC secret stored in `evidence.replay-key` beside `evidence.sqlite3` (0600 on Unix), not inside SQLite. Keep both together in volume backups; paired logical archives include both. Losing the key for a version-3 ledger prevents opening it, even if its intents are currently empty. Do not create a replacement key: previous erased-key replay checks would be invalid. Version-2 ledgers with unkeyed SHA256 erasure intents are refused rather than migrated; recover from a pre-erasure backup instead. Archives with version-3 evidence but no key are refused before restore writes. Treat paired archives as sensitive secrets and restrict their access and retention. Standalone `EvidenceStore::snapshot` snapshots only SQLite; its caller must copy the matching key before reopening the snapshot.
+
+## Read/erase linearization boundary
+
+For REST memory GETs, and for the content-publishing POST endpoints `/memories/search`, `/memories/batch-get`, and `/memories/upvote-by-content`, the shared maintenance guard spans handler execution **and Axum response construction**, including `Json` serialization. Evidence DELETE takes the exclusive guard before committing the durable SQLite intent. Thus a response already fetched before DELETE can be constructed first; DELETE cannot complete before that construction. A read starting after the intent cannot include the erased memory. The guard is released before socket delivery: an already-constructed response may arrive at a slow client *after* DELETE. This is snapshot/response-construction ordering, **not** a promise to retract bytes already queued, sent, cached, or copied. Do not use DELETE completion as a network-delivery revocation barrier.
+
+`upvote-by-content` is the one POST in that list that also writes. Its upvote is a plain payload update that takes no exclusive maintenance guard, so holding the read side across it cannot deadlock; its internal search and load acquire nested read permits. The handler additionally re-checks the durable erasure tombstone after selecting its match and before returning `content_head` or writing, so the barrier does not depend on the transport wrapper being installed. Writer endpoints (`POST /memories`, ingest, per-ID upvote/downvote/archive, certify, graph build) stay outside the read scope.
+
+The same boundary is enforced for the other in-process transports (`maintenance` read gate in `src/storage/gate.rs`, publication helper in `src/mcp/publish.rs`):
+
+- **MCP stdio.** A read-only tool call (`memex8_search`, `memex8_recall`, `memex8_get`, `memex8_timeline`, `memex8_realms_*`, `memex8_stats`, `memex8_slumber_status`, `memex8_graph_search`, `memex8_graph_traverse`, `memex8_graph_stats`, `memex8_infer`) runs its fetch and the serialization of the complete JSON-RPC line inside one read scope. The line is written to stdout after the scope closes, so stdout delivery (pipe buffering, a slow reader) is outside the guarantee. Writer tools are deliberately not gated: certification, edit, consolidation/undo and deletion take the exclusive side of the same lock and would deadlock behind the read scope, and the remaining writers (store/ingest, upvote, archive, graph build) take no exclusive guard but their results carry no content-read guarantee worth serializing against erasure.
+- **MCP over SSE.** Tool results are serialized under the same read scope before they are queued for the SSE stream; queueing and streaming are not part of the guarantee, so a pre-erase snapshot can still arrive after DELETE.
+- **CLI.** `memex8 search`, `memex8 get` and `memex8 recall` build their full output string under the read scope and print it afterwards. Other CLI commands print identifiers/metadata or are writers; they are not gated.
+- **Re-entrancy.** An engine read helper called inside a transport read scope takes a nested permit instead of re-acquiring the shared lock. `tokio::sync::RwLock` is fair, so a second `read()` would queue behind the DELETE the outer scope is blocking — the scope is recorded in a task-local to prevent that deadlock. Spawned tasks do not inherit the scope and take their own guard.
+
+Direct Qdrant/SQLite access and independent server processes are outside this in-process guard; keep a single writer and a matched ledger. Timeline filters pending intents while scanning (before before/after quotas); its bounded scan can still mark `truncated` when erased rows consume the work limit. Graph traversal/neighbors and the graph-search fallback filter pending intents, but graph statistics are aggregate historical edge counts, not evidence-bearing reads.
+
+### Known limitations
+
+- **Per-call SQLite access.** Every ledger check (`erased_ids`, tombstone re-checks, per-read filtering) opens a fresh SQLite connection through `EvidenceStore::connection`, with a 5-second busy timeout. Ordering comes from the in-process maintenance gate, not from the ledger; concurrent erasures on the same ledger can therefore surface `database is locked` after the timeout instead of queueing indefinitely inside SQLite. Sharing or pooling the connection is deliberately out of scope for this slice.
+- **Tag residue.** Tags live only in the Qdrant point payload, so erasing the projection removes a memory's tags from `GET /memories/tags` and from its own payload. Derived or cached aggregates (best-effort stats, external dashboards, client copies) and Qdrant's payload-index term state can still mention an opaque tag term or memory ID until that aggregate/index is regenerated. They do not retain evidence source text, but they are not part of the erasure claim either.
+
+## Residual bytes and older archives
+
+Deleting an evidence-linked memory is a **logical** deletion of the active source row, the replay key's barrier entry intent and the Qdrant projection. It does not physically overwrite storage media:
+
+- SQLite removes the source row, but the database does not enable `secure_delete`; freed pages, the WAL and `-wal`/`-shm` files may retain bytes until checkpointing/vacuuming, and copies made before deletion retain them indefinitely.
+- Qdrant deletes the point, but old segments, snapshots, WAL records and optimizer artifacts are not guaranteed to be scrubbed.
+- Any older archive (logical or volume) made before the deletion still contains the erased source and can restore it. Logical restore refuses evidence-bearing schema-1 archives by default and refuses a destination that carries erasure intents, but a **volume-level** restore of an older backup bypasses the ledger entirely.
+- `MEMEX8_BACKUP_WRITERS_STOPPED` attests that writers were stopped; it does not erase old backups or their retention copies.
+
+Therefore erasure must be paired with an explicit backup-retention policy and, for data that must be irrecoverable, a cryptographic-erasure design (encrypt sources with a per-record or per-ledger key that deletion destroys). Neither is implemented. Do not enable evidence capture for sensitive data until that policy exists and a stopped-writer paired-volume restore drill passes.
+
 ## Not implemented
 
-Provider/session/file ingestion attribution, automatic redaction, source revisions, historical timestamps, source erasure, recall receipts, evidence UI, generic logical import/export and reviewed slumber are not part of this slice. Do not assume explicit REST capture enables automatic chat capture with evidence.
+Provider/session/file ingestion attribution, automatic redaction, source revisions, historical timestamps, physical or cryptographic erasure, recall receipts, evidence UI, generic logical import/export and reviewed slumber are not part of this slice. Do not assume explicit REST capture enables automatic chat capture with evidence.
 
 ## Verified locally
 
 Parent reran the normal filtered Rust suite including four evidence-store tests. Parent also ran `tests/evidence_api.rs` against a separate fresh loopback-only Qdrant v1.17.0 container and temporary SQLite: one acceptance scenario passed, covering authentication, create/link/readback, idempotency/conflict, embedding failure/retry, legacy creation and refusal gates. Container removed afterward. Hosted CI has not run yet; it is configured to run the evidence acceptance scenario against a separate service from consolidation tests because their embedding dimensions differ.
+
+Transport publication ordering is additionally covered without any backend by `tests/erasure_publication.rs`: a read-only MCP response is shown to be serialized while the read gate is held, an erasure cannot complete between the fetch and the response bytes, writer tools are not gated, a nested engine read inside a transport scope does not deadlock behind a queued erasure, and the gated retrieval POST path list is pinned (`/memories/search`, `/memories/batch-get`, `/memories/upvote-by-content`; writer routes must stay out). After the gate refactor, the full `tests/evidence_api.rs` scenario (REST GET plus POST `/memories/search`, `/memories/batch-get`, and `/memories/upvote-by-content`, including the live upvote path and its post-erasure tombstone check) was rerun locally against a fresh disposable Qdrant v1.17.0 container and passed. MCP stdio was exercised through the Python compact/timeline/coverage suites; the SSE queueing path has compile-and-review coverage only.
