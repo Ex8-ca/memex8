@@ -45,6 +45,8 @@ Until safe lifecycle support exists:
 
 Stopped-writer paired volume backups remain an option, with SQLite inside the archived writable mount and no external writers. The new paired logical recovery path is independently tested locally, but a production paired-volume restore drill has **not** been completed.
 
+The replay barrier uses a randomly generated 256-bit HMAC secret stored in `evidence.replay-key` beside `evidence.sqlite3` (0600 on Unix), not inside SQLite. Keep both together in volume backups; paired logical archives include both. Losing the key for a version-3 ledger prevents opening it, even if its intents are currently empty. Do not create a replacement key: previous erased-key replay checks would be invalid. Version-2 ledgers with unkeyed SHA256 erasure intents are refused rather than migrated; recover from a pre-erasure backup instead. Archives with version-3 evidence but no key are refused before restore writes. Treat paired archives as sensitive secrets and restrict their access and retention. Standalone `EvidenceStore::snapshot` snapshots only SQLite; its caller must copy the matching key before reopening the snapshot.
+
 ## Not implemented
 
 Provider/session/file ingestion attribution, automatic redaction, source revisions, historical timestamps, source erasure, recall receipts, evidence UI, generic logical import/export and reviewed slumber are not part of this slice. Do not assume explicit REST capture enables automatic chat capture with evidence.

@@ -17,6 +17,9 @@ fn snapshot_preserves_committed_wal_and_pending_identity() {
         .unwrap();
     let snapshot = dir.path().join("snapshot.sqlite3");
     store.snapshot(&snapshot).unwrap();
+    let key = memex8::storage::evidence::replay_key_path(&path);
+    let snapshot_key = memex8::storage::evidence::replay_key_path(&snapshot);
+    std::fs::copy(&key, &snapshot_key).unwrap();
     let restored = EvidenceStore::open(&snapshot).unwrap();
     let retry = restored
         .prepare("pending", "exact\r\né", &capture, &[], "private")

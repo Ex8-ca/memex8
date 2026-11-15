@@ -57,6 +57,8 @@ pub async fn backup(engine: &Engine, output_path: Option<&str>) -> anyhow::Resul
     }
     if let Some(store) = &evidence {
         store.snapshot(&temp_dir.join("evidence.sqlite3"))?;
+        let key = crate::storage::evidence::read_replay_key(&engine.evidence_path())?;
+        write_private_key(&temp_dir.join("evidence.replay-key"), &key)?;
     }
     write_manifest(&temp_dir, evidence.is_some())?;
     let memories: Vec<crate::storage::qdrant::MemoryWithVector> =
@@ -139,6 +141,12 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
         super::redaction::ensure_memory(&snapshot.memory)?;
     }
     let paired = validate_archive(&temp_dir, &memories)?;
+    if paired {
+        anyhow::ensure!(
+            !crate::storage::evidence::replay_key_path(&destination_evidence).exists(),
+            "evidence restore requires an empty replay-key destination"
+        );
+    }
     anyhow::ensure!(
         memories
             .iter()
@@ -219,6 +227,14 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
         if paired {
             if let Some(parent) = destination_evidence.parent() {
                 fs::create_dir_all(parent)?;
+            }
+            if temp_dir.join("evidence.replay-key").exists() {
+                let key =
+                    crate::storage::evidence::read_replay_key(&temp_dir.join("evidence.sqlite3"))?;
+                write_private_key(
+                    &crate::storage::evidence::replay_key_path(&destination_evidence),
+                    &key,
+                )?;
             }
             let source = rusqlite::Connection::open_with_flags(
                 temp_dir.join("evidence.sqlite3"),
@@ -356,6 +372,21 @@ fn expand_path_buf(path: &str) -> PathBuf {
     expand_path(path)
 }
 
+fn write_private_key(path: &Path, key: &[u8; 32]) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(key)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 async fn export_memories(engine: &Engine, dir: &Path) -> anyhow::Result<()> {
     let memories = engine.store().scroll_all_memories_with_vectors().await?;
     let json = serde_json::to_string_pretty(&memories)?;
@@ -390,7 +421,14 @@ fn create_tarball(source_dir: &Path, output: &Path) -> anyhow::Result<()> {
     use flate2::Compression;
     use tar::Builder;
 
-    let file = fs::File::create(output)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(output)?;
     let encoder = GzEncoder::new(file, Compression::default());
     let mut tar = Builder::new(encoder);
     for name in [
@@ -401,6 +439,7 @@ fn create_tarball(source_dir: &Path, output: &Path) -> anyhow::Result<()> {
         "config.json",
         "manifest.json",
         "evidence.sqlite3",
+        "evidence.replay-key",
     ] {
         let path = source_dir.join(name);
         if path.exists() {
@@ -446,6 +485,7 @@ fn extract_tarball(archive: &Path, dest: &Path) -> anyhow::Result<()> {
                 name.as_str(),
                 "manifest.json"
                     | "evidence.sqlite3"
+                    | "evidence.replay-key"
                     | "memories.json"
                     | "realms.json"
                     | "graph_edges.json"
@@ -463,10 +503,14 @@ fn extract_tarball(archive: &Path, dest: &Path) -> anyhow::Result<()> {
             "archive exceeds extraction limits (512 MiB/component, 1 GiB total)"
         );
         anyhow::ensure!(seen.insert(name.clone()), "duplicate archive entry");
-        let mut output = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(dest.join(name))?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options.open(dest.join(name))?;
         std::io::copy(&mut entry, &mut output)?;
     }
     Ok(())
@@ -632,6 +676,9 @@ mod tests {
         let ledger =
             crate::storage::evidence::EvidenceStore::open(&root.path().join("evidence.sqlite3"))
                 .unwrap();
+        // The ledger already created its private key beside evidence.sqlite3.
+        let _key = crate::storage::evidence::read_replay_key(&root.path().join("evidence.sqlite3"))
+            .unwrap();
         ledger.snapshot(&root.path().join("snapshot")).unwrap();
         fs::rename(
             root.path().join("snapshot"),
@@ -640,6 +687,26 @@ mod tests {
         .unwrap();
         write_manifest(root.path(), true).unwrap();
         assert!(validate_archive(root.path(), &[]).unwrap());
+        let original_key =
+            crate::storage::evidence::read_replay_key(&root.path().join("evidence.sqlite3"))
+                .unwrap();
+        fs::remove_file(root.path().join("evidence.replay-key")).unwrap();
+        assert!(
+            validate_archive(root.path(), &[]).is_err(),
+            "keyless archive accepted"
+        );
+        write_private_key(&root.path().join("evidence.replay-key"), &original_key).unwrap();
+        write_manifest(root.path(), true).unwrap();
+        let archive = root.path().join("paired.tar.gz");
+        create_tarball(root.path(), &archive).unwrap();
+        let recovered = root.path().join("recovered");
+        fs::create_dir(&recovered).unwrap();
+        extract_tarball(&archive, &recovered).unwrap();
+        assert!(validate_archive(&recovered, &[]).unwrap());
+        assert_eq!(
+            crate::storage::evidence::read_replay_key(&recovered.join("evidence.sqlite3")).unwrap(),
+            original_key
+        );
         let conn = rusqlite::Connection::open(root.path().join("evidence.sqlite3")).unwrap();
         conn.pragma_update(None, "user_version", 99).unwrap();
         drop(conn);
@@ -649,6 +716,57 @@ mod tests {
         assert!(validate_archive(root.path(), &[]).is_err());
         fs::remove_file(root.path().join("evidence.sqlite3")).unwrap();
         assert!(validate_archive(root.path(), &[]).is_err());
+    }
+
+    #[test]
+    fn paired_archive_round_trip_preserves_erased_key_barrier() {
+        use crate::storage::evidence::{CaptureRequest, EvidenceStore};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("evidence.sqlite3");
+        let store = EvidenceStore::open(&path).unwrap();
+        let capture = CaptureRequest {
+            speaker: "user".into(),
+            origin: "explicit_rest".into(),
+            pre_redacted: true,
+            agent: None,
+            device: None,
+            session: None,
+        };
+        let row = store
+            .prepare("x", "secret", &capture, &[], "private")
+            .unwrap();
+        store.begin_erase(&row.memory_id).unwrap();
+        let source = root.path().join("export");
+        fs::create_dir(&source).unwrap();
+        for name in [
+            "memories.json",
+            "realms.json",
+            "graph_edges.json",
+            "consolidations.json",
+        ] {
+            fs::write(source.join(name), b"[]").unwrap();
+        }
+        fs::write(source.join("config.json"), b"{}").unwrap();
+        store.snapshot(&source.join("evidence.sqlite3")).unwrap();
+        write_private_key(
+            &source.join("evidence.replay-key"),
+            &crate::storage::evidence::read_replay_key(&path).unwrap(),
+        )
+        .unwrap();
+        write_manifest(&source, true).unwrap();
+        assert!(validate_archive(&source, &[]).unwrap());
+        let archive = root.path().join("paired.tar.gz");
+        create_tarball(&source, &archive).unwrap();
+        let target = root.path().join("target");
+        fs::create_dir(&target).unwrap();
+        extract_tarball(&archive, &target).unwrap();
+        assert!(validate_archive(&target, &[]).unwrap());
+        let restored = EvidenceStore::open(&target.join("evidence.sqlite3")).unwrap();
+        assert!(restored
+            .prepare("x", "changed", &capture, &[], "private")
+            .is_err());
+        fs::remove_file(target.join("evidence.replay-key")).unwrap();
+        assert!(validate_archive(&target, &[]).is_err());
     }
 
     #[test]

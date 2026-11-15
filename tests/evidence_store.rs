@@ -28,8 +28,8 @@ fn assert_erased(path: &std::path::Path, source_id: &str, memory_id: &str, key: 
 }
 
 #[test]
-fn erase_prepared_and_projected_sources_and_reject_replay() {
-    for projected in [false, true] {
+fn erase_prepared_source_and_reconcile_intent_without_qdrant() {
+    for reopen_before_finish in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger.sqlite3");
         let store = EvidenceStore::open(&path).unwrap();
@@ -50,7 +50,7 @@ fn erase_prepared_and_projected_sources_and_reject_replay() {
                 .source_id,
             record.source_id
         );
-        if projected {
+        if reopen_before_finish {
             drop(store);
             let store = EvidenceStore::open(&path).unwrap();
             assert_eq!(store.pending_erasures().unwrap().len(), 1);
@@ -70,6 +70,30 @@ fn erase_prepared_and_projected_sources_and_reject_replay() {
         );
         assert_erased(&path, &record.source_id, &record.memory_id, key);
     }
+}
+
+#[test]
+fn missing_v2_erasure_table_fails_closed_without_recreation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.sqlite3");
+    let store = EvidenceStore::open(&path).unwrap();
+    let row = store
+        .prepare("short", "secret", &capture(), &[], "private")
+        .unwrap();
+    store.begin_erase(&row.memory_id).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("DROP TABLE erasure_intents", []).unwrap();
+    drop(conn);
+    assert!(EvidenceStore::open(&path).is_err());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='erasure_intents')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!exists);
 }
 
 #[test]
@@ -102,8 +126,60 @@ fn migration_preserves_v1_sources_and_rejects_future_versions() {
     assert_eq!(
         conn.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
+        3
+    );
+}
+
+#[test]
+fn short_erased_key_uses_private_mac_and_missing_key_fails_closed() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.sqlite3");
+    let store = EvidenceStore::open(&path).unwrap();
+    let record = store
+        .prepare("x", "secret", &capture(), &[], "private")
+        .unwrap();
+    store.begin_erase(&record.memory_id).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let digest: String = conn
+        .query_row("SELECT key_digest FROM erasure_intents", [], |r| r.get(0))
+        .unwrap();
+    assert_ne!(digest, format!("{:x}", Sha256::digest(b"x")));
+    let key_path = memex8::storage::evidence::replay_key_path(&path);
+    assert_eq!(
+        std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(std::fs::read(&key_path).unwrap().len(), 32);
+    drop(store);
+    assert!(EvidenceStore::open(&path)
+        .unwrap()
+        .prepare("x", "changed content", &capture(), &[], "private")
+        .is_err());
+    std::fs::remove_file(key_path).unwrap();
+    assert!(EvidenceStore::open(&path).is_err());
+}
+
+#[test]
+fn unkeyed_v2_intents_refuse_migration_without_changing_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.sqlite3");
+    let store = EvidenceStore::open(&path).unwrap();
+    let row = store
+        .prepare("x", "secret", &capture(), &[], "private")
+        .unwrap();
+    store.begin_erase(&row.memory_id).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.pragma_update(None, "user_version", 2).unwrap();
+    std::fs::remove_file(memex8::storage::evidence::replay_key_path(&path)).unwrap();
+    assert!(EvidenceStore::open(&path).is_err());
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
+            .unwrap(),
         2
     );
+    assert!(!memex8::storage::evidence::replay_key_path(&path).exists());
 }
 
 fn capture() -> CaptureRequest {
