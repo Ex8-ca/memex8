@@ -1,5 +1,111 @@
 use memex8::storage::evidence::{CaptureRequest, EvidenceStore};
 
+fn assert_erased(path: &std::path::Path, source_id: &str, memory_id: &str, key: &str) {
+    let store = EvidenceStore::open(path).unwrap();
+    assert!(store.get(source_id).unwrap().is_none());
+    assert!(!store.contains_memory(memory_id).unwrap());
+    assert!(!store.has_records().unwrap());
+    for text in ["original private content", "changed content"] {
+        assert!(store
+            .prepare(key, text, &capture(), &[], "private")
+            .is_err());
+    }
+    let conn = rusqlite::Connection::open(path).unwrap();
+    for table in ["sources", "erasure_intents"] {
+        let mut stmt = conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            for index in 0..row.as_ref().column_count() {
+                if let rusqlite::types::ValueRef::Text(value) = row.get_ref(index).unwrap() {
+                    let value = std::str::from_utf8(value).unwrap();
+                    assert!(!value.contains("original private content"));
+                    assert!(!value.contains("session-1"));
+                    assert_ne!(value, key);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn erase_prepared_and_projected_sources_and_reject_replay() {
+    for projected in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.sqlite3");
+        let store = EvidenceStore::open(&path).unwrap();
+        let key = "erase-private-key";
+        let record = store
+            .prepare(key, "original private content", &capture(), &[], "private")
+            .unwrap();
+        let intent = store.begin_erase(&record.memory_id).unwrap().unwrap();
+        assert_eq!(intent.source_id, record.source_id);
+        assert_eq!(intent.memory_id, record.memory_id);
+        assert!(!intent.complete);
+        assert_erased(&path, &record.source_id, &record.memory_id, key);
+        assert_eq!(
+            store
+                .begin_erase(&record.memory_id)
+                .unwrap()
+                .unwrap()
+                .source_id,
+            record.source_id
+        );
+        if projected {
+            drop(store);
+            let store = EvidenceStore::open(&path).unwrap();
+            assert_eq!(store.pending_erasures().unwrap().len(), 1);
+            store.finish_erase(&record.memory_id).unwrap();
+            store.finish_erase(&record.memory_id).unwrap();
+            assert!(store.pending_erasures().unwrap().is_empty());
+        } else {
+            store.finish_erase(&record.memory_id).unwrap();
+        }
+        assert!(
+            EvidenceStore::open(&path)
+                .unwrap()
+                .begin_erase(&record.memory_id)
+                .unwrap()
+                .unwrap()
+                .complete
+        );
+        assert_erased(&path, &record.source_id, &record.memory_id, key);
+    }
+}
+
+#[test]
+fn migration_preserves_v1_sources_and_rejects_future_versions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.sqlite3");
+    let record = EvidenceStore::open(&path)
+        .unwrap()
+        .prepare(
+            "legacy-key",
+            "original private content",
+            &capture(),
+            &[],
+            "private",
+        )
+        .unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("DROP TABLE erasure_intents", []).unwrap();
+    conn.pragma_update(None, "user_version", 1).unwrap();
+    drop(conn);
+    let store = EvidenceStore::open(&path).unwrap();
+    assert_eq!(
+        store.get(&record.source_id).unwrap().unwrap().content,
+        record.content
+    );
+    assert_eq!(store.pending_erasures().unwrap().len(), 0);
+    store.begin_erase(&record.memory_id).unwrap().unwrap();
+    assert_erased(&path, &record.source_id, &record.memory_id, "legacy-key");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
+            .unwrap(),
+        2
+    );
+}
+
 fn capture() -> CaptureRequest {
     serde_json::from_value(serde_json::json!({
         "speaker": "user", "origin": "explicit_rest", "pre_redacted": true,

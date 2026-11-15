@@ -47,6 +47,15 @@ pub struct EvidenceRef {
 pub struct EvidenceStore {
     path: PathBuf,
 }
+
+/// Durable replay barrier and Qdrant deletion work item. Never contains source text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErasureIntent {
+    pub source_id: String,
+    pub memory_id: String,
+    pub complete: bool,
+}
+
 impl EvidenceStore {
     /// Consistent logical SQLite snapshot, including committed WAL pages and pending prepares.
     pub fn snapshot(&self, destination: &Path) -> Result<()> {
@@ -78,17 +87,25 @@ impl EvidenceStore {
             }
         }
         let store = Self { path: path.into() };
-        let conn = store.connection()?;
+        let mut conn = store.connection()?;
         let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        ensure!(version <= 1, "unsupported evidence schema version");
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-            CREATE TABLE IF NOT EXISTS sources (
+        ensure!(version <= 2, "unsupported evidence schema version");
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sources (
                 source_id TEXT PRIMARY KEY, memory_id TEXT NOT NULL UNIQUE,
                 idempotency_key TEXT NOT NULL UNIQUE, request TEXT NOT NULL,
-                record TEXT NOT NULL);
-            PRAGMA user_version=1;",
+                record TEXT NOT NULL);",
         )?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS erasure_intents (
+                memory_id TEXT PRIMARY KEY, source_id TEXT NOT NULL UNIQUE,
+                key_digest TEXT NOT NULL UNIQUE, complete INTEGER NOT NULL DEFAULT 0
+                    CHECK (complete IN (0, 1)));
+            PRAGMA user_version=2;",
+        )?;
+        tx.commit()?;
         Ok(store)
     }
     fn connection(&self) -> Result<Connection> {
@@ -146,6 +163,13 @@ impl EvidenceStore {
         let request = serde_json::to_string(&(content, capture, scope, visibility))?;
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
+        let tombstoned: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM erasure_intents WHERE key_digest=?1)",
+            [&digest],
+            |r| r.get(0),
+        )?;
+        ensure!(!tombstoned, "idempotency key belongs to erased evidence");
         let existing: Option<(String, String)> = tx
             .query_row(
                 "SELECT request, record FROM sources WHERE idempotency_key=?1",
@@ -212,5 +236,77 @@ impl EvidenceStore {
         Ok(self
             .connection()?
             .query_row("SELECT EXISTS(SELECT 1 FROM sources)", [], |r| r.get(0))?)
+    }
+
+    /// Atomically hide source text, persist the replay barrier and queue projection deletion.
+    /// Caller must serialize against capture/projection with the engine maintenance guard.
+    pub fn begin_erase(&self, memory_id: &str) -> Result<Option<ErasureIntent>> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let prior = tx
+            .query_row(
+                "SELECT source_id, memory_id, complete FROM erasure_intents WHERE memory_id=?1",
+                [memory_id],
+                |r| {
+                    Ok(ErasureIntent {
+                        source_id: r.get(0)?,
+                        memory_id: r.get(1)?,
+                        complete: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+        if prior.is_some() {
+            return Ok(prior);
+        }
+        let source: Option<(String, String)> = tx
+            .query_row(
+                "SELECT source_id, idempotency_key FROM sources WHERE memory_id=?1",
+                [memory_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((source_id, key)) = source else {
+            return Ok(None);
+        };
+        let key_digest = format!("{:x}", Sha256::digest(key.as_bytes()));
+        tx.execute(
+            "INSERT INTO erasure_intents (memory_id, source_id, key_digest) VALUES (?1, ?2, ?3)",
+            params![memory_id, source_id, key_digest],
+        )?;
+        tx.execute("DELETE FROM sources WHERE memory_id=?1", [memory_id])?;
+        tx.commit()?;
+        Ok(Some(ErasureIntent {
+            source_id,
+            memory_id: memory_id.into(),
+            complete: false,
+        }))
+    }
+
+    /// Mark an existing intent complete only after Qdrant confirms projection removal.
+    pub fn finish_erase(&self, memory_id: &str) -> Result<()> {
+        let conn = self.connection()?;
+        let changed = conn.execute(
+            "UPDATE erasure_intents SET complete=1 WHERE memory_id=?1",
+            [memory_id],
+        )?;
+        ensure!(changed == 1, "no erasure intent for memory");
+        Ok(())
+    }
+
+    /// Work remaining after a crash; the engine must delete these projections before serving.
+    pub fn pending_erasures(&self) -> Result<Vec<ErasureIntent>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT source_id, memory_id, complete FROM erasure_intents WHERE complete=0 ORDER BY memory_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ErasureIntent {
+                source_id: r.get(0)?,
+                memory_id: r.get(1)?,
+                complete: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
