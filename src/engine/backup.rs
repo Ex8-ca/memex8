@@ -88,6 +88,35 @@ pub async fn backup(engine: &Engine, output_path: Option<&str>) -> anyhow::Resul
     Ok(backup_path.display().to_string())
 }
 
+/// Reject ledgers carrying either live evidence or durable erasure barriers.
+/// Run before the restore marker and any destination database write, regardless
+/// of whether a legacy archive's resurrection risk was acknowledged.
+fn preflight_evidence_destination(destination: &Path) -> anyhow::Result<()> {
+    if destination.exists() {
+        let conn = rusqlite::Connection::open_with_flags(
+            destination,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let records: bool =
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM sources)", [], |r| r.get(0))?;
+        anyhow::ensure!(!records, "evidence restore requires an empty destination; discard partial destination and retry on fresh stores");
+        // Schema-1 ledgers have no intent table; they are safe here only if sources is empty.
+        let has_intents_table: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='erasure_intents')",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_intents_table {
+            let intents: bool =
+                conn.query_row("SELECT EXISTS(SELECT 1 FROM erasure_intents)", [], |r| {
+                    r.get(0)
+                })?;
+            anyhow::ensure!(!intents, "evidence restore requires an empty destination (erasure intents present); discard partial destination and retry on fresh stores");
+        }
+    }
+    Ok(())
+}
+
 /// Restore memories, realms, and graph edges from a backup tarball.
 pub async fn restore(
     engine: &Engine,
@@ -99,15 +128,7 @@ pub async fn restore(
     let destination_evidence = engine.evidence_path();
     let restore_marker = destination_evidence.with_extension("restore-in-progress");
     anyhow::ensure!(!restore_marker.exists(), "previous restore may be partial; discard BOTH target stores and restore marker, then retry on fresh empty stores");
-    if destination_evidence.exists() {
-        let conn = rusqlite::Connection::open_with_flags(
-            &destination_evidence,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        let records: bool =
-            conn.query_row("SELECT EXISTS(SELECT 1 FROM sources)", [], |r| r.get(0))?;
-        anyhow::ensure!(!records, "evidence restore requires an empty destination; discard partial destination and retry on fresh stores");
-    }
+    preflight_evidence_destination(&destination_evidence)?;
     let path = expand_path_buf(backup_path);
     if !path.exists() {
         anyhow::bail!("Backup file not found: {}", path.display());
@@ -716,6 +737,94 @@ mod tests {
             .unwrap();
         write_manifest(root.path(), true).unwrap();
         assert!(validation::validate_restore_archive(root.path(), &[], false).unwrap());
+    }
+
+    #[test]
+    fn restore_preflight_preserves_tombstones_against_legacy_archive_even_when_acknowledged() {
+        use crate::storage::evidence::{CaptureRequest, EvidenceStore};
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("destination/evidence.sqlite3");
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        let store = EvidenceStore::open(&destination).unwrap();
+        let capture = CaptureRequest {
+            speaker: "user".into(),
+            origin: "explicit_rest".into(),
+            pre_redacted: true,
+            agent: None,
+            device: None,
+            session: None,
+        };
+        let row = store
+            .prepare("erased-key", "erased content", &capture, &[], "private")
+            .unwrap();
+        store.begin_erase(&row.memory_id).unwrap();
+        store.finish_erase(&row.memory_id).unwrap();
+        drop(store);
+        let conn = rusqlite::Connection::open(&destination).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sources", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        drop(conn);
+
+        let archive = root.path().join("legacy");
+        fs::create_dir(&archive).unwrap();
+        for name in [
+            "memories.json",
+            "realms.json",
+            "graph_edges.json",
+            "consolidations.json",
+        ] {
+            fs::write(archive.join(name), b"[]").unwrap();
+        }
+        fs::write(archive.join("config.json"), b"{}").unwrap();
+        let old_ledger = EvidenceStore::open(&archive.join("evidence.sqlite3")).unwrap();
+        old_ledger
+            .prepare("old-key", "archived content", &capture, &[], "private")
+            .unwrap();
+        drop(old_ledger);
+        let conn = rusqlite::Connection::open(archive.join("evidence.sqlite3")).unwrap();
+        conn.execute_batch("DROP TABLE erasure_intents; PRAGMA user_version=1")
+            .unwrap();
+        drop(conn);
+        fs::remove_file(archive.join("evidence.replay-key")).unwrap();
+        write_manifest(&archive, true).unwrap();
+        let before = fs::read(&destination).unwrap();
+        let key_path = crate::storage::evidence::replay_key_path(&destination);
+        let key_before = fs::read(&key_path).unwrap();
+        for acknowledged in [false, true] {
+            let archive_gate = validation::validate_restore_archive(&archive, &[], acknowledged);
+            if acknowledged {
+                assert!(archive_gate.unwrap());
+            } else {
+                assert!(archive_gate.is_err());
+            }
+            // Restore checks destination before either archive gate or first write.
+            let error = preflight_evidence_destination(&destination)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("empty destination"),
+                "{error} (acknowledged={acknowledged})"
+            );
+            assert_eq!(fs::read(&destination).unwrap(), before);
+            assert_eq!(fs::read(&key_path).unwrap(), key_before);
+            assert!(!destination.with_extension("restore-in-progress").exists());
+            let conn = rusqlite::Connection::open_with_flags(
+                &destination,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let intents: i64 = conn
+                .query_row("SELECT COUNT(*) FROM erasure_intents", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(intents, 1);
+        }
+        // Existing empty ledgers remain valid fresh targets, including for legacy archives.
+        let fresh = root.path().join("fresh/evidence.sqlite3");
+        fs::create_dir_all(fresh.parent().unwrap()).unwrap();
+        EvidenceStore::open(&fresh).unwrap();
+        preflight_evidence_destination(&fresh).unwrap();
     }
 
     #[test]
