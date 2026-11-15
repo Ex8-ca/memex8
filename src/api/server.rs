@@ -13,6 +13,8 @@ pub struct AppState {
 /// Serialize REST memory reads through response construction, not network delivery.
 /// Axum converts `Json` handler results to response bytes within `next.run`.
 /// A slow client can still receive previously constructed bytes after deletion.
+/// `read_gated` is re-entrant, so the engine's nested read guards cannot queue
+/// behind the erasure this middleware is blocking.
 pub async fn memory_read_response_gate(
     State(state): State<Arc<AppState>>,
     request: Request<axum::body::Body>,
@@ -28,8 +30,7 @@ pub async fn memory_read_response_gate(
     if request.method() != axum::http::Method::GET && !retrieval_post {
         return next.run(request).await;
     }
-    let _read = state.engine.store().maintenance_read_guard().await;
-    next.run(request).await
+    state.engine.store().read_gated(next.run(request)).await
 }
 
 pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()> {

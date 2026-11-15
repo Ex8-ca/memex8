@@ -29,9 +29,9 @@ pub async fn sse_handler(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // Two channels:
     // 1. `msg_tx` → `msg_rx`: receives JSON-RPC requests from POST /mcp/messages
-    // 2. `sse_tx` → `sse_rx`: sends JSON-RPC responses to the SSE stream
+    // 2. `sse_tx` → `sse_rx`: sends serialized JSON-RPC responses to the SSE stream
     let (msg_tx, mut msg_rx) = mpsc::channel::<serde_json::Value>(100);
-    let (sse_tx, sse_rx) = mpsc::channel::<serde_json::Value>(100);
+    let (sse_tx, sse_rx) = mpsc::channel::<String>(100);
 
     let session_id = uuid::Uuid::new_v4().to_string();
 
@@ -47,15 +47,18 @@ pub async fn sse_handler(
     tokio::spawn(async move {
         // Send initial connection event
         let _ = sse_tx
-            .send(json!({
-                "jsonrpc": "2.0",
-                "id": null,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "memex8", "version": "0.1.0" }
-                }
-            }))
+            .send(
+                serde_json::to_string(&json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "result": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "memex8", "version": "0.1.0" }
+                    }
+                }))
+                .unwrap_or_else(|_| "{}".into()),
+            )
             .await;
 
         while let Some(message) = msg_rx.recv().await {
@@ -65,26 +68,34 @@ pub async fn sse_handler(
 
             tracing::debug!("MCP message: method={} id={:?}", method, id);
 
-            let result = match method {
-                "initialize" => handle_initialize(),
-                "initialized" => Ok(json!({})),
-                "ping" => Ok(json!({})),
-                "tools/list" => Ok(json!({ "tools": tools::list_tools() })),
-                "tools/call" => handle_tool_call(&engine, &params).await,
-                _ => Err(anyhow::anyhow!("Method not found: {}", method)),
-            };
-
-            let response = match result {
-                Ok(data) => json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": data,
-                }),
-                Err(e) => json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": { "code": -32603, "message": e.to_string() },
-                }),
+            // Read-only tool calls serialize their response while the maintenance
+            // read gate is held, so an erasure cannot commit between fetch and
+            // response construction. SSE delivery after that is not covered.
+            let response: String = match method {
+                "initialize" => success_line(id.as_ref(), &handle_initialize()),
+                "initialized" => success_line(id.as_ref(), &Ok(json!({}))),
+                "ping" => success_line(id.as_ref(), &Ok(json!({}))),
+                "tools/list" => {
+                    success_line(id.as_ref(), &Ok(json!({ "tools": tools::list_tools() })))
+                }
+                "tools/call" => match super::publish::tool_name(&params) {
+                    Ok(name) => match super::publish::tool_response_line(
+                        engine.store().gate(),
+                        name,
+                        id.as_ref(),
+                        handle_tool_call(&engine, &params),
+                    )
+                    .await
+                    {
+                        Ok(line) => line,
+                        Err(e) => error_line(id.as_ref(), &e),
+                    },
+                    Err(e) => error_line(id.as_ref(), &e),
+                },
+                _ => error_line(
+                    id.as_ref(),
+                    &anyhow::anyhow!("Method not found: {}", method),
+                ),
             };
 
             if sse_tx.send(response).await.is_err() {
@@ -100,9 +111,8 @@ pub async fn sse_handler(
     let stream = async_stream::stream! {
         let mut rx = sse_rx;
         while let Some(msg) = rx.recv().await {
-            if let Ok(event) = Event::default().json_data(&msg) {
-                yield Ok(event);
-            }
+            // `msg` is already a serialized JSON-RPC message.
+            yield Ok(Event::default().data(msg));
         }
     };
 
@@ -152,6 +162,30 @@ pub async fn message_handler(
     }
 
     StatusCode::BAD_REQUEST
+}
+
+fn success_line(
+    id: Option<&serde_json::Value>,
+    result: &anyhow::Result<serde_json::Value>,
+) -> String {
+    match result {
+        Ok(data) => serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": data,
+        }))
+        .unwrap_or_else(|error| error_line(id, &anyhow::Error::new(error))),
+        Err(error) => error_line(id, error),
+    }
+}
+
+fn error_line(id: Option<&serde_json::Value>, error: &anyhow::Error) -> String {
+    serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": -32603, "message": error.to_string() },
+    }))
+    .unwrap_or_else(|_| "{}".into())
 }
 
 /// Handle MCP tool calls by dispatching to the Engine.

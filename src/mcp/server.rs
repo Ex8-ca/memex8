@@ -39,15 +39,14 @@ pub async fn run_stdio(config: AppConfig) -> anyhow::Result<()> {
         let request: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                write_response(
-                    &mut stdout,
+                let line = response_line(
                     None,
-                    json!({
+                    &json!({
                         "code": -32700,
                         "message": format!("Parse error: {}", e)
                     }),
-                )
-                .await?;
+                )?;
+                write_line(&mut stdout, &line).await?;
                 continue;
             }
         };
@@ -58,10 +57,13 @@ pub async fn run_stdio(config: AppConfig) -> anyhow::Result<()> {
 
         tracing::debug!("MCP request: method={}, id={:?}", method, id);
 
-        let result = match method {
-            "initialize" => handle_initialize(),
-            "initialized" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools_list })),
+        // Read-only tool calls serialize their response while the maintenance
+        // read gate is held, so an erasure cannot commit between fetch and
+        // response construction. Delivery over stdout is not covered.
+        let reply: anyhow::Result<String> = match method {
+            "initialize" => response_line(id.as_ref(), &handle_initialize()?),
+            "initialized" => response_line(id.as_ref(), &json!({})),
+            "tools/list" => response_line(id.as_ref(), &json!({ "tools": tools_list })),
             "tools/call" => {
                 let Some(ref e) = engine else {
                     write_error(
@@ -73,9 +75,20 @@ pub async fn run_stdio(config: AppConfig) -> anyhow::Result<()> {
                     .await?;
                     continue;
                 };
-                handle_tool_call(e, &params).await
+                match super::publish::tool_name(&params) {
+                    Ok(name) => {
+                        super::publish::tool_response_line(
+                            e.store().gate(),
+                            name,
+                            id.as_ref(),
+                            handle_tool_call(e, &params),
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
             }
-            "ping" => Ok(json!({})),
+            "ping" => response_line(id.as_ref(), &json!({})),
             _ => {
                 write_error(
                     &mut stdout,
@@ -88,8 +101,8 @@ pub async fn run_stdio(config: AppConfig) -> anyhow::Result<()> {
             }
         };
 
-        match result {
-            Ok(data) => write_response(&mut stdout, id, data).await?,
+        match reply {
+            Ok(line) => write_line(&mut stdout, &line).await?,
             Err(e) => {
                 tracing::error!("MCP error: {:?}", e);
                 write_error(&mut stdout, id, -32603, format!("{}", e)).await?;
@@ -349,17 +362,18 @@ fn format_results(results: Vec<crate::engine::MemoryResult>, compact: bool) -> s
     })
 }
 
-async fn write_response(
-    stdout: &mut tokio::io::Stdout,
-    id: Option<serde_json::Value>,
-    result: serde_json::Value,
-) -> std::io::Result<()> {
-    let response = json!({
+fn response_line(
+    id: Option<&serde_json::Value>,
+    result: &serde_json::Value,
+) -> anyhow::Result<String> {
+    Ok(serde_json::to_string(&json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": result,
-    });
-    let line = serde_json::to_string(&response).unwrap_or_else(|_| "{}".into());
+    }))?)
+}
+
+async fn write_line(stdout: &mut tokio::io::Stdout, line: &str) -> std::io::Result<()> {
     stdout.write_all(line.as_bytes()).await?;
     stdout.write_all(b"\n").await?;
     stdout.flush().await?;
