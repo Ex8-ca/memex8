@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use memex8::api::server::is_gated_retrieval_post;
 use memex8::mcp::publish::{is_read_only_tool, tool_response_line};
 use memex8::mcp::tools;
 use memex8::storage::gate::MaintenanceGate;
@@ -262,5 +263,39 @@ async fn every_advertised_tool_is_classified_for_the_gate() {
     // The CLI reads memory content through the same gate.
     for name in ["memex8_search", "memex8_recall", "memex8_get"] {
         assert!(is_read_only_tool(name), "{name} must be read-gated");
+    }
+}
+
+/// Regression: `upvote-by-content` publishes fetched content and performs its
+/// upvote without taking the exclusive maintenance guard, so its POST must be
+/// read-gated through response construction. Dropping the path reopens the
+/// search -> erase -> `content_head` window.
+#[test]
+fn content_publishing_retrieval_posts_are_gated() {
+    for path in [
+        "/memories/search",
+        "/memories/batch-get",
+        "/memories/upvote-by-content",
+    ] {
+        assert!(
+            is_gated_retrieval_post(path),
+            "{path} must hold the read gate through response construction"
+        );
+    }
+    // Writers and metadata-only POSTs must not be serialized under a read scope:
+    // the subset that takes the exclusive side would deadlock behind it.
+    for path in [
+        "/memories",
+        "/memories/ingest",
+        "/memories/9f1c2d3e-0000-4000-8000-000000000000/upvote",
+        "/memories/9f1c2d3e-0000-4000-8000-000000000000/downvote",
+        "/memories/9f1c2d3e-0000-4000-8000-000000000000/certify",
+        "/dreams",
+        "/graph/build",
+    ] {
+        assert!(
+            !is_gated_retrieval_post(path),
+            "{path} is a writer or metadata route and must not be read-gated"
+        );
     }
 }

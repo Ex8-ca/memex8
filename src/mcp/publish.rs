@@ -20,8 +20,11 @@ use serde_json::Value;
 use crate::storage::gate::MaintenanceGate;
 
 /// Tools whose handlers only read memory state, and so may run under the
-/// maintenance read gate. Writer tools must stay out of this list: their
-/// handlers take the exclusive side of the same gate and would deadlock.
+/// maintenance read gate. Writer tools must stay out of this list: the ones
+/// that take the exclusive side of the same gate (certification, edit,
+/// consolidation/undo, deletion) would deadlock, and the others take no
+/// exclusive guard but publish no fetched content that needs ordering against
+/// erasure.
 pub fn is_read_only_tool(name: &str) -> bool {
     matches!(
         name,

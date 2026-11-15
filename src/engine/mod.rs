@@ -991,6 +991,20 @@ impl Engine {
             .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", id))
     }
 
+    /// Fail if `id` has a pending or completed erasure intent.
+    ///
+    /// Erasure intents are permanent read barriers even before the projection
+    /// deletion finishes. Transport handlers call this after fetching content
+    /// and before publishing it, so a tombstoned memory can be neither echoed
+    /// nor upvoted even if the transport gate is bypassed. Takes the shared
+    /// maintenance guard itself, so it is safe standalone and nested inside a
+    /// transport read scope.
+    pub async fn refuse_erased(&self, id: &str) -> anyhow::Result<()> {
+        let _read = self.store.maintenance_read_guard().await;
+        anyhow::ensure!(!self.erased_ids()?.contains(id), "Memory not found: {}", id);
+        Ok(())
+    }
+
     pub async fn recall(
         &self,
         limit: usize,
@@ -1186,6 +1200,12 @@ impl Engine {
         Ok(())
     }
 
+    /// Bump a memory's upvote count and importance.
+    ///
+    /// Deliberately takes no exclusive maintenance guard: REST
+    /// `upvote-by-content` runs under the retrieval read gate and calls this, so
+    /// acquiring the write side here would deadlock that handler behind its own
+    /// read scope. It still fails closed for erased IDs via `get_memory`.
     pub async fn upvote(&self, id: &str) -> anyhow::Result<()> {
         let memory = self.get_memory(id).await?;
         let new_upvotes = memory.upvotes + 1;

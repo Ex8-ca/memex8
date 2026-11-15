@@ -992,6 +992,25 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         )
         .await
         .unwrap();
+    // The real upvote-by-content handler must serve under the retrieval read
+    // gate: its search and its upvote (which takes no exclusive guard) both run
+    // inside the middleware scope without deadlocking.
+    let upvote: Value = client
+        .post(format!("{base}/memories/upvote-by-content"))
+        .bearer_auth("fixture-only")
+        .json(&json!({"query": "publication race", "min_score": 0.0}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        upvote["upvoted"].is_string(),
+        "upvote-by-content returned no match: {upvote}"
+    );
+    assert!(upvote["content_head"].is_string());
+    assert!(engine.refuse_erased(&race_id).await.is_ok());
     let fetched = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let race_engine = engine.clone();
@@ -1057,10 +1076,16 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     assert!(race_response.await.unwrap().contains("publication race"));
     erase.await.unwrap();
     assert!(engine.get_memory(&race_id).await.is_err());
+    // The durable tombstone is a read barrier even though the projection is gone.
+    assert!(engine.refuse_erased(&race_id).await.is_err());
     race_server.abort();
     // POST retrievals must keep the response gate until Json bytes exist too.
     // Use the actual nested API paths so the middleware's path matching is exercised.
-    for path in ["/memories/search", "/memories/batch-get"] {
+    for path in [
+        "/memories/search",
+        "/memories/batch-get",
+        "/memories/upvote-by-content",
+    ] {
         let race_id = engine
             .store_with_evidence(
                 "post publication race",

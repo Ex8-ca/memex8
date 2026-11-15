@@ -10,6 +10,24 @@ pub struct AppState {
     pub config: AppConfig,
 }
 
+/// POST endpoints that fetch memory content and must therefore keep the read
+/// gate across handler execution *and* response construction.
+///
+/// Writer tools stay out of this list. Some of them take the exclusive side of
+/// the same gate (certification, edit, deletion) and would deadlock behind the
+/// read scope; the rest take no guard but still do not need the read guarantee.
+/// `upvote-by-content` belongs here even though it writes: its upvote takes no
+/// exclusive maintenance guard, and it returns fetched `content_head`, so its
+/// search and response construction must be ordered against erasure. Its own
+/// search/get calls take nested read permits (the gate is re-entrant), so
+/// holding the read side here cannot deadlock it.
+pub fn is_gated_retrieval_post(path: &str) -> bool {
+    matches!(
+        path,
+        "/memories/search" | "/memories/batch-get" | "/memories/upvote-by-content"
+    )
+}
+
 /// Serialize REST memory reads through response construction, not network delivery.
 /// Axum converts `Json` handler results to response bytes within `next.run`.
 /// A slow client can still receive previously constructed bytes after deletion.
@@ -21,12 +39,10 @@ pub async fn memory_read_response_gate(
     next: Next,
 ) -> Response {
     // Axum strips the `/api/v1` prefix before the nested route middleware.
-    // Only these POST methods are reads; do not hold the guard across writers.
+    // Only these POST methods are reads (or content-publishing reads); do not
+    // hold the guard across writers that take the exclusive side.
     let retrieval_post = request.method() == axum::http::Method::POST
-        && matches!(
-            request.uri().path(),
-            "/memories/search" | "/memories/batch-get"
-        );
+        && is_gated_retrieval_post(request.uri().path());
     if request.method() != axum::http::Method::GET && !retrieval_post {
         return next.run(request).await;
     }
