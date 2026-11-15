@@ -323,7 +323,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     output.into_inner().unwrap().finish().unwrap();
     assert_eq!(
         target
-            .restore(legacy_archive.to_str().unwrap(), true)
+            .restore(legacy_archive.to_str().unwrap(), true, false)
             .await
             .unwrap(),
         1
@@ -366,7 +366,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         }
         output.into_inner().unwrap().finish().unwrap();
         assert!(target
-            .restore(broken.to_str().unwrap(), true)
+            .restore(broken.to_str().unwrap(), true, false)
             .await
             .is_err());
         assert!(target
@@ -472,7 +472,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         output.into_inner().unwrap().finish().unwrap();
         assert!(
             target
-                .restore(broken.to_str().unwrap(), true)
+                .restore(broken.to_str().unwrap(), true, false)
                 .await
                 .is_err(),
             "{kind}"
@@ -536,7 +536,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     let failing = Engine::new(failure_config).await.unwrap();
     armed.store(true, std::sync::atomic::Ordering::SeqCst);
     let error = failing
-        .restore(&paired_backup, true)
+        .restore(&paired_backup, true, false)
         .await
         .unwrap_err()
         .to_string();
@@ -555,7 +555,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
             > 0
     );
     assert!(failing
-        .restore(&paired_backup, true)
+        .restore(&paired_backup, true, false)
         .await
         .unwrap_err()
         .to_string()
@@ -565,7 +565,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     for memory in target.store().scroll_all_memories().await.unwrap() {
         target.store().delete_memory(&memory.id).await.unwrap();
     }
-    assert!(target.restore(&paired_backup, true).await.unwrap() >= 2);
+    assert!(target.restore(&paired_backup, true, false).await.unwrap() >= 2);
     assert_eq!(target.store().get_all_graph_edges().await.unwrap().len(), 1);
     let restored_realms = target.store().list_realms().await.unwrap();
     assert_eq!(restored_realms.len(), expected_realms.len());
@@ -650,7 +650,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     assert_eq!(readback, evidence);
     target_server.abort();
     assert!(target
-        .restore(&paired_backup, true)
+        .restore(&paired_backup, true, false)
         .await
         .unwrap_err()
         .to_string()
@@ -662,7 +662,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .to_string()
         .contains("evidence"));
     assert!(engine
-        .restore("missing.tar.gz", true)
+        .restore("missing.tar.gz", true, false)
         .await
         .unwrap_err()
         .to_string()
