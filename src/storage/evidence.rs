@@ -52,6 +52,39 @@ pub struct EvidenceStore {
     replay_key: [u8; 32],
 }
 
+// SQLite stores normalized CREATE TABLE SQL. Compare the full constraints,
+// not just columns: a weakened replay barrier must never be accepted.
+const SOURCES_DDL: &str = "CREATE TABLE sources (source_id TEXT PRIMARY KEY, memory_id TEXT NOT NULL UNIQUE, idempotency_key TEXT NOT NULL UNIQUE, request TEXT NOT NULL, record TEXT NOT NULL)";
+const INTENTS_DDL: &str = "CREATE TABLE erasure_intents (memory_id TEXT PRIMARY KEY, source_id TEXT NOT NULL UNIQUE, key_digest TEXT NOT NULL UNIQUE, complete INTEGER NOT NULL DEFAULT 0 CHECK (complete IN (0, 1)))";
+
+fn ddl_tokens(sql: &str) -> String {
+    sql.chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+pub(crate) fn validate_schema(conn: &Connection, version: u32) -> Result<()> {
+    ensure!(matches!(version, 1 | 3), "unsupported evidence schema");
+    for (name, expected) in [("sources", SOURCES_DDL), ("erasure_intents", INTENTS_DDL)] {
+        if name == "erasure_intents" && version == 1 {
+            continue;
+        }
+        let actual: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",
+                [name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        ensure!(
+            actual.is_some_and(|sql| ddl_tokens(&sql) == ddl_tokens(expected)),
+            "invalid evidence table constraints: {name}"
+        );
+    }
+    Ok(())
+}
+
 /// The replay secret is stored outside SQLite and must accompany logical backups.
 pub fn replay_key_path(path: &Path) -> PathBuf {
     path.with_extension("replay-key")
@@ -162,14 +195,9 @@ impl EvidenceStore {
                 table.is_some(),
                 "missing erasure replay barrier in v2 ledger"
             );
-            let columns: Vec<String> = tx
-                .prepare("PRAGMA table_info(erasure_intents)")?
-                .query_map([], |r| r.get(1))?
-                .collect::<rusqlite::Result<_>>()?;
-            ensure!(
-                columns == ["memory_id", "source_id", "key_digest", "complete"],
-                "invalid erasure replay barrier schema"
-            );
+            if version == 3 {
+                validate_schema(&tx, version)?;
+            }
         }
         if version == 2 {
             let intents: bool =
@@ -199,6 +227,7 @@ impl EvidenceStore {
                     CHECK (complete IN (0, 1)));
             PRAGMA user_version=3;",
         )?;
+        validate_schema(&tx, 3)?;
         tx.commit()?;
         Ok(Self {
             path: path.into(),

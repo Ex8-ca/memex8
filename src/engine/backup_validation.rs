@@ -59,6 +59,29 @@ pub(super) fn write_manifest(dir: &Path, evidence: bool) -> Result<()> {
     )?;
     Ok(())
 }
+/// Restore-only gate. A schema-1 ledger has no erasure history, so a populated
+/// archive may resurrect evidence erased after that archive was made.
+pub(super) fn validate_restore_archive(
+    dir: &Path,
+    memories: &[MemoryWithVector],
+    acknowledge_legacy_evidence_resurrection: bool,
+) -> Result<bool> {
+    let paired = validate_archive(dir, memories)?;
+    if paired && evidence_version(dir)? == 1 && !acknowledge_legacy_evidence_resurrection {
+        let conn = rusqlite::Connection::open_with_flags(
+            dir.join("evidence.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let has_sources: bool =
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM sources)", [], |r| r.get(0))?;
+        ensure!(
+            !has_sources && memories.iter().all(|m| m.memory.evidence_refs.is_empty()),
+            "legacy pre-erasure evidence archive can resurrect erased data; restore only with --acknowledge-legacy-evidence-resurrection on an isolated, fresh target after reviewing the risk"
+        );
+    }
+    Ok(paired)
+}
+
 fn evidence_version(dir: &Path) -> Result<u32> {
     let conn = rusqlite::Connection::open_with_flags(
         dir.join("evidence.sqlite3"),
@@ -259,15 +282,8 @@ pub(super) fn validate_archive(dir: &Path, memories: &[MemoryWithVector]) -> Res
             },
         "unsupported evidence schema objects"
     );
+    crate::storage::evidence::validate_schema(&conn, version)?;
     if version == 3 {
-        let columns: Vec<String> = conn
-            .prepare("PRAGMA table_info(erasure_intents)")?
-            .query_map([], |r| r.get(1))?
-            .collect::<rusqlite::Result<_>>()?;
-        ensure!(
-            columns == ["memory_id", "source_id", "key_digest", "complete"],
-            "invalid erasure intent columns"
-        );
         let mut stmt =
             conn.prepare("SELECT memory_id,source_id,key_digest,complete FROM erasure_intents")?;
         for row in stmt.query_map([], |r| {

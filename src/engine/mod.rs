@@ -1770,8 +1770,19 @@ impl Engine {
     }
 
     /// Restore memories, realms, and graph edges from a backup tarball.
-    pub async fn restore(&self, backup_path: &str, force: bool) -> anyhow::Result<usize> {
-        let n = backup::restore(self, backup_path, force).await?;
+    pub async fn restore(
+        &self,
+        backup_path: &str,
+        force: bool,
+        acknowledge_legacy_evidence_resurrection: bool,
+    ) -> anyhow::Result<usize> {
+        let n = backup::restore(
+            self,
+            backup_path,
+            force,
+            acknowledge_legacy_evidence_resurrection,
+        )
+        .await?;
         if let Err(e) = self.rebuild_lexical_index().await {
             tracing::warn!("Lexical index rebuild after restore failed: {e}");
         }

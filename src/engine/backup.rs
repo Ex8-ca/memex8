@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 #[path = "backup_validation.rs"]
 mod validation;
-use validation::{validate_archive, write_manifest};
+use validation::{validate_archive, validate_restore_archive, write_manifest};
 
 /// Default backup directory.
 const DEFAULT_BACKUP_DIR: &str = "~/memex8-backups";
@@ -89,7 +89,12 @@ pub async fn backup(engine: &Engine, output_path: Option<&str>) -> anyhow::Resul
 }
 
 /// Restore memories, realms, and graph edges from a backup tarball.
-pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow::Result<usize> {
+pub async fn restore(
+    engine: &Engine,
+    backup_path: &str,
+    force: bool,
+    acknowledge_legacy_evidence_resurrection: bool,
+) -> anyhow::Result<usize> {
     let _guard = engine.store().maintenance_guard().await;
     let destination_evidence = engine.evidence_path();
     let restore_marker = destination_evidence.with_extension("restore-in-progress");
@@ -140,7 +145,11 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
     for snapshot in &memories {
         super::redaction::ensure_memory(&snapshot.memory)?;
     }
-    let paired = validate_archive(&temp_dir, &memories)?;
+    let paired = validate_restore_archive(
+        &temp_dir,
+        &memories,
+        acknowledge_legacy_evidence_resurrection,
+    )?;
     if paired {
         anyhow::ensure!(
             !crate::storage::evidence::replay_key_path(&destination_evidence).exists(),
@@ -659,6 +668,98 @@ mod tests {
     fn legacy_archive_without_evidence_is_supported() {
         let root = tempfile::tempdir().unwrap();
         assert!(!validate_archive(root.path(), &[]).unwrap());
+    }
+
+    #[test]
+    fn legacy_evidence_archive_requires_explicit_resurrection_acknowledgement() {
+        use crate::storage::evidence::{CaptureRequest, EvidenceStore};
+        let root = tempfile::tempdir().unwrap();
+        for name in [
+            "memories.json",
+            "realms.json",
+            "graph_edges.json",
+            "consolidations.json",
+        ] {
+            fs::write(root.path().join(name), b"[]").unwrap();
+        }
+        fs::write(root.path().join("config.json"), b"{}").unwrap();
+        let path = root.path().join("evidence.sqlite3");
+        let store = EvidenceStore::open(&path).unwrap();
+        store
+            .prepare(
+                "legacy",
+                "private content",
+                &CaptureRequest {
+                    speaker: "user".into(),
+                    origin: "explicit_rest".into(),
+                    pre_redacted: true,
+                    agent: None,
+                    device: None,
+                    session: None,
+                },
+                &[],
+                "private",
+            )
+            .unwrap();
+        drop(store);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE erasure_intents; PRAGMA user_version=1")
+            .unwrap();
+        drop(conn);
+        fs::remove_file(root.path().join("evidence.replay-key")).unwrap();
+        write_manifest(root.path(), true).unwrap();
+        assert!(validation::validate_restore_archive(root.path(), &[], false).is_err());
+        assert!(validation::validate_restore_archive(root.path(), &[], true).unwrap());
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute("DELETE FROM sources", [])
+            .unwrap();
+        write_manifest(root.path(), true).unwrap();
+        assert!(validation::validate_restore_archive(root.path(), &[], false).unwrap());
+    }
+
+    #[test]
+    fn malformed_same_column_replay_barrier_is_rejected_on_open_and_restore() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [
+            "memories.json",
+            "realms.json",
+            "graph_edges.json",
+            "consolidations.json",
+        ] {
+            fs::write(root.path().join(name), b"[]").unwrap();
+        }
+        fs::write(root.path().join("config.json"), b"{}").unwrap();
+        let path = root.path().join("evidence.sqlite3");
+        crate::storage::evidence::EvidenceStore::open(&path).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE erasure_intents; CREATE TABLE erasure_intents (memory_id TEXT, source_id TEXT, key_digest TEXT, complete INTEGER)").unwrap();
+        drop(conn);
+        write_manifest(root.path(), true).unwrap();
+        assert!(crate::storage::evidence::EvidenceStore::open(&path).is_err());
+        assert!(validate_archive(root.path(), &[]).is_err());
+    }
+
+    #[test]
+    fn malformed_same_column_sources_is_rejected_on_open_and_restore() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [
+            "memories.json",
+            "realms.json",
+            "graph_edges.json",
+            "consolidations.json",
+        ] {
+            fs::write(root.path().join(name), b"[]").unwrap();
+        }
+        fs::write(root.path().join("config.json"), b"{}").unwrap();
+        let path = root.path().join("evidence.sqlite3");
+        crate::storage::evidence::EvidenceStore::open(&path).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE sources; CREATE TABLE sources (source_id TEXT, memory_id TEXT, idempotency_key TEXT, request TEXT, record TEXT)").unwrap();
+        drop(conn);
+        write_manifest(root.path(), true).unwrap();
+        assert!(crate::storage::evidence::EvidenceStore::open(&path).is_err());
+        assert!(validate_archive(root.path(), &[]).is_err());
     }
 
     #[test]

@@ -40,7 +40,7 @@ Until safe lifecycle support exists:
 
 - Evidence-linked memory edits and deletion are refused. Do not use this feature for information that must be erasable yet.
 - Slumber is refused when evidence is enabled or its ledger has records.
-- Generic logical export/import remains refused. Paired logical backup/restore is now supported under the stopped-writer and empty-target restrictions in [the recovery checkpoint](EVIDENCE-RECOVERY-CHECKPOINT.md).
+- Generic logical export/import remains refused. Paired logical backup/restore is now supported under the stopped-writer and empty-target restrictions in [the recovery checkpoint](EVIDENCE-RECOVERY-CHECKPOINT.md). A schema-1 paired archive with evidence rows is **refused by default**: it predates erasure intents and may restore evidence subsequently deleted. For an exceptional isolated recovery onto a fresh empty target, `memex8 restore <archive> --acknowledge-legacy-evidence-resurrection` explicitly accepts that risk; `--force` only skips the existing-memory prompt and does not bypass this gate. Empty schema-1 evidence ledgers and archives without evidence remain compatible. An opt-in restore does not reconcile later erasures and must not be treated as safe production recovery.
 - A Qdrant copy without the matching SQLite ledger is not a complete evidence backup.
 
 Stopped-writer paired volume backups remain an option, with SQLite inside the archived writable mount and no external writers. The new paired logical recovery path is independently tested locally, but a production paired-volume restore drill has **not** been completed.

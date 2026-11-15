@@ -244,6 +244,9 @@ enum Commands {
         /// Skip confirmation
         #[arg(long)]
         force: bool,
+        /// Explicitly permit restoring pre-erasure evidence that may resurrect erased data
+        #[arg(long)]
+        acknowledge_legacy_evidence_resurrection: bool,
     },
 
     /// List available backups
@@ -808,9 +811,15 @@ async fn main() -> anyhow::Result<()> {
             let backup_path = engine.backup(path.as_deref()).await?;
             println!("📦 Backup created: {}", backup_path);
         }
-        Commands::Restore { path, force } => {
+        Commands::Restore {
+            path,
+            force,
+            acknowledge_legacy_evidence_resurrection,
+        } => {
             let engine = engine::Engine::new(config).await?;
-            let count = engine.restore(&path, force).await?;
+            let count = engine
+                .restore(&path, force, acknowledge_legacy_evidence_resurrection)
+                .await?;
             println!("📥 Restored {} items from: {}", count, path);
         }
         Commands::BackupList { dir } => {
