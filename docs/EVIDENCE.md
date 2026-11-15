@@ -1,6 +1,6 @@
 # Experimental explicit REST evidence
 
-Status: first local M1 slice, opt-in; not a complete evidence rollout. Do not activate against production until backup/restore and erasure gates are complete.
+Status: first local M1 slice, opt-in; not a complete evidence rollout. A local erasure checkpoint (durable intents, keyed replay barrier, coordinated projection deletion, response-construction ordering, and legacy-archive refusal) is implemented and tested on disposable backends, but physical-byte retention, a stopped-writer paired-volume restore drill and production activation gates remain open.
 
 ## What works
 
@@ -67,9 +67,20 @@ Direct Qdrant/SQLite access and independent server processes are outside this in
 - **Per-call SQLite access.** Every ledger check (`erased_ids`, tombstone re-checks, per-read filtering) opens a fresh SQLite connection through `EvidenceStore::connection`, with a 5-second busy timeout. Ordering comes from the in-process maintenance gate, not from the ledger; concurrent erasures on the same ledger can therefore surface `database is locked` after the timeout instead of queueing indefinitely inside SQLite. Sharing or pooling the connection is deliberately out of scope for this slice.
 - **Tag residue.** Tags live only in the Qdrant point payload, so erasing the projection removes a memory's tags from `GET /memories/tags` and from its own payload. Derived or cached aggregates (best-effort stats, external dashboards, client copies) and Qdrant's payload-index term state can still mention an opaque tag term or memory ID until that aggregate/index is regenerated. They do not retain evidence source text, but they are not part of the erasure claim either.
 
+## Residual bytes and older archives
+
+Deleting an evidence-linked memory is a **logical** deletion of the active source row, the replay key's barrier entry intent and the Qdrant projection. It does not physically overwrite storage media:
+
+- SQLite removes the source row, but the database does not enable `secure_delete`; freed pages, the WAL and `-wal`/`-shm` files may retain bytes until checkpointing/vacuuming, and copies made before deletion retain them indefinitely.
+- Qdrant deletes the point, but old segments, snapshots, WAL records and optimizer artifacts are not guaranteed to be scrubbed.
+- Any older archive (logical or volume) made before the deletion still contains the erased source and can restore it. Logical restore refuses evidence-bearing schema-1 archives by default and refuses a destination that carries erasure intents, but a **volume-level** restore of an older backup bypasses the ledger entirely.
+- `MEMEX8_BACKUP_WRITERS_STOPPED` attests that writers were stopped; it does not erase old backups or their retention copies.
+
+Therefore erasure must be paired with an explicit backup-retention policy and, for data that must be irrecoverable, a cryptographic-erasure design (encrypt sources with a per-record or per-ledger key that deletion destroys). Neither is implemented. Do not enable evidence capture for sensitive data until that policy exists and a stopped-writer paired-volume restore drill passes.
+
 ## Not implemented
 
-Provider/session/file ingestion attribution, automatic redaction, source revisions, historical timestamps, source erasure, recall receipts, evidence UI, generic logical import/export and reviewed slumber are not part of this slice. Do not assume explicit REST capture enables automatic chat capture with evidence.
+Provider/session/file ingestion attribution, automatic redaction, source revisions, historical timestamps, physical or cryptographic erasure, recall receipts, evidence UI, generic logical import/export and reviewed slumber are not part of this slice. Do not assume explicit REST capture enables automatic chat capture with evidence.
 
 ## Verified locally
 
