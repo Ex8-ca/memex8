@@ -197,12 +197,464 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
             .status(),
         400
     );
+    let pending_capture: memex8::storage::evidence::CaptureRequest =
+        serde_json::from_value(request["evidence"].clone()).unwrap();
+    fail_embedding.store(true, std::sync::atomic::Ordering::SeqCst);
+    let pending_request = json!({"content":"pending source", "tags":[], "idempotency_key":"backup-pending", "evidence":request["evidence"]});
+    assert_eq!(
+        client
+            .post(format!("{base}/memories"))
+            .bearer_auth("fixture-only")
+            .json(&pending_request)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        500
+    );
+    fail_embedding.store(false, std::sync::atomic::Ordering::SeqCst);
+    let pending =
+        memex8::storage::evidence::EvidenceStore::open(&dir.path().join("evidence.sqlite3"))
+            .unwrap()
+            .prepare(
+                "backup-pending",
+                "pending source",
+                &pending_capture,
+                &[],
+                "private",
+            )
+            .unwrap();
+    engine
+        .store()
+        .store_realm(
+            &uuid::Uuid::new_v4().to_string(),
+            &[1., 0., 0., 0., 0., 0., 0., 0.],
+            "fixture-realm",
+            Some("retained description"),
+            true,
+        )
+        .await
+        .unwrap();
+    let journal = memex8::storage::qdrant::ConsolidationOperation {
+        version: 1,
+        kind: "consolidation".into(),
+        dedup_winner: None,
+        summary_id: uuid::Uuid::new_v4().to_string(),
+        summary_hash: "fixture".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        state: "complete".into(),
+        preserve_originals: true,
+        embedding_provider: "ollama".into(),
+        embedding_model: "fixture".into(),
+        embedding_dimensions: 8,
+        sources: vec![engine
+            .store()
+            .get_memory_snapshot(legacy_id)
+            .await
+            .unwrap()
+            .unwrap()],
+        cooldown_until: None,
+    };
+    engine
+        .store()
+        .archive_consolidation(&journal)
+        .await
+        .unwrap();
+    let expected_realms = engine.store().list_realms().await.unwrap();
+    let graph_from = legacy_id.to_owned();
+    let graph_to = id.to_owned();
+    engine
+        .store()
+        .store_graph_edge(&memex8::storage::qdrant::GraphEdge {
+            from_memory_id: graph_from.clone(),
+            to_memory_id: graph_to.clone(),
+            relation_type: "references".into(),
+            weight: 0.5,
+        })
+        .await
+        .unwrap();
+    assert_eq!(engine.store().get_all_graph_edges().await.unwrap().len(), 1);
+    std::env::remove_var("MEMEX8_BACKUP_WRITERS_STOPPED");
     assert!(engine
-        .backup(Some(dir.path().join("backup").to_str().unwrap()))
+        .backup(Some(dir.path().join("refused-backup").to_str().unwrap()))
         .await
         .unwrap_err()
         .to_string()
-        .contains("evidence"));
+        .contains("stopped writers"));
+    // Fixture has no requests in flight; operator attestation is explicit.
+    std::env::set_var("MEMEX8_BACKUP_WRITERS_STOPPED", "1");
+    let paired_backup = engine
+        .backup(Some(dir.path().join("backup").to_str().unwrap()))
+        .await
+        .unwrap();
+    assert!(std::path::Path::new(&paired_backup).exists());
+    let target_dir = tempfile::tempdir().unwrap();
+    let mut target_config = engine.config().clone();
+    target_config.qdrant.url =
+        std::env::var("EVIDENCE_RESTORE_QDRANT_URL").expect("separate disposable restore Qdrant");
+    target_config.turbovec.index_path = target_dir.path().join("memories.tv").display().to_string();
+    target_config.turbovec.id_map_path = target_dir.path().join("ids.json").display().to_string();
+    let target = Arc::new(Engine::new(target_config.clone()).await.unwrap());
+    let legacy_archive = target_dir.path().join("legacy.tar.gz");
+    let legacy_snapshot = engine
+        .store()
+        .get_memory_snapshot(legacy_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut output = tar::Builder::new(flate2::write::GzEncoder::new(
+        std::fs::File::create(&legacy_archive).unwrap(),
+        flate2::Compression::default(),
+    ));
+    for (name, bytes) in [
+        (
+            "memories.json",
+            serde_json::to_vec(&vec![legacy_snapshot.clone()]).unwrap(),
+        ),
+        ("realms.json", b"[]".to_vec()),
+        ("graph_edges.json", b"[]".to_vec()),
+    ] {
+        let mut h = tar::Header::new_gnu();
+        h.set_mode(0o600);
+        h.set_size(bytes.len() as u64);
+        h.set_cksum();
+        output.append_data(&mut h, name, &bytes[..]).unwrap();
+    }
+    output.into_inner().unwrap().finish().unwrap();
+    assert_eq!(
+        target
+            .restore(legacy_archive.to_str().unwrap(), true)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        target.get_memory(legacy_id).await.unwrap().content,
+        legacy_snapshot.memory.content
+    );
+    target.delete_memory(legacy_id).await.unwrap();
+    for corrupt in [false, true] {
+        let broken = target_dir.path().join(if corrupt {
+            "corrupt.tar.gz"
+        } else {
+            "missing.tar.gz"
+        });
+        let input = std::fs::File::open(&paired_backup).unwrap();
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(input));
+        let mut output = tar::Builder::new(flate2::write::GzEncoder::new(
+            std::fs::File::create(&broken).unwrap(),
+            flate2::Compression::default(),
+        ));
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let name = entry.path().unwrap().into_owned();
+            if name == std::path::Path::new("evidence.sqlite3") {
+                if !corrupt {
+                    continue;
+                }
+                let bytes = b"corrupt database";
+                let mut header = tar::Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o600);
+                header.set_cksum();
+                output.append_data(&mut header, &name, &bytes[..]).unwrap();
+            } else {
+                output
+                    .append_data(&mut entry.header().clone(), &name, &mut entry)
+                    .unwrap();
+            }
+        }
+        output.into_inner().unwrap().finish().unwrap();
+        assert!(target
+            .restore(broken.to_str().unwrap(), true)
+            .await
+            .is_err());
+        assert!(target
+            .store()
+            .scroll_all_memories()
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(target.store().list_realms().await.unwrap().is_empty());
+        assert!(target
+            .store()
+            .get_all_graph_edges()
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(target
+            .store()
+            .list_consolidations()
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!target_dir.path().join("evidence.sqlite3").exists());
+    }
+    let pairs = [
+        ("scope", false),
+        ("foreign", false),
+        ("span", false),
+        ("schema", false),
+        ("realm-id", false),
+        ("realm-dimensions", false),
+        ("graph-id", false),
+        ("journal-id", false),
+        ("journal-dimensions", false),
+    ];
+    for (kind, _) in pairs {
+        let broken = target_dir.path().join(format!("invalid-{kind}.tar.gz"));
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(
+            std::fs::File::open(&paired_backup).unwrap(),
+        ));
+        let mut components = std::collections::BTreeMap::<String, Vec<u8>>::new();
+        use std::io::Read;
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let name = entry.path().unwrap().to_str().unwrap().to_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            components.insert(name, bytes);
+        }
+        let mut memories: Value = serde_json::from_slice(&components["memories.json"]).unwrap();
+        let linked = memories
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|m| m["id"] == id)
+            .unwrap();
+        match kind {
+            "scope" => linked["tags"] = json!(["foreign"]),
+            "foreign" => {
+                linked["evidence_refs"][0]["source_id"] = json!(uuid::Uuid::new_v4().to_string())
+            }
+            "span" => linked["evidence_refs"][0]["end_byte"] = json!(99999),
+            _ => linked["evidence_refs"][0]["schema_version"] = json!(99),
+        }
+        let component = match kind {
+            "realm-id" | "realm-dimensions" => "realms.json",
+            "graph-id" => "graph_edges.json",
+            "journal-id" | "journal-dimensions" => "consolidations.json",
+            _ => "memories.json",
+        };
+        let mut document = if component == "memories.json" {
+            memories
+        } else {
+            serde_json::from_slice(&components[component]).unwrap()
+        };
+        match kind {
+            "realm-id" => document[0]["id"] = json!("bad"),
+            "realm-dimensions" => document[0]["centroid"] = json!([1.0]),
+            "graph-id" => document[0]["to_memory_id"] = json!("bad"),
+            "journal-id" => document[0]["summary_id"] = json!("bad"),
+            "journal-dimensions" => document[0]["sources"][0]["vector"] = json!([1.0]),
+            _ => {}
+        }
+        let bytes = serde_json::to_vec(&document).unwrap();
+        let mut manifest: Value = serde_json::from_slice(&components["manifest.json"]).unwrap();
+        use sha2::Digest;
+        manifest["files"][component] = json!(format!("{:x}", sha2::Sha256::digest(&bytes)));
+        components.insert(component.into(), bytes);
+        components.insert(
+            "manifest.json".into(),
+            serde_json::to_vec(&manifest).unwrap(),
+        );
+        let mut output = tar::Builder::new(flate2::write::GzEncoder::new(
+            std::fs::File::create(&broken).unwrap(),
+            flate2::Compression::default(),
+        ));
+        for (name, bytes) in components {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(bytes.len() as u64);
+            h.set_mode(0o600);
+            h.set_cksum();
+            output.append_data(&mut h, name, &bytes[..]).unwrap();
+        }
+        output.into_inner().unwrap().finish().unwrap();
+        assert!(
+            target
+                .restore(broken.to_str().unwrap(), true)
+                .await
+                .is_err(),
+            "{kind}"
+        );
+        assert!(target
+            .store()
+            .scroll_all_memories()
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!target_dir.path().join("evidence.sqlite3").exists());
+    }
+    // Real TCP transport failure after SQLite has been installed, not a mocked restore.
+    let failure_dir = tempfile::tempdir().unwrap();
+    let backend_url = target_config.qdrant.url.clone();
+    assert!(backend_url.starts_with("http://127.0.0.1:"));
+    let backend_addr = backend_url.trim_start_matches("http://").to_owned();
+    let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cut = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let a = armed.clone();
+    let c = cut.clone();
+    let ledger_path = failure_dir.path().join("evidence.sqlite3");
+    let proxy_task = tokio::spawn(async move {
+        loop {
+            let (mut incoming, _) = proxy.accept().await.unwrap();
+            let mut outgoing = tokio::net::TcpStream::connect(&backend_addr).await.unwrap();
+            let (a, c, path) = (a.clone(), c.clone(), ledger_path.clone());
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let (mut reader, mut writer) = incoming.split();
+                let (mut backend_reader, mut backend_writer) = outgoing.split();
+                let forward = async {
+                    let mut bytes = [0u8; 16384];
+                    loop {
+                        let n = reader.read(&mut bytes).await?;
+                        if n == 0 {
+                            break;
+                        }
+                        if a.load(std::sync::atomic::Ordering::SeqCst) && path.exists() {
+                            c.store(true, std::sync::atomic::Ordering::SeqCst);
+                            break;
+                        }
+                        backend_writer.write_all(&bytes[..n]).await?;
+                    }
+                    Ok::<_, std::io::Error>(())
+                };
+                tokio::select! {
+                    _ = forward => {},
+                    _ = tokio::io::copy(&mut backend_reader, &mut writer) => {}
+                }
+            });
+        }
+    });
+    let mut failure_config = target_config.clone();
+    failure_config.qdrant.url = format!("http://{proxy_addr}");
+    failure_config.turbovec.index_path =
+        failure_dir.path().join("memories.tv").display().to_string();
+    failure_config.turbovec.id_map_path = failure_dir.path().join("ids.json").display().to_string();
+    let failing = Engine::new(failure_config).await.unwrap();
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = failing
+        .restore(&paired_backup, true)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        cut.load(std::sync::atomic::Ordering::SeqCst),
+        "transport was not cut"
+    );
+    assert!(
+        error.contains("restore write phase failed") && error.contains("discard BOTH"),
+        "{error}"
+    );
+    let conn = rusqlite::Connection::open(failure_dir.path().join("evidence.sqlite3")).unwrap();
+    assert!(
+        conn.query_row("SELECT COUNT(*) FROM sources", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+            > 0
+    );
+    assert!(failing
+        .restore(&paired_backup, true)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("previous restore may be partial"));
+    proxy_task.abort();
+    // No Qdrant projection is guaranteed before transport loss; reset any that arrived.
+    for memory in target.store().scroll_all_memories().await.unwrap() {
+        target.store().delete_memory(&memory.id).await.unwrap();
+    }
+    assert!(target.restore(&paired_backup, true).await.unwrap() >= 2);
+    assert_eq!(target.store().get_all_graph_edges().await.unwrap().len(), 1);
+    let restored_realms = target.store().list_realms().await.unwrap();
+    assert_eq!(restored_realms.len(), expected_realms.len());
+    for expected in &expected_realms {
+        let actual = restored_realms
+            .iter()
+            .find(|r| r.id == expected.id)
+            .unwrap();
+        assert_eq!(actual.name, expected.name);
+        assert_eq!(actual.centroid, expected.centroid);
+        assert_eq!(actual.description, expected.description);
+        assert_eq!(actual.is_user_pinned, expected.is_user_pinned);
+    }
+    assert_eq!(
+        serde_json::to_value(
+            target
+                .store()
+                .get_consolidation(&journal.summary_id)
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(&journal).unwrap()
+    );
+    assert_eq!(
+        target.read_evidence(id, source).await.unwrap().content,
+        "exact\nexcerpt"
+    );
+    let retry_pending =
+        memex8::storage::evidence::EvidenceStore::open(&target_dir.path().join("evidence.sqlite3"))
+            .unwrap()
+            .prepare(
+                "backup-pending",
+                "pending source",
+                &pending_capture,
+                &[],
+                "private",
+            )
+            .unwrap();
+    assert_eq!(retry_pending.memory_id, pending.memory_id);
+    assert_eq!(retry_pending.source_id, pending.source_id);
+    assert!(target
+        .read_evidence(&pending.memory_id, &pending.source_id)
+        .await
+        .is_err());
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let target_port = socket.local_addr().unwrap().port();
+    drop(socket);
+    let restored_engine = target.clone();
+    let target_server = tokio::spawn(async move {
+        run_with_engine(target_config, restored_engine, "127.0.0.1", target_port)
+            .await
+            .unwrap()
+    });
+    let restored_endpoint =
+        format!("http://127.0.0.1:{target_port}/api/v1/memories/{id}/evidence/{source}");
+    for _ in 0..100 {
+        if client.get(&restored_endpoint).send().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        client
+            .get(&restored_endpoint)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    let readback: Value = client
+        .get(&restored_endpoint)
+        .bearer_auth("fixture-only")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(readback, evidence);
+    target_server.abort();
+    assert!(target
+        .restore(&paired_backup, true)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("empty"));
     assert!(engine
         .export(dir.path().join("export.json").to_str().unwrap())
         .await

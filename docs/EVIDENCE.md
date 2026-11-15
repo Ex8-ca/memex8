@@ -40,14 +40,14 @@ Until safe lifecycle support exists:
 
 - Evidence-linked memory edits and deletion are refused. Do not use this feature for information that must be erasable yet.
 - Slumber is refused when evidence is enabled or its ledger has records.
-- Unsupported logical backup/export/import/restore is refused rather than producing dangling references. Disabling capture does not bypass existing ledger/reference checks.
+- Generic logical export/import remains refused. Paired logical backup/restore is now supported under the stopped-writer and empty-target restrictions in [the recovery checkpoint](EVIDENCE-RECOVERY-CHECKPOINT.md).
 - A Qdrant copy without the matching SQLite ledger is not a complete evidence backup.
 
-Use stopped-writer paired volume backup only, with SQLite inside the archived writable mount and no external writers. A production paired restore drill has **not** been completed.
+Stopped-writer paired volume backups remain an option, with SQLite inside the archived writable mount and no external writers. The new paired logical recovery path is independently tested locally, but a production paired-volume restore drill has **not** been completed.
 
 ## Not implemented
 
-Provider/session/file ingestion attribution, automatic redaction, source revisions, historical timestamps, source erasure, recall receipts, evidence UI, logical paired transfer and reviewed slumber are not part of this slice. Do not assume explicit REST capture enables automatic chat capture with evidence.
+Provider/session/file ingestion attribution, automatic redaction, source revisions, historical timestamps, source erasure, recall receipts, evidence UI, generic logical import/export and reviewed slumber are not part of this slice. Do not assume explicit REST capture enables automatic chat capture with evidence.
 
 ## Verified locally
 

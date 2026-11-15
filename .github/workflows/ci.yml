@@ -18,6 +18,10 @@ jobs:
         image: qdrant/qdrant:v1.17.0
         ports:
           - 6336:6334
+      evidence-restore-qdrant:
+        image: qdrant/qdrant:v1.17.0
+        ports:
+          - 6337:6334
       evidence-qdrant:
         image: qdrant/qdrant:v1.17.0
         ports:
@@ -87,6 +91,7 @@ jobs:
       - name: Test explicit REST evidence against disposable Qdrant
         env:
           EVIDENCE_QDRANT_URL: http://127.0.0.1:6335
+          EVIDENCE_RESTORE_QDRANT_URL: http://127.0.0.1:6337
         run: cargo test --test evidence_api -- --ignored
 
       - name: Upload binary
