@@ -48,6 +48,17 @@ pub struct EvidenceStore {
     path: PathBuf,
 }
 impl EvidenceStore {
+    /// Consistent logical SQLite snapshot, including committed WAL pages and pending prepares.
+    pub fn snapshot(&self, destination: &Path) -> Result<()> {
+        self.connection()?
+            .backup(rusqlite::MAIN_DB, destination, None)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    }
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

@@ -2090,8 +2090,25 @@ impl QdrantStore {
 
     /// Store a graph edge in the graph_edges collection.
     pub async fn store_graph_edge(&self, edge: &GraphEdge) -> anyhow::Result<()> {
-        let point_id = format!("edge:{}:{}", edge.from_memory_id, edge.to_memory_id);
-        let vector = vec![0.0f32; 1];
+        // Qdrant accepts UUID/u64 point IDs, not the former `edge:from:to` string.
+        // A stable SHA-256-derived UUID retains directed-pair upsert semantics.
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(
+            format!("edge:{}:{}", edge.from_memory_id, edge.to_memory_id).as_bytes(),
+        );
+        let point_id = uuid::Uuid::from_bytes(digest[..16].try_into()?).to_string();
+        let info = self.client.collection_info(GRAPHS).await?;
+        let dims = match info
+            .result
+            .and_then(|i| i.config)
+            .and_then(|c| c.params)
+            .and_then(|p| p.vectors_config)
+            .and_then(|v| v.config)
+        {
+            Some(qdrant_client::qdrant::vectors_config::Config::Params(p)) => p.size as usize,
+            _ => anyhow::bail!("unsupported graph vector configuration"),
+        };
+        let vector = vec![0.0f32; dims];
         let payload: qdrant_client::Payload = serde_json::json!({
             "from_memory_id": &edge.from_memory_id,
             "to_memory_id": &edge.to_memory_id,
@@ -2102,10 +2119,10 @@ impl QdrantStore {
         .unwrap_or_default();
 
         self.client
-            .upsert_points(UpsertPointsBuilder::new(
-                GRAPHS,
-                vec![PointStruct::new(point_id, vector, payload)],
-            ))
+            .upsert_points(
+                UpsertPointsBuilder::new(GRAPHS, vec![PointStruct::new(point_id, vector, payload)])
+                    .wait(true),
+            )
             .await?;
         Ok(())
     }

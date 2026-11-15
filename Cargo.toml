@@ -43,7 +43,7 @@ serde_json = "1"
 toml = "0.8"
 
 # Transactional local source evidence (bundled SQLite avoids host dependencies)
-rusqlite = { version = "0.38", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled", "backup"] }
 
 # Qdrant client
 qdrant-client = "1.12"
@@ -108,6 +108,7 @@ regex = "1.12.3"
 # Backup/restore (tarballs)
 flate2 = "1"
 tar = "0.4"
+tempfile = "3"
 
 # TurboQuant vector compression (replaces ScalarQuant)
 turbovec = "0.2"
