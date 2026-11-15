@@ -241,11 +241,6 @@ pub async fn delete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, crate::api::error::ApiError> {
-    state
-        .engine
-        .refuse_evidence_mutation(&id)
-        .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     state.engine.delete_memory(&id).await?;
     Ok(Json(serde_json::json!({"deleted": id})))
 }

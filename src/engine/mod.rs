@@ -227,6 +227,8 @@ impl Engine {
             dreams,
             dream_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
+        // Reconcile before loading any searchable index or exposing this engine.
+        engine.reconcile_pending_erasures().await?;
         if let Err(e) = engine.rebuild_lexical_index().await {
             tracing::warn!(
                 "Lexical index not built ({e}); search stays vector-only until the next rebuild"
@@ -1239,18 +1241,34 @@ impl Engine {
     }
 
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
-        self.refuse_evidence_mutation(id).await?;
+        anyhow::ensure!(
+            uuid::Uuid::parse_str(id).is_ok(),
+            "expected UUID memory identifier"
+        );
         let _guard = self.store.maintenance_guard().await;
+        if let Some(ledger) = self.evidence_store()? {
+            if ledger.begin_erase(id)?.is_some() {
+                self.store
+                    .delete_projection_after_erasure_intent(id)
+                    .await?;
+                ledger.finish_erase(id)?;
+                self.lexical.write().await.remove(id);
+                // TurboVec has no per-ID removal; never retain a stale candidate map.
+                *self.turbovec_index.write().await = None;
+                return Ok(());
+            }
+        }
         self.store.delete_memory(id).await?;
         self.lexical.write().await.remove(id);
+        *self.turbovec_index.write().await = None;
         Ok(())
     }
 
     pub async fn edit_memory(&self, id: &str, new_content: &str) -> anyhow::Result<()> {
-        self.refuse_evidence_mutation(id).await?;
         let clean_content = redaction::required(new_content)?;
         let new_content = clean_content.as_str();
         let _guard = self.store.maintenance_guard().await;
+        self.refuse_evidence_mutation(id).await?;
         let mut existing = self.get_memory(id).await?;
         if existing.is_certified() {
             return Err(crate::storage::qdrant::CertifiedMemoryError.into());

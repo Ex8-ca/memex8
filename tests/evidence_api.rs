@@ -190,12 +190,11 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     assert_eq!(
         client
             .delete(format!("{base}/memories/{id}"))
-            .bearer_auth("fixture-only")
             .send()
             .await
             .unwrap()
             .status(),
-        400
+        401
     );
     let pending_capture: memex8::storage::evidence::CaptureRequest =
         serde_json::from_value(request["evidence"].clone()).unwrap();
@@ -893,6 +892,150 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .unwrap_err()
         .to_string()
         .contains("evidence"));
+    // Cross-store deletion: API auth, projection, source, replay and search paths.
+    assert_eq!(
+        client
+            .delete(format!("{base}/memories/{id}"))
+            .bearer_auth("fixture-only")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/memories/{id}"))
+            .bearer_auth("fixture-only")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    assert_eq!(
+        client
+            .get(&endpoint)
+            .bearer_auth("fixture-only")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    assert!(engine.store().get_memory(id).await.unwrap().is_none());
+    assert!(engine.read_evidence(id, source).await.is_err());
+    assert_eq!(
+        client
+            .post(format!("{base}/memories"))
+            .bearer_auth("fixture-only")
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(
+        client
+            .delete(format!("{base}/memories/{id}"))
+            .bearer_auth("fixture-only")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert!(engine
+        .search("exact excerpt", None, None, 20, 0, 0.0)
+        .await
+        .unwrap()
+        .iter()
+        .all(|m| m.id != id));
+    let ledger =
+        memex8::storage::evidence::EvidenceStore::open(&dir.path().join("evidence.sqlite3"))
+            .unwrap();
+    assert!(!ledger.contains_memory(id).unwrap());
+    // Prepared-only deletion and interrupted intent are reconciled before Engine::new returns.
+    assert_eq!(
+        client
+            .delete(format!("{base}/memories/{memory_pending}"))
+            .bearer_auth("fixture-only")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/memories"))
+            .bearer_auth("fixture-only")
+            .json(&interrupted)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    // A legacy memory has no ledger row: use a new evidence capture for the crash fixture.
+    let crash_request = json!({"content":"crash fixture unique phrase", "idempotency_key":"crash-fixture", "evidence":request["evidence"]});
+    let crash: Value = client
+        .post(format!("{base}/memories"))
+        .bearer_auth("fixture-only")
+        .json(&crash_request)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let crash_id = crash["id"].as_str().unwrap();
+    assert_ne!(crash_id, legacy_id);
+    // Persist a stale TurboVec index containing the doomed point; startup must
+    // still reconcile and searches must not return its Qdrant payload.
+    let snapshot = engine
+        .store()
+        .get_memory_snapshot(crash_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut stale = memex8::engine::quantizer::TurboQuantVectorIndex::new(8, 4);
+    stale.add_batch(&[crash_id.to_owned()], &[snapshot.vector]);
+    stale
+        .save(
+            &engine.config().turbovec.index_path,
+            &engine.config().turbovec.id_map_path,
+        )
+        .unwrap();
+    ledger.begin_erase(crash_id).unwrap();
+    assert!(engine.store().get_memory(crash_id).await.unwrap().is_some());
     server.abort();
+    let restarted = Engine::new(engine.config().clone()).await.unwrap();
+    assert!(restarted
+        .store()
+        .get_memory(crash_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(ledger.pending_erasures().unwrap().is_empty());
+    assert!(restarted
+        .search("crash fixture unique phrase", None, None, 20, 0, 0.0)
+        .await
+        .unwrap()
+        .iter()
+        .all(|m| m.id != crash_id));
+    assert!(restarted
+        .store_with_evidence(
+            "crash fixture unique phrase",
+            vec![],
+            None,
+            None,
+            None,
+            Some("crash-fixture"),
+            &pending_capture
+        )
+        .await
+        .is_err());
     fixture.abort();
 }

@@ -26,6 +26,25 @@ impl Engine {
         }
         Ok(())
     }
+    /// Complete every durable erasure work item before startup can serve reads or capture.
+    pub(super) async fn reconcile_pending_erasures(&self) -> anyhow::Result<()> {
+        let _guard = self.store.maintenance_guard().await;
+        if let Some(ledger) = self.evidence_store()? {
+            let pending = ledger.pending_erasures()?;
+            if !pending.is_empty() {
+                for intent in pending {
+                    self.store
+                        .delete_projection_after_erasure_intent(&intent.memory_id)
+                        .await?;
+                    ledger.finish_erase(&intent.memory_id)?;
+                }
+                // A loaded TurboVec index can still contain erased IDs; discard it.
+                *self.turbovec_index.write().await = None;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn refuse_evidence_mutation(&self, id: &str) -> anyhow::Result<()> {
         if let Some(store) = self.evidence_store()? {
             anyhow::ensure!(!store.contains_memory(id)?, "evidence-linked mutation/deletion unsupported: source erasure and revisions are not implemented");

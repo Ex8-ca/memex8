@@ -1191,6 +1191,14 @@ impl QdrantStore {
 
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
         self.refuse_evidence_mutation(id).await?;
+        self.delete_projection_after_erasure_intent(id).await
+    }
+
+    /// Internal projection step; the engine must first persist an erasure intent.
+    pub(crate) async fn delete_projection_after_erasure_intent(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<()> {
         self.client
             .delete_points(
                 DeletePointsBuilder::new(MEMORIES)
