@@ -142,7 +142,7 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
     anyhow::ensure!(
         memories
             .iter()
-            .all(|m| m.vector.len() == engine.config().embedding.dimensions as usize),
+            .all(|m| m.vector.len() == engine.embed_dimensions as usize),
         "backup vector dimensions incompatible with destination"
     );
     anyhow::ensure!(
@@ -159,7 +159,7 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
     anyhow::ensure!(
         realms
             .iter()
-            .all(|r| r.centroid.len() == engine.config().embedding.dimensions as usize),
+            .all(|r| r.centroid.len() == engine.embed_dimensions as usize),
         "realm dimensions incompatible with destination"
     );
     let _: Vec<crate::storage::qdrant::GraphEdge> =
@@ -183,7 +183,7 @@ pub async fn restore(engine: &Engine, backup_path: &str, force: bool) -> anyhow:
     // progressed operation by restoring an older backup over it.
     for operation in &journals {
         anyhow::ensure!(
-            operation.embedding_dimensions == engine.config().embedding.dimensions as usize,
+            operation.embedding_dimensions == engine.embed_dimensions as usize,
             "journal dimensions incompatible with destination"
         );
         super::redaction::ensure_clean(operation)?;

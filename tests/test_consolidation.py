@@ -179,6 +179,32 @@ class ConsolidationTests(unittest.TestCase):
         self.assertEqual(error.exception.code, code)
         error.exception.close()
 
+    def test_backup_restore_uses_active_embedding_dimensions(self):
+        with fixture() as source:
+            ids = seed_sources(source)
+            backup_dir = source["work"] / "backups"
+            subprocess.run(source["command"] + ["backup", str(backup_dir)],
+                           env=source["env"], cwd=source["work"], capture_output=True,
+                           text=True, check=True, timeout=60)
+            backup_path = str(next(backup_dir.glob("*.tar.gz")))
+            with fixture() as recovery:
+                # The file keeps its default dimensions; the running embedder and
+                # Qdrant use the environment override. Restore must use that too.
+                self.assertNotIn('dimensions = 64', Path(recovery["command"][2]).read_text())
+                result = subprocess.run(recovery["command"] + ["restore", backup_path, "--force"],
+                                        env=recovery["env"], cwd=recovery["work"],
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual({p["id"] for p in points(recovery)}, set(ids))
+            with fixture() as incompatible:
+                result = subprocess.run(incompatible["command"] + ["restore", backup_path, "--force"],
+                                        env={**incompatible["env"], "EMBEDDING_DIMENSIONS": "32"},
+                                        cwd=incompatible["work"], capture_output=True,
+                                        text=True, timeout=60)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("backup vector dimensions incompatible with destination", result.stderr)
+                self.assertEqual(points(incompatible), [])
+
     def test_archive_restore_retry_cooldown_and_contracts(self):
         with fixture() as f:
             ids = seed_sources(f)
