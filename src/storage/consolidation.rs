@@ -57,6 +57,35 @@ pub fn content_hash(content: &str) -> String {
     format!("{:x}", Sha256::digest(content.as_bytes()))
 }
 
+/// Debug-only failpoint for the interrupted-source-deletion regression.
+///
+/// `MEMEX8_TEST_FAIL_NTH_DELETE=<n>` makes the `n`-th snapshot deletion in this
+/// process fail. Counting is what makes a *mid-loop* interruption reproducible:
+/// the caller cannot choose which source Qdrant hands back first. Nothing is
+/// compiled into release builds.
+#[cfg(debug_assertions)]
+fn injected_delete_failure(memory_id: &str) -> bool {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    let Ok(nth) = std::env::var("MEMEX8_TEST_FAIL_NTH_DELETE") else {
+        return false;
+    };
+    let Ok(nth) = nth.trim().parse::<usize>() else {
+        return false;
+    };
+    let call = CALLS.fetch_add(1, Ordering::SeqCst) + 1;
+    if call == nth {
+        tracing::warn!(
+            memory_id,
+            call,
+            "Injected source deletion failure (test failpoint)"
+        );
+        true
+    } else {
+        false
+    }
+}
+
 // Legacy payloads may omit fields that deserialize to empty strings.
 fn snapshot_condition(field: &str, value: &str) -> Condition {
     if value.is_empty() {
@@ -152,6 +181,35 @@ impl QdrantStore {
     pub async fn pending_dedup_operations(&self) -> anyhow::Result<Vec<ConsolidationOperation>> {
         self.list_consolidations_filtered(Some(Filter::must([
             Condition::matches("operation.kind", "dedup".to_string()),
+            Condition::matches("operation.state", "prepared".to_string()),
+        ])))
+        .await
+    }
+
+    /// Consolidation journals whose source deletion was interrupted.
+    ///
+    /// `deleting` is written before the first source is removed, so a journal in
+    /// this state always has a stored summary and an incomplete source set that
+    /// must be finished before a new plan is made for the same realm.
+    pub async fn pending_consolidation_deletions(
+        &self,
+    ) -> anyhow::Result<Vec<ConsolidationOperation>> {
+        self.list_consolidations_filtered(Some(Filter::must([
+            Condition::matches("operation.kind", "consolidation".to_string()),
+            Condition::matches("operation.state", "deleting".to_string()),
+        ])))
+        .await
+    }
+
+    /// Consolidation journals that never left `prepared`.
+    ///
+    /// Journals written before the resumable deletion phase existed recorded
+    /// `prepared` and then deleted sources in the same phase, so one of these with
+    /// a durable summary may still be missing sources. Callers must check the
+    /// summary before treating it as interrupted.
+    pub async fn prepared_consolidations(&self) -> anyhow::Result<Vec<ConsolidationOperation>> {
+        self.list_consolidations_filtered(Some(Filter::must([
+            Condition::matches("operation.kind", "consolidation".to_string()),
             Condition::matches("operation.state", "prepared".to_string()),
         ])))
         .await
@@ -366,6 +424,17 @@ impl QdrantStore {
     /// an edited or newly certified source cannot be removed from a stale snapshot.
     pub async fn delete_consolidation_snapshot(&self, memory: &MemoryPoint) -> anyhow::Result<()> {
         self.refuse_evidence_mutation(&memory.id).await?;
+        // Debug-only fault injection: the interrupted-source-deletion regression
+        // needs a failure *inside* the deletion loop, and no production input can
+        // make a guarded delete fail on demand without corrupting a real
+        // collection. Compiled out of release builds entirely.
+        #[cfg(debug_assertions)]
+        if injected_delete_failure(&memory.id) {
+            return Err(anyhow::anyhow!(
+                "injected source deletion failure for {}",
+                memory.id
+            ));
+        }
         let filter = Filter {
             must: vec![
                 Condition::has_id([memory.id.clone()]),

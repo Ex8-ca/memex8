@@ -104,6 +104,13 @@ impl SlumberEngine {
         &self,
         force_consolidation: bool,
     ) -> anyhow::Result<SlumberReport> {
+        // Debug-only failpoint: the panic-resets-status regression needs a
+        // pipeline that crashes the way an unwrap/assert bug would. Compiled out
+        // of release builds.
+        #[cfg(debug_assertions)]
+        if std::env::var("MEMEX8_TEST_PANIC_SLUMBER").is_ok() {
+            panic!("injected slumber panic for the status-reset regression");
+        }
         let _certification_guard = self.store.maintenance_guard().await;
         let path = Path::new(&self.config.turbovec.index_path)
             .parent()
@@ -1852,12 +1859,141 @@ impl SlumberEngine {
 
     // ─── Phase 6: LLM Memory Consolidation ────────────────────────────────────
 
+    /// Finish the source-deletion phase of one consolidation journal.
+    ///
+    /// The order is deliberate and durable: the summary is stored first, then the
+    /// journal records `deleting`, and only then are sources removed. A transport
+    /// failure anywhere in the loop leaves the journal in `deleting`, which
+    /// [`Self::resume_pending_source_deletions`] completes on the next run against
+    /// the *same* plan. Re-planning over the survivors instead would store a
+    /// second, overlapping summary, because a smaller source set has a different
+    /// fingerprint and no matching `consolidated_from` list.
+    ///
+    /// A source that was edited or certified after the snapshot is retained: the
+    /// guarded delete refuses it, and that refusal is the guard working, not an
+    /// error to abort on.
+    async fn finish_consolidation_deletions(
+        &self,
+        operation: &mut crate::storage::qdrant::ConsolidationOperation,
+    ) -> anyhow::Result<usize> {
+        if operation.preserve_originals {
+            // Nothing to remove; the journal only needs its terminal state.
+            if operation.state != "complete" {
+                self.store
+                    .update_consolidation_state(operation, "complete")
+                    .await?;
+            }
+            return Ok(0);
+        }
+        if operation.state != "deleting" {
+            // Durable record that sources may now be missing. Written *before*
+            // the first delete so an interruption is always recoverable.
+            self.store
+                .update_consolidation_state(operation, "deleting")
+                .await?;
+        }
+        let mut deleted = 0;
+        for source in &operation.sources {
+            if self.store.get_memory(&source.memory.id).await?.is_none() {
+                // Removed by an earlier attempt; keep the references tidy.
+                if let Err(e) = self
+                    .store
+                    .prune_duplicate_references(&source.memory.id)
+                    .await
+                {
+                    tracing::warn!("  Reference prune failed for {}: {}", source.memory.id, e);
+                }
+                continue;
+            }
+            match self
+                .store
+                .delete_consolidation_snapshot(&source.memory)
+                .await
+            {
+                Ok(()) => {
+                    deleted += 1;
+                    // Graph edges and association lists must not name a memory
+                    // that no longer exists; single deletions do not rebuild them.
+                    if let Err(e) = self
+                        .store
+                        .prune_duplicate_references(&source.memory.id)
+                        .await
+                    {
+                        tracing::warn!("  Reference prune failed for {}: {}", source.memory.id, e);
+                    }
+                }
+                Err(e)
+                    if e.downcast_ref::<crate::storage::qdrant::RecoveryError>()
+                        .is_some() =>
+                {
+                    tracing::warn!(
+                        "  Source {} retained (edited or certified since the snapshot): {e}",
+                        source.memory.id
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        self.store
+            .update_consolidation_state(operation, "complete")
+            .await?;
+        Ok(deleted)
+    }
+
+    /// Finish journals whose source deletion was interrupted.
+    ///
+    /// Runs before any new plan is made. `deleting` is written by the phase above.
+    /// A legacy `prepared` journal is resumed only when its summary is already
+    /// durable and unchanged: that is the state the old code left behind when it
+    /// aborted mid-loop, and no source had been removed before a `prepared`
+    /// journal whose summary is missing.
+    async fn resume_pending_source_deletions(&self) -> anyhow::Result<usize> {
+        let mut pending = self.store.pending_consolidation_deletions().await?;
+        for prepared in self.store.prepared_consolidations().await? {
+            let unchanged = self
+                .store
+                .get_memory(&prepared.summary_id)
+                .await?
+                .is_some_and(|summary| {
+                    crate::storage::qdrant::content_hash(&summary.content) == prepared.summary_hash
+                });
+            if unchanged {
+                pending.push(prepared);
+            }
+        }
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let mut resumed = 0;
+        for mut operation in pending {
+            let deleted = self.finish_consolidation_deletions(&mut operation).await?;
+            tracing::info!(
+                summary_id = %operation.summary_id,
+                sources_deleted = deleted,
+                "Resumed interrupted consolidation source deletion"
+            );
+            resumed += 1;
+        }
+        Ok(resumed)
+    }
+
     /// Use an LLM to consolidate raw conversation fragments into clean summaries.
     /// Groups memories by realm, sends batches to local LLM (Qwen 3.6 via Unsloth),
     /// then replaces fragmented memories with clean summaries.
     async fn llm_consolidate(&self) -> anyhow::Result<usize> {
         if !self.config.slumber.consolidation.enabled {
             return Ok(0);
+        }
+        // Finish every journal whose source deletion was interrupted *before*
+        // planning anything new. A plan made over a partially deleted source set
+        // has a different fingerprint from the stored one, so its summary would
+        // overlap the summary the interrupted journal already stored.
+        let resumed = self.resume_pending_source_deletions().await?;
+        if resumed > 0 {
+            tracing::info!(
+                "  Resumed {} interrupted consolidation deletion phase(s) before planning",
+                resumed
+            );
         }
         let backend = &self.config.slumber.consolidation.backend;
         let model = self.config.slumber.consolidation.model.clone();
@@ -2007,19 +2143,14 @@ impl SlumberEngine {
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to embed summary: {}", e))?;
 
-            // Collect IDs to delete
             // Respect config preserve_originals (default true). When
             // false, the original memories are deleted and replaced by
             // the summary; when true, the originals are kept and the
             // summary is added alongside. The value `false` hardcoded
             // here previously made preserve_originals a dead config —
-            // fixed 2026-10-04.
+            // fixed 2026-10-04. The journal records the choice, so the
+            // resumable deletion phase reads it from there.
             let preserve_originals = self.config.slumber.summarize.preserve_originals;
-            let ids_to_delete: Vec<String> = if preserve_originals {
-                Vec::new()
-            } else {
-                source_ids.clone()
-            };
 
             // Store the consolidated summary with its own embedded vector.
             // Inherit memory_type from the source memories so the summary's
@@ -2141,16 +2272,12 @@ impl SlumberEngine {
                 stored.content == summary && stored.consolidated_from == source_ids,
                 "Consolidated summary read-back mismatch"
             );
-            for source in &operation.sources {
-                if ids_to_delete.contains(&source.memory.id) {
-                    self.store
-                        .delete_consolidation_snapshot(&source.memory)
-                        .await?;
-                }
-            }
-            self.store
-                .update_consolidation_state(&mut operation, "complete")
-                .await?;
+            // The journal is durable and the summary is readable, so the deletion
+            // phase can begin. It is a resumable step of its own: `deleting`
+            // records that sources may be missing, and a failure here is finished
+            // by the next run against this same plan rather than re-planned over
+            // the survivors (which would store a second, overlapping summary).
+            self.finish_consolidation_deletions(&mut operation).await?;
 
             tracing::info!(
                 "  Consolidated {} memories → 1 summary in '{}'",

@@ -32,6 +32,7 @@ pub use crate::engine::watcher::{FileChangeEvent, FileWatcher};
 use crate::storage::qdrant::{MemoryWithVector, QdrantStore};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -93,13 +94,36 @@ pub(crate) fn verification_score_multiplier(status: &str) -> f32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlumberStatus {
-    pub state: String, // "idle", "running", "paused"
+    /// "idle", "running" or "paused". `paused` is derived from the persisted
+    /// flag, not from the last pipeline transition, so it cannot be overwritten
+    /// by a finishing (or failing) run.
+    pub state: String,
+    /// Persisted operator pause. A paused engine refuses both scheduled and
+    /// explicit triggers.
+    #[serde(default)]
+    pub paused: bool,
+    /// Where the pause flag lives (makes an out-of-band pause auditable).
+    #[serde(default)]
+    pub pause_file: String,
     pub last_run: Option<String>,
     pub next_scheduled: Option<String>,
     pub memories_processed: u64,
     pub realms_reorganized: u32,
     pub last_report: Option<slumber::SlumberReport>,
 }
+
+/// Slumber is paused; the caller must resume it before triggering.
+///
+/// A distinct type (rather than a bare `anyhow!` string) lets the HTTP layer
+/// answer 409 and the CLI report the real reason instead of failing generically.
+#[derive(Debug)]
+pub struct SlumberPausedError;
+impl std::fmt::Display for SlumberPausedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("slumber is paused; resume it before triggering")
+    }
+}
+impl std::error::Error for SlumberPausedError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemStats {
@@ -144,6 +168,12 @@ pub struct Engine {
     /// Dreams live in their own files, outside the memories collection.
     dreams: dream::DreamStore,
     dream_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Operator pause for scheduled and explicit slumber runs. Mirrored in
+    /// memory for status reads but re-read from [`slumber_pause_path`] on every
+    /// scheduler tick and trigger, so a CLI process sharing the data volume can
+    /// stop the daemon's maintenance without an RPC.
+    slumber_pause: Arc<AtomicBool>,
+    slumber_pause_path: String,
 }
 
 struct SlumberState {
@@ -208,6 +238,14 @@ impl Engine {
                 .unwrap_or_else(|| std::path::Path::new("."))
                 .join("dreams"),
         );
+        let slumber_pause_path = slumber_pause_path(&config);
+        let slumber_pause = Arc::new(AtomicBool::new(read_slumber_pause(&slumber_pause_path)));
+        if slumber_pause.load(Ordering::SeqCst) {
+            tracing::warn!(
+                "⏸️  Slumber is paused in {}; scheduled runs are refused until resumed",
+                slumber_pause_path
+            );
+        }
         let engine = Self {
             config,
             store,
@@ -231,6 +269,8 @@ impl Engine {
             lexical: Arc::new(RwLock::new(lexical::LexicalIndex::default())),
             dreams,
             dream_lock: Arc::new(tokio::sync::Mutex::new(())),
+            slumber_pause,
+            slumber_pause_path,
         };
         // Reconcile before loading any searchable index or exposing this engine.
         engine.reconcile_pending_erasures().await?;
@@ -1379,9 +1419,46 @@ impl Engine {
             .collect())
     }
 
+    /// Archive a memory by dropping its importance so slumber's prune phase
+    /// reclaims it.
+    ///
+    /// Certified memories never decay, and archiving is decay by another name:
+    /// it is refused (409) so an operator has to revoke certification first.
+    /// The write itself is the certified-excluding filtered update used by every
+    /// other automatic mutation, under the maintenance gate — a certification
+    /// that lands concurrently wins the race and this call reports the conflict
+    /// instead of decaying a certified memory. Explicit deletion is a separate
+    /// path and stays allowed for certified memories.
     pub async fn archive_memory(&self, id: &str) -> anyhow::Result<()> {
-        // Reduce importance to near-zero so slumber will prune it
-        self.store.update_upvotes(id, 0, 0.01).await
+        let _guard = self.store.maintenance_guard().await;
+        let Some(memory) = self.store.get_memory(id).await? else {
+            return Err(crate::storage::qdrant::RecoveryError::NotFound(format!(
+                "Memory not found: {}",
+                id
+            ))
+            .into());
+        };
+        if memory.is_certified() {
+            return Err(crate::storage::qdrant::CertifiedMemoryError.into());
+        }
+        self.store
+            .update_unprotected_payload(
+                id,
+                serde_json::json!({"upvotes": 0, "importance": 0.01}).try_into()?,
+            )
+            .await?;
+        // Read back: if another writer certified the memory between the check
+        // and the filtered write, the update was a no-op and the caller must
+        // not be told the memory was archived.
+        if self
+            .store
+            .get_memory(id)
+            .await?
+            .is_some_and(|memory| memory.is_certified())
+        {
+            return Err(crate::storage::qdrant::CertifiedMemoryError.into());
+        }
+        Ok(())
     }
 
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
@@ -1390,6 +1467,13 @@ impl Engine {
             "expected UUID memory identifier"
         );
         let _guard = self.store.maintenance_guard().await;
+        // Graph edges and association lists are projections of the live corpus,
+        // and nothing re-derives them for a single deletion. Drop every reference
+        // to this memory *before* the delete: afterwards a success would leave
+        // `graph/traverse` paths and `related_memory_ids` pointing at an ID that
+        // no longer resolves. Pruning is idempotent, so a delete that fails after
+        // this point just means the next run prunes again.
+        self.store.prune_duplicate_references(id).await?;
         if let Some(ledger) = self.evidence_store()? {
             if ledger.begin_erase(id)?.is_some() {
                 // The compressed index has no per-ID removal; never keep a stale
@@ -1444,15 +1528,73 @@ impl Engine {
     }
 
     pub async fn slumber_status(&self) -> SlumberStatus {
+        let paused = self.refresh_slumber_pause().await;
         let state = self.slumber_state.read().await;
         SlumberStatus {
-            state: state.status.clone(),
+            state: if paused {
+                "paused".into()
+            } else {
+                state.status.clone()
+            },
+            paused,
+            pause_file: self.slumber_pause_path.clone(),
             last_run: state.last_run.map(|t| t.to_rfc3339()),
             next_scheduled: None,
             memories_processed: state.memories_processed,
             realms_reorganized: state.realms_reorganized,
             last_report: state.last_report.clone(),
         }
+    }
+
+    /// Re-read the persisted pause flag.
+    ///
+    /// Every scheduler tick and every trigger goes through here, so a pause
+    /// written by another process (a CLI sharing the data volume, an operator's
+    /// script) takes effect without restarting the daemon.
+    pub async fn refresh_slumber_pause(&self) -> bool {
+        let paused = read_slumber_pause(&self.slumber_pause_path);
+        if paused != self.slumber_pause.load(Ordering::SeqCst) {
+            tracing::info!(
+                paused,
+                path = %self.slumber_pause_path,
+                "Slumber pause flag changed on disk"
+            );
+            self.slumber_pause.store(paused, Ordering::SeqCst);
+        }
+        paused
+    }
+
+    /// In-memory view of the pause flag (refreshed by the scheduler and by
+    /// `slumber_status`).
+    pub async fn slumber_paused(&self) -> bool {
+        self.slumber_pause.load(Ordering::SeqCst)
+    }
+
+    pub fn slumber_pause_path(&self) -> &str {
+        &self.slumber_pause_path
+    }
+
+    /// Persist the pause flag, then report success.
+    ///
+    /// The persisted write is what makes the pause real: it survives a restart
+    /// and is visible to the scheduler of a *different* process on the same data
+    /// volume. A write failure is returned, never swallowed, because reporting a
+    /// pause the daemon would not honour is exactly the failure this replaces.
+    pub async fn pause_slumber(&self) -> anyhow::Result<()> {
+        write_slumber_pause(&self.slumber_pause_path, true)?;
+        self.slumber_pause.store(true, Ordering::SeqCst);
+        tracing::info!(
+            "⏸️  Slumber paused ({}); scheduled runs are refused",
+            self.slumber_pause_path
+        );
+        Ok(())
+    }
+
+    pub async fn resume_slumber(&self) -> anyhow::Result<()> {
+        write_slumber_pause(&self.slumber_pause_path, false)?;
+        self.slumber_pause.store(false, Ordering::SeqCst);
+        tracing::info!("▶️  Slumber resumed");
+        Ok(())
     }
 
     /// The single place that discards derived search structures after a corpus
@@ -1508,6 +1650,12 @@ impl Engine {
         force_consolidation: bool,
     ) -> anyhow::Result<slumber::SlumberReport> {
         self.refuse_evidence_transfer()?;
+        // Pause is authoritative for explicit triggers too, and it is re-read
+        // here so a pause written by another process is honoured immediately.
+        if self.refresh_slumber_pause().await {
+            tracing::info!("⏸️  Slumber trigger refused: paused");
+            return Err(SlumberPausedError.into());
+        }
         {
             let mut state = self.slumber_state.write().await;
             state.status = "running".into();
@@ -1515,15 +1663,27 @@ impl Engine {
 
         tracing::info!("💤 Slumber started...");
         let slumber = slumber::SlumberEngine::new(self.config.clone(), self.store.clone_store());
-        let result = async {
-            // Slumber mutates the corpus outside the per-write hooks and rebuilds
-            // the compressed index at the end of its own pipeline. Drop the
-            // in-memory index first so searches during the run read Qdrant instead
-            // of a map the run is about to replace.
-            self.invalidate_compressed_index().await;
-            slumber.run_full_pipeline(force_consolidation).await
-        }
-        .await;
+        // Slumber mutates the corpus outside the per-write hooks and rebuilds
+        // the compressed index at the end of its own pipeline. Drop the
+        // in-memory index first so searches during the run read Qdrant instead
+        // of a map the run is about to replace.
+        self.invalidate_compressed_index().await;
+        // Run the pipeline on its own task. A panic then surfaces as a
+        // JoinError instead of unwinding the caller (the scheduler loop) and
+        // leaving the status stuck at "running" with no way back to idle. The
+        // maintenance gate inside the pipeline remains the only serializer
+        // between runs.
+        let result =
+            match tokio::spawn(async move { slumber.run_full_pipeline(force_consolidation).await })
+                .await
+            {
+                Ok(result) => result,
+                Err(e) if e.is_panic() => Err(anyhow::anyhow!(
+                    "slumber pipeline panicked: {}",
+                    panic_message(e)
+                )),
+                Err(e) => Err(anyhow::anyhow!("slumber pipeline task failed: {}", e)),
+            };
         // Slumber rewrites, merges and deletes memories without going through the
         // engine hooks, so refresh the keyword index from Qdrant afterwards. The
         // compressed index was rebuilt by the pipeline's last phase; this engine
@@ -1531,7 +1691,8 @@ impl Engine {
         if let Err(e) = self.rebuild_lexical_index().await {
             tracing::warn!("Lexical index rebuild after slumber failed: {e}");
         }
-        // Reset even after an archive/index/storage failure so status is accurate.
+        // Reset even after an archive/index/storage failure or a panic so status
+        // is accurate and the next run is not blocked by a stale "running".
         if result.is_err() {
             self.slumber_state.write().await.status = "idle".into();
         }
@@ -1546,16 +1707,6 @@ impl Engine {
         }
         tracing::info!("✅ Slumber complete.");
         Ok(report)
-    }
-
-    pub async fn pause_slumber(&self) {
-        let mut state = self.slumber_state.write().await;
-        state.status = "paused".into();
-    }
-
-    pub async fn resume_slumber(&self) {
-        let mut state = self.slumber_state.write().await;
-        state.status = "idle".into();
     }
 
     pub async fn stats(&self) -> anyhow::Result<SystemStats> {
@@ -2043,6 +2194,78 @@ impl Engine {
         backup_dir: Option<&str>,
     ) -> anyhow::Result<Vec<backup::BackupInfo>> {
         backup::list_backups(backup_dir)
+    }
+}
+
+/// Where the operator pause flag is persisted.
+///
+/// It sits beside the compressed index, i.e. on the data volume, so it survives
+/// a daemon restart and is visible to any other process (the CLI) that resolves
+/// the same config and environment.
+pub fn slumber_pause_path(config: &AppConfig) -> String {
+    let (index_path, _) = compressed_index_paths(config);
+    std::path::Path::new(&index_path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| parent.join("slumber_paused.json"))
+        .unwrap_or_else(|| std::path::PathBuf::from("slumber_paused.json"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Read the persisted pause flag.
+///
+/// A missing, unreadable or malformed file means "not paused": the flag is an
+/// operator convenience, so a truncated write must not silently disable
+/// maintenance forever.
+pub(crate) fn read_slumber_pause(path: &str) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(value) => value
+                .get("paused")
+                .and_then(|paused| paused.as_bool())
+                .unwrap_or(false),
+            Err(e) => {
+                tracing::warn!("Ignoring malformed slumber pause file {path}: {e}");
+                false
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            tracing::warn!("Slumber pause file {path} is unreadable: {e}");
+            false
+        }
+    }
+}
+
+/// Durably write the pause flag (temporary sibling, then rename) before any
+/// caller reports success.
+pub(crate) fn write_slumber_pause(path: &str, paused: bool) -> anyhow::Result<()> {
+    let body = serde_json::json!({
+        "paused": paused,
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+    });
+    if let Some(parent) = std::path::Path::new(path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = format!("{path}.tmp");
+    std::fs::write(&temp, serde_json::to_vec_pretty(&body)?)?;
+    std::fs::rename(&temp, path)?;
+    Ok(())
+}
+
+/// Text of a panicked slumber task, for the error the caller sees.
+fn panic_message(error: tokio::task::JoinError) -> String {
+    let payload = error.into_panic();
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".to_string()
     }
 }
 
@@ -2600,6 +2823,43 @@ mod turbovec_freshness_tests {
 #[cfg(test)]
 mod tests {
     use super::verification_score_multiplier;
+    use super::{read_slumber_pause, write_slumber_pause};
+
+    fn scratch_flag(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "memex8-slumber-pause-{}-{}",
+            std::process::id(),
+            name
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir.join("slumber_paused.json")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn slumber_pause_flag_is_durable_and_fails_open() {
+        let path = scratch_flag("roundtrip");
+        // A missing flag must mean "not paused": otherwise a fresh data volume
+        // could never run maintenance.
+        assert!(!read_slumber_pause(&path));
+        write_slumber_pause(&path, true).expect("write pause");
+        assert!(
+            read_slumber_pause(&path),
+            "persisted pause was not readable"
+        );
+        assert!(
+            !std::path::Path::new(&format!("{path}.tmp")).exists(),
+            "atomic write left a temporary file behind"
+        );
+        write_slumber_pause(&path, false).expect("write resume");
+        assert!(!read_slumber_pause(&path));
+        // A truncated flag fails open (with a warning) instead of disabling
+        // maintenance silently and forever.
+        std::fs::write(&path, b"{not json").expect("corrupt flag");
+        assert!(!read_slumber_pause(&path));
+        std::fs::remove_file(&path).ok();
+    }
 
     #[test]
     fn test_verification_score_multiplier_values() {

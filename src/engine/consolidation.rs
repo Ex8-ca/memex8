@@ -86,7 +86,7 @@ impl Engine {
                 no_consolidate_until: operation.cooldown_until,
             });
         }
-        if !["prepared", "complete", "restoring"].contains(&operation.state.as_str()) {
+        if !["prepared", "deleting", "complete", "restoring"].contains(&operation.state.as_str()) {
             return Err(
                 RecoveryError::Conflict("Unknown consolidation journal state".into()).into(),
             );
@@ -199,6 +199,10 @@ impl Engine {
         }
         if let Some(summary) = summary {
             self.store.delete_consolidation_snapshot(&summary).await?;
+            // The summary is gone; drop graph edges and association entries that
+            // name it so traversal and `related_memory_ids` cannot return an ID
+            // that no longer resolves.
+            self.store.prune_duplicate_references(&summary.id).await?;
         }
         self.store
             .update_consolidation_state(&mut operation, "restored")

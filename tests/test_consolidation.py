@@ -22,7 +22,8 @@ from test_certification import request, wait_ready
 
 
 @contextmanager
-def fixture(preserve=False, archive_dimensions=1, dedup_dry_run=True):
+def fixture(preserve=False, archive_dimensions=1, dedup_dry_run=True,
+            idle_timeout="24h", paused=False, extra_env=None):
     repo = Path(__file__).resolve().parents[1]
     binary = os.environ.get("MEMEX8_TEST_BINARY", str(repo / "target/debug/memex8"))
     container = subprocess.check_output([
@@ -94,7 +95,8 @@ def fixture(preserve=False, archive_dimensions=1, dedup_dry_run=True):
                    "OPENAI_BASE_URL": llm_url + "/v1", "LOCAL_LLM_URL": llm_url,
                    "MEMEX8_API_KEY": "test-only", "LOCAL_LLM_API_KEY": "test-only",
                    "TURBOVEC_INDEX_PATH": str(work / "test.tv"),
-                   "TURBOVEC_ID_MAP_PATH": str(work / "test-ids.json")}
+                   "TURBOVEC_ID_MAP_PATH": str(work / "test-ids.json"),
+                   **(extra_env or {})}
             config = subprocess.check_output([binary, "--config", str(work / "missing"), "config-show"],
                                              env=env, text=True, stderr=subprocess.DEVNULL)
             config = config.replace('base_url = "https://api.openai.com/v1"',
@@ -108,12 +110,16 @@ def fixture(preserve=False, archive_dimensions=1, dedup_dry_run=True):
             assert '[verification]\nenabled = false' in config
             config = config.replace('dedup_dry_run = true', 'dedup_dry_run = ' + str(dedup_dry_run).lower())
             config = config.replace('preserve_originals = true', 'preserve_originals = ' + str(preserve).lower())
-            config = config.replace('idle_timeout = "10m"', 'idle_timeout = "24h"')
+            config = config.replace('idle_timeout = "10m"', 'idle_timeout = ' + json.dumps(idle_timeout))
             # Consolidation is opt-in since the switch landed; these tests exercise it.
             config = config.replace('[slumber.consolidation]\nenabled = false', '[slumber.consolidation]\nenabled = true')
             assert '[slumber.consolidation]\nenabled = true' in config
             config_path = work / "config.toml"
             config_path.write_text(config)
+            # The pause flag lives beside the compressed index; pre-seed it to
+            # start the daemon paused and prove a restart keeps the pause.
+            if paused:
+                (work / "slumber_paused.json").write_text('{"paused": true}')
             command = [binary, "--config", str(config_path)]
             with (work / "server.log").open("w+") as log:
                 process = subprocess.Popen(command + ["serve", "--host", "127.0.0.1", "--port", str(port)],

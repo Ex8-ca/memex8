@@ -84,6 +84,8 @@ impl Scheduler {
         cron_check.tick().await;
 
         let mut last_consolidation: Option<chrono::DateTime<Local>> = None;
+        // Pause is re-read on every tick; log the transition once, not every tick.
+        let mut pause_announced = false;
 
         // Dreams use a wall-clock check every minute, not the slumber tick: the
         // consolidation window assumed 5-minute ticks and went silent when ticks
@@ -97,6 +99,21 @@ impl Scheduler {
             tokio::select! {
                 // Check idle timeout every 30 seconds
                 _ = idle_check.tick() => {
+                    // An operator pause stops scheduled slumber. It is re-read
+                    // here every tick, so a pause set out-of-band (CLI, HTTP,
+                    // another process on the data volume) is honoured without a
+                    // restart. The activity timer is deliberately not reset, so
+                    // unpausing triggers on the very next tick instead of waiting
+                    // out another full idle timeout.
+                    if self.engine.refresh_slumber_pause().await {
+                        if !pause_announced {
+                            tracing::info!("⏸️  Slumber paused — idle and cron triggers skipped");
+                            pause_announced = true;
+                        }
+                        continue;
+                    }
+                    pause_announced = false;
+
                     let last = self.last_activity.read().await;
                     let idle_duration = last.elapsed();
 
@@ -152,6 +169,17 @@ impl Scheduler {
 
                 // Check cron schedule
                 _ = cron_check.tick() => {
+                    // Same pause gate as the idle path: a paused engine runs no
+                    // scheduled slumber at all.
+                    if self.engine.refresh_slumber_pause().await {
+                        if !pause_announced {
+                            tracing::info!("⏸️  Slumber paused — cron trigger skipped");
+                            pause_announced = true;
+                        }
+                        continue;
+                    }
+                    pause_announced = false;
+
                     // Coalesce missed occurrences into one attempt, never replay a backlog.
                     if Local::now() >= next_cron_run {
                         tracing::info!("🕐 Cron trigger — running slumber...");
