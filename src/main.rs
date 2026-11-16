@@ -658,6 +658,16 @@ async fn main() -> anyhow::Result<()> {
                 serve_config.server.allow_no_api_key = true;
             }
 
+            // `QDRANT_URL` env override (matches the `slumber` command and
+            // docker-compose). Lets a container point its engine at a
+            // non-default Qdrant without shipping a config file — used by the
+            // release smoke test.
+            if let Ok(url) = std::env::var("QDRANT_URL") {
+                if !url.is_empty() {
+                    serve_config.qdrant.url = url;
+                }
+            }
+
             // Build engine for the scheduler
             let engine = std::sync::Arc::new(engine::Engine::new(serve_config.clone()).await?);
 

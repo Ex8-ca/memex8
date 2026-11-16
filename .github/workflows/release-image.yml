@@ -85,8 +85,25 @@ jobs:
       - name: Smoke-test the built image
         run: |
           set -euo pipefail
-          docker run -d --name memex8-smoke -p 18080:8080 \
-            -e MEMEX8_API_KEY=smoke-test-key memex8-smoke:local
+          # The engine connects to Qdrant *before* it binds the HTTP listener
+          # (default http://localhost:6333), so the smoke container needs a
+          # real, reachable Qdrant or it exits before the health probe.
+          # memex8 talks to Qdrant over gRPC (port 6334); the /healthz liveness
+          # check is on the HTTP port (6333). Publish both.
+          docker network create memex8-smoke-net >/dev/null
+          docker run -d --name memex8-smoke-qdrant --network memex8-smoke-net \
+            -p 16333:6333 -p 16334:6334 qdrant/qdrant:v1.17.0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:16333/healthz >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          docker run -d --name memex8-smoke --network memex8-smoke-net -p 18080:8080 \
+            -e MEMEX8_API_KEY=smoke-test-key \
+            -e QDRANT_URL=http://memex8-smoke-qdrant:6334 \
+            -e EMBEDDING_PROVIDER=ollama \
+            memex8-smoke:local
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:18080/api/v1/health | grep -q OK; then
               echo "health OK after ${i}s"
@@ -97,12 +114,15 @@ jobs:
           echo "::error::image did not become healthy; refusing to publish"
           docker logs memex8-smoke || true
           exit 1
-        # The container is removed in an always-running step below so a failed
+        # The containers are removed in an always-running step below so a failed
         # smoke test still cleans up.
 
       - name: Remove smoke container
         if: always()
-        run: docker rm -f memex8-smoke || true
+        run: |
+          docker rm -f memex8-smoke || true
+          docker rm -f memex8-smoke-qdrant || true
+          docker network rm memex8-smoke-net || true
 
       - name: Push the verified image
         run: |

@@ -201,9 +201,9 @@ class AuditControlTests(unittest.TestCase):
     def test_delete_prunes_graph_edges_and_related_ids(self):
         with fixture() as f:
             texts = [
-                "Marc uses Qdrant for vector storage in memex8.",
-                "Marc runs memex8 on the homelab server nightly.",
-                "Marc prefers Rust for the memex8 services.",
+                "The service uses Qdrant for vector storage.",
+                "The service runs the nightly maintenance job on the homelab server.",
+                "The service prefers Rust for its background workers.",
             ]
             ids = [store(f, text) for text in texts]
             authored, doomed, survivor = ids[0], ids[1], ids[2]

@@ -1439,7 +1439,10 @@ impl Engine {
             .into());
         };
         if memory.is_certified() {
-            return Err(crate::storage::qdrant::CertifiedMemoryError.into());
+            return Err(crate::storage::qdrant::RecoveryError::Conflict(
+                "cannot archive a certified memory; revoke certification first".into(),
+            )
+            .into());
         }
         self.store
             .update_unprotected_payload(
@@ -1456,7 +1459,10 @@ impl Engine {
             .await?
             .is_some_and(|memory| memory.is_certified())
         {
-            return Err(crate::storage::qdrant::CertifiedMemoryError.into());
+            return Err(crate::storage::qdrant::RecoveryError::Conflict(
+                "cannot archive a certified memory; it was certified after the check".into(),
+            )
+            .into());
         }
         Ok(())
     }
@@ -2436,7 +2442,7 @@ pub(crate) async fn rebuild_compressed_index(
             return Err(e);
         }
     };
-    let built = build_compressed_index(store).await;
+    let built = build_compressed_index(store, config.turbovec.bit_width).await;
     let index = match built {
         Ok(Some(index)) => index,
         Ok(None) => {
@@ -2473,6 +2479,7 @@ pub(crate) async fn rebuild_compressed_index(
 /// them.
 async fn build_compressed_index(
     store: &QdrantStore,
+    bit_width: usize,
 ) -> anyhow::Result<Option<quantizer::TurboQuantVectorIndex>> {
     let mut rows: Vec<(String, Vec<f32>)> = Vec::new();
     let mut dims = 0usize;
@@ -2500,7 +2507,7 @@ async fn build_compressed_index(
     if rows.is_empty() {
         return Ok(None);
     }
-    let mut index = quantizer::TurboQuantVectorIndex::new(dims, 4);
+    let mut index = quantizer::TurboQuantVectorIndex::new(dims, bit_width);
     for chunk in rows.chunks(256) {
         let ids: Vec<String> = chunk.iter().map(|(id, _)| id.clone()).collect();
         let vectors: Vec<Vec<f32>> = chunk.iter().map(|(_, v)| v.clone()).collect();

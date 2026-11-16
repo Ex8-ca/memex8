@@ -255,7 +255,7 @@ Hermes Agent
 - **Auto-recall**: Before each turn, relevant memories are fetched in the background and injected as context
 - **Auto-sync**: Conversation turns are stored as memories (skips trivial replies like "ok", "thanks")
 - **Session-end**: Full conversation summary is sent via webhook at session close
-- **Memory mirroring**: When you use Hermes' built-in `memory` tool (add/replace/remove), memex8 stores a copy too
+- **Memory mirroring**: When you use Hermes' built-in `memory` tool (add/replace/remove), memex8 stores a copy too. This is the plugin's core job (it *is* the memory backend), so it runs even when `auto_sync` is off; `<private>...</private>` spans are stripped by the server on capture. To stop mirroring entirely, set `memory_enabled: false` (the built-in flat-file memory takes over).
 - **Circuit breaker**: After 5 consecutive failures, API calls pause for 2 minutes to avoid hammering a down server. **The breaker is bypassed during a pre-compress checkpoint** when `require_checkpoint=True` — see below.
 
 ## Pre-Compress Checkpoints (Hermes API v2)
@@ -306,7 +306,7 @@ one write can hold an archive of any size:
   silently corrupted transcript.
 - Every write carries provenance: tags `checkpoint` + `transcript-archive` +
   `source:<source>`, and `memory_type=artifact` (~273 days to reach the default
-  prune score) instead of the webhook's `general` (~7 days). Callers that send
+  prune score) instead of the webhook's `general` (its 16-day per-type age gate). Callers that send
   neither tags nor `memory_type` keep the server's historical defaults.
 
 ### Implementation note
