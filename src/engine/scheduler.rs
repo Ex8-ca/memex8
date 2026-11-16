@@ -1,6 +1,8 @@
 use crate::config::AppConfig;
 use crate::engine::Engine;
-use chrono::{Datelike, Local, Timelike};
+use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
+use cron::Schedule;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
@@ -63,22 +65,24 @@ impl Scheduler {
     /// Run the scheduler loop. Blocks until the process is shut down.
     pub async fn run(self) -> anyhow::Result<()> {
         let idle_timeout = parse_duration(&self.config.slumber.idle_timeout)?;
-        let cron_interval = parse_cron_to_duration(&self.config.slumber.cron_ingest)?;
+        let schedule = parse_cron_schedule(&self.config.slumber.cron_ingest)?;
+        let mut next_cron_run = next_cron_after(&schedule, Local::now())?;
 
         tracing::info!(
-            "🕐 Scheduler started: idle_timeout={}, cron_interval={}",
+            "🕐 Scheduler started: idle_timeout={}, cron_schedule={}",
             self.config.slumber.idle_timeout,
             self.config.slumber.cron_ingest
         );
 
         let mut idle_check = tokio::time::interval(Duration::from_secs(30));
-        let mut cron_check = tokio::time::interval(cron_interval);
+        // Poll wall time so clock changes do not turn cron into an elapsed timer.
+        let mut cron_check = tokio::time::interval(Duration::from_secs(1));
+        cron_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // Skip the first immediate tick
         idle_check.tick().await;
         cron_check.tick().await;
 
-        let mut last_cron_run = Instant::now() - cron_interval;
         let mut last_consolidation: Option<chrono::DateTime<Local>> = None;
 
         // Dreams use a wall-clock check every minute, not the slumber tick: the
@@ -148,8 +152,8 @@ impl Scheduler {
 
                 // Check cron schedule
                 _ = cron_check.tick() => {
-                    // Only run if enough time has passed since last cron run
-                    if last_cron_run.elapsed() >= cron_interval {
+                    // Coalesce missed occurrences into one attempt, never replay a backlog.
+                    if Local::now() >= next_cron_run {
                         tracing::info!("🕐 Cron trigger — running slumber...");
 
                         // Check if consolidation should run (wall-clock schedule)
@@ -171,7 +175,7 @@ impl Scheduler {
                             }
                             Err(e) => tracing::error!("Cron slumber failed: {}", e),
                         }
-                        last_cron_run = Instant::now();
+                        next_cron_run = next_cron_after(&schedule, Local::now())?;
                     }
                 }
             }
@@ -200,62 +204,61 @@ fn parse_duration(s: &str) -> anyhow::Result<Duration> {
     }
 }
 
-/// Parse a cron expression into a Duration for periodic checking.
-/// Supports basic intervals: "*/N * * * *" (every N minutes).
-/// Falls back to a reasonable default for complex expressions.
-fn parse_cron_to_duration(cron_expr: &str) -> anyhow::Result<Duration> {
-    let cron_expr = cron_expr.trim();
-
-    // Handle "*/N * * * *" pattern (every N minutes)
-    if let Some(star_n) = cron_expr.strip_prefix("*/") {
-        if let Some(space_idx) = star_n.find(' ') {
-            let minutes: u64 = star_n[..space_idx]
-                .parse()
-                .map_err(|_| anyhow::anyhow!("Invalid cron expression: {}", cron_expr))?;
-            return Ok(Duration::from_secs(minutes * 60));
-        }
-    }
-
-    // Handle standard cron expressions like "0 3 * * *" (daily at specific time)
-    // For these, parse the hour and minute and return the appropriate interval
-    let parts: Vec<&str> = cron_expr.split_whitespace().collect();
-    if parts.len() == 5 {
-        // minute hour day month weekday
-        let hour = parts[1];
-        let minute = parts[0];
-        let day = parts[2];
-        let month = parts[3];
-        let weekday = parts[4];
-
-        // If day, month, and weekday are all *, it's a daily schedule
-        if day == "*" && month == "*" && weekday == "*" {
-            let h: u64 = hour.parse().unwrap_or(0);
-            let m: u64 = minute.parse().unwrap_or(0);
-            let total_minutes = h * 60 + m;
-            if total_minutes > 0 {
-                // Run once per day at the specified time
-                return Ok(Duration::from_secs(24 * 3600));
+/// Parse the configured five-field cron in local wall-clock time.
+/// The cron crate includes seconds and numbers weekdays 1=Sunday..7=Saturday;
+/// our existing Unix-style configuration uses 0/7=Sunday..6=Saturday.
+fn parse_cron_schedule(expression: &str) -> anyhow::Result<Schedule> {
+    let mut fields: Vec<String> = expression.split_whitespace().map(str::to_owned).collect();
+    anyhow::ensure!(fields.len() == 5, "Expected five cron fields: {expression}");
+    // Reject zero steps explicitly (including range/list steps).
+    for field in &fields {
+        for item in field.split(',') {
+            if let Some((_, step)) = item.split_once('/') {
+                anyhow::ensure!(
+                    step.parse::<u32>().is_ok_and(|n| n > 0),
+                    "Invalid cron step: {item}"
+                );
             }
         }
-
-        // Hourly schedule: "0 * * * *"
-        if hour == "*" && day == "*" && month == "*" && weekday == "*" {
-            return Ok(Duration::from_secs(3600));
-        }
-
-        // Every N hours: "0 */4 * * *"
-        if let Some(star_n) = hour.strip_prefix("*/") {
-            let hours: u64 = star_n.parse().unwrap_or(4);
-            return Ok(Duration::from_secs(hours * 3600));
-        }
     }
+    // Expand numeric weekdays using the same Unix matching semantics as the
+    // existing scheduler, then translate to the crate's one-based weekdays.
+    if fields[4]
+        .chars()
+        .all(|c| c.is_ascii_digit() || "*,-/".contains(c))
+    {
+        let mut days = Vec::new();
+        for item in fields[4].split(',') {
+            let (base, step) = match item.split_once('/') {
+                Some((base, step)) => (base, step.parse::<u32>()?),
+                None => (item, 1),
+            };
+            let (start, end) = if base == "*" {
+                (0, 6)
+            } else if let Some((a, b)) = base.split_once('-') {
+                (a.parse::<u32>()?, b.parse::<u32>()?)
+            } else {
+                let day = base.parse::<u32>()?;
+                (day, if item.contains('/') { 7 } else { day })
+            };
+            anyhow::ensure!(start <= end && end <= 7, "Invalid cron weekday: {item}");
+            for day in (start..=end).step_by(step as usize) {
+                days.push((day % 7 + 1).to_string());
+            }
+        }
+        fields[4] = days.join(",");
+    }
+    Ok(Schedule::from_str(&format!("0 {}", fields.join(" ")))?)
+}
 
-    // Default: every 5 minutes
-    tracing::warn!(
-        "Complex cron expression '{}' not fully parsed, defaulting to 5 minutes",
-        cron_expr
-    );
-    Ok(Duration::from_secs(300))
+fn next_cron_after<Tz: TimeZone>(
+    schedule: &Schedule,
+    now: DateTime<Tz>,
+) -> anyhow::Result<DateTime<Tz>> {
+    schedule
+        .after(&now)
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Cron schedule has no future occurrence"))
 }
 
 /// Check if the current time matches a cron expression.
@@ -363,6 +366,79 @@ fn matches_field(field: &str, value: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn at(s: &str) -> DateTime<chrono::FixedOffset> {
+        DateTime::parse_from_rfc3339(s).unwrap()
+    }
+
+    fn next(expression: &str, now: &str) -> DateTime<chrono::FixedOffset> {
+        next_cron_after(&parse_cron_schedule(expression).unwrap(), at(now)).unwrap()
+    }
+
+    #[test]
+    fn audit_midnight_is_not_five_minutes() {
+        assert_eq!(
+            next("0 0 * * *", "2026-11-15T12:17:00-06:00"),
+            at("2026-11-16T00:00:00-06:00")
+        );
+    }
+
+    #[test]
+    fn audit_half_past_is_hourly() {
+        let due = next("30 * * * *", "2026-11-15T12:17:00-06:00");
+        assert_eq!(due, at("2026-11-15T12:30:00-06:00"));
+        assert_eq!(
+            next_cron_after(&parse_cron_schedule("30 * * * *").unwrap(), due).unwrap(),
+            at("2026-11-15T13:30:00-06:00")
+        );
+    }
+
+    #[test]
+    fn audit_zero_step_is_rejected() {
+        for expr in [
+            "*/0 * * * *",
+            "0 */0 * * *",
+            "0 0 * * */0",
+            "61 * * * *",
+            "garbage",
+            "",
+        ] {
+            assert!(parse_cron_schedule(expr).is_err(), "{expr}");
+        }
+    }
+
+    #[test]
+    fn audit_calendar_steps_and_weekdays() {
+        assert_eq!(
+            next("*/15 * * * *", "2026-11-15T12:17:01-06:00"),
+            at("2026-11-15T12:30:00-06:00")
+        );
+        assert_eq!(
+            next("0 */4 * * *", "2026-11-15T12:17:00-06:00"),
+            at("2026-11-15T16:00:00-06:00")
+        );
+        assert_eq!(
+            next("0 0 1 * *", "2026-11-15T12:17:00-06:00"),
+            at("2026-12-01T00:00:00-06:00")
+        );
+        for sunday in ["0", "7", "SUN"] {
+            assert_eq!(
+                next(&format!("0 0 * * {sunday}"), "2026-11-14T12:17:00-06:00"),
+                at("2026-11-15T00:00:00-06:00")
+            );
+        }
+        assert_eq!(
+            next("0 9 * * 1-5", "2026-11-14T12:17:00-06:00"),
+            at("2026-11-16T09:00:00-06:00")
+        );
+        assert!(next_cron_after(
+            &parse_cron_schedule("0 0 30 2 *").unwrap(),
+            at("2026-11-15T00:00:00Z")
+        )
+        .is_err());
+    }
+
     /// Does any tick of a fixed-interval timer started at `start_min` (minutes
     /// after midnight) land inside `target_min ± tolerance` during one day?
     /// Mirrors the scheduler: `tokio::time::interval` ticks are offset from
