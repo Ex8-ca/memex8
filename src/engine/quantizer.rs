@@ -101,6 +101,14 @@ impl TurboQuantVectorIndex {
     pub fn vector_count(&self) -> usize {
         self.vector_count
     }
+    /// Memory IDs this index can currently answer for, in slot order.
+    ///
+    /// Used to prove a persisted index matches the live corpus by ID set rather
+    /// than by count: consolidation swaps deleted sources for summaries, so the
+    /// count can match while every affected ID is wrong.
+    pub fn ids(&self) -> &[String] {
+        &self.id_map
+    }
     pub fn bit_width(&self) -> usize {
         self.bit_width
     }
