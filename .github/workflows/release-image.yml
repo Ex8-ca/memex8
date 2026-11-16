@@ -85,11 +85,15 @@ jobs:
       - name: Smoke-test the built image
         run: |
           set -euo pipefail
-          # The engine connects to Qdrant *before* it binds the HTTP listener
-          # (default http://localhost:6333), so the smoke container needs a
-          # real, reachable Qdrant or it exits before the health probe.
-          # memex8 talks to Qdrant over gRPC (port 6334); the /healthz liveness
-          # check is on the HTTP port (6333). Publish both.
+          # The engine connects to Qdrant *before* it binds the HTTP listener, so
+          # the smoke container needs a real, reachable Qdrant or it exits before
+          # the health probe. memex8 talks to Qdrant over gRPC (port 6334); the
+          # /healthz liveness check is on the HTTP port (6333). Publish both.
+          #
+          # The embedding env mirrors docker-compose.yml (EMBEDDING_PROVIDER=openai,
+          # text-embedding-3-small, 1536d). A dummy OPENAI_API_KEY is enough: the
+          # provider client is constructed lazily and the health probe never
+          # embeds, so no real API call (or secret) is needed to boot the image.
           docker network create memex8-smoke-net >/dev/null
           docker run -d --name memex8-smoke-qdrant --network memex8-smoke-net \
             -p 16333:6333 -p 16334:6334 qdrant/qdrant:v1.17.0
@@ -102,7 +106,10 @@ jobs:
           docker run -d --name memex8-smoke --network memex8-smoke-net -p 18080:8080 \
             -e MEMEX8_API_KEY=smoke-test-key \
             -e QDRANT_URL=http://memex8-smoke-qdrant:6334 \
-            -e EMBEDDING_PROVIDER=ollama \
+            -e EMBEDDING_PROVIDER=openai \
+            -e EMBEDDING_MODEL=text-embedding-3-small \
+            -e EMBEDDING_DIMENSIONS=1536 \
+            -e OPENAI_API_KEY=sk-smoke-test-dummy \
             memex8-smoke:local
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:18080/api/v1/health | grep -q OK; then
