@@ -2,7 +2,6 @@ use crate::config::AppConfig;
 use crate::engine::decay;
 use crate::engine::embedder;
 use crate::engine::memex8_md::write_digest_md;
-use crate::engine::quantizer::{decide_bit_width, TurboQuantVectorIndex};
 use crate::engine::reactions::reaction_boost;
 use crate::storage::qdrant::{GapPoint, MemoryPoint, QdrantStore, VerificationStatusCounts};
 use std::path::{Path, PathBuf};
@@ -85,6 +84,11 @@ pub struct SlumberReport {
     /// Per-status breakdown of the Phase 13 verification sweep ratings.
     #[serde(default)]
     pub verification_counts: VerificationStatusCounts,
+    /// Set when the final compressed-index rebuild failed. `quantized == 0` alone
+    /// cannot be told apart from an empty corpus, so the failure is recorded and
+    /// surfaced instead of being folded into that count.
+    #[serde(default)]
+    pub compressed_index_rebuild_error: Option<String>,
 }
 
 impl SlumberEngine {
@@ -141,9 +145,14 @@ impl SlumberEngine {
         report.dedup_operation_ids = dedup.operation_ids;
         report.dedup_truncated_realms = dedup.truncated_realms;
 
-        // Phase 2: ScalarQuant compression
-        tracing::info!("💤 Slumber phase 2: ScalarQuant compression");
-        report.quantized = self.scalarquant_compress().await?;
+        // Phase 2: compressed index — deferred to the final phase.
+        //
+        // This phase used to build and persist the TurboVec index here. Phase 6
+        // then deletes consolidation sources and inserts summaries, so the
+        // persisted ID map described a corpus that no longer existed: it pointed
+        // at deleted IDs and omitted the summaries, while the vector count stayed
+        // close enough for a count-based freshness check to accept it on restart.
+        tracing::info!("💤 Slumber phase 2: ScalarQuant compression (deferred to the final phase)");
 
         // Phase 2b: Re-quantify memories whose bit width changed (dynamic policy)
         tracing::info!("💤 Slumber phase 2b: Re-quantify dynamic policy");
@@ -243,8 +252,30 @@ impl SlumberEngine {
             };
         }
 
+        // Final phase: rebuild the compressed search index from the corpus as it
+        // is NOW. Every phase above may have deleted or inserted memories
+        // (dedup removes losers, consolidation replaces sources with summaries),
+        // so this must be the last writer of the index files.
+        tracing::info!("💤 Slumber final phase: Rebuild compressed index");
+        report.quantized = match self.rebuild_compressed_index().await {
+            Ok(n) => n,
+            Err(e) => {
+                // The previous pair is already removed, so search falls back to
+                // Qdrant instead of trusting an index for a corpus that changed.
+                // Record it: `quantized == 0` is also what an empty corpus
+                // reports, and a silent 0 would hide a broken index until the
+                // next restart.
+                tracing::error!(
+                    "  ✗ Compressed index rebuild FAILED ({e}); search stays on Qdrant \
+                     and no index will be loaded until a rebuild succeeds"
+                );
+                report.compressed_index_rebuild_error = Some(e.to_string());
+                0
+            }
+        };
+
         tracing::info!(
-            "✅ Slumber complete: scanned={} dedup={} quantized={} re_quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={} gaps={} sessions_reviewed={} realms_pruned={} verified={}",
+            "✅ Slumber complete: scanned={} dedup={} quantized={} re_quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={} gaps={} sessions_reviewed={} realms_pruned={} verified={} index_error={:?}",
             report.memories_scanned,
             report.deduplicated,
             report.quantized,
@@ -262,6 +293,7 @@ impl SlumberEngine {
             report.sessions_reviewed,
             report.realms_pruned,
             report.memories_verified,
+            report.compressed_index_rebuild_error,
         );
 
         Ok(report)
@@ -295,73 +327,22 @@ impl SlumberEngine {
         Ok(report)
     }
 
-    // ─── Phase 2: TurboVec Compression ────────────────────────────────────────
+    // ─── Final phase: TurboVec Compression ───────────────────────────────────
 
-    /// Build a TurboQuantVectorIndex from all memories and persist to disk.
-    /// Qdrant keeps full-precision vectors; TurboVec handles compressed search.
-    async fn scalarquant_compress(&self) -> anyhow::Result<usize> {
-        let all = self.store.scroll_all_memories_with_vectors().await?;
-
-        if all.is_empty() {
-            tracing::info!("  No memories to quantize");
-            return Ok(0);
-        }
-
-        let dims = all[0].vector.len();
-        // TurboVec supports bit_width ∈ {2, 4}; use 4 for best quality
-        let turbo_bit_width: usize = 4;
-        let mut index = TurboQuantVectorIndex::new(dims, turbo_bit_width);
-
-        let mut quantized = 0;
-        let mut skipped = 0;
-
-        for mem_with_vec in &all {
-            // The TurboVec index is the SEARCH structure — it must cover ALL
-            // memories. decide_bit_width is a storage-precision policy (keep
-            // hot memories full-precision in Qdrant), NOT a search-coverage
-            // policy. Excluding hot memories from the index made semantic
-            // search blind to exactly the most-accessed memories.
-            let ids = vec![mem_with_vec.memory.id.clone()];
-            let vectors = vec![mem_with_vec.vector.clone()];
-            index.add_batch(&ids, &vectors);
-            quantized += 1;
-        }
-
-        // Persist index + id_map
-        // Use config paths if set, otherwise default to data/ in cwd
-        let index_path = if self.config.turbovec.index_path.is_empty() {
-            "data/memories.tv".to_string()
-        } else {
-            self.config.turbovec.index_path.clone()
-        };
-        let id_map_path = if self.config.turbovec.id_map_path.is_empty() {
-            "data/memories_ids.json".to_string()
-        } else {
-            self.config.turbovec.id_map_path.clone()
-        };
-        // Ensure parent directory exists
-        if let Some(parent) = std::path::Path::new(&index_path).parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(e) = index.save(&index_path, &id_map_path) {
-            tracing::warn!("  Failed to save TurboVec index: {}", e);
-        } else {
-            tracing::info!(
-                "  Saved TurboVec index: {} vectors ({} skipped) → {} ({:.1}x compression)",
-                index.vector_count(),
-                skipped,
-                index_path,
-                index.compression_ratio()
-            );
-        }
-
-        Ok(quantized)
+    /// Build the compressed index from the corpus as it stands now and persist
+    /// it. Qdrant keeps the full-precision vectors; this index only accelerates
+    /// search.
+    ///
+    /// The index covers ALL memories, not just cold ones: `decide_bit_width` is a
+    /// storage-precision policy, and excluding hot memories from the search
+    /// structure made semantic search blind to exactly the most-accessed ones.
+    async fn rebuild_compressed_index(&self) -> anyhow::Result<usize> {
+        super::rebuild_compressed_index(&self.store, &self.config).await
     }
 
-    // ─── Phase 2b: Re-quantify All (no-op — full rebuild in Phase 2) ─────────
+    // ─── Phase 2b: Re-quantify All (no-op — full rebuild in the final phase) ──
 
-    /// With TurboVec, re-quantify is a full rebuild (Phase 2).
-    /// This is a no-op since scalarquant_compress always rebuilds from scratch.
+    /// With TurboVec, re-quantify is a full rebuild, which the final phase does.
     async fn re_quantify_all(&self) -> anyhow::Result<usize> {
         Ok(0)
     }

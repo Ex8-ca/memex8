@@ -123,7 +123,7 @@ impl Engine {
 
         // Invalidate both memory and disk caches before restoring sources. Search
         // falls back to Qdrant until slumber builds a fresh compressed index.
-        self.invalidate_search_index().await?;
+        self.invalidate_compressed_index().await;
         let mut restored = 0;
         let mut retained = 0;
         let mut embedder = None;
@@ -203,6 +203,14 @@ impl Engine {
         self.store
             .update_consolidation_state(&mut operation, "restored")
             .await?;
+        // The summary is deleted and every source is back, so both derived search
+        // structures describe a corpus that no longer exists. The compressed index
+        // is already gone; rebuild the keyword index from the restored corpus so
+        // keyword-only hits (summaries, rare terms) follow the same change.
+        self.invalidate_compressed_index().await;
+        if let Err(e) = self.rebuild_lexical_index().await {
+            tracing::warn!("Lexical index rebuild after undo failed: {e}");
+        }
         tracing::info!(summary_id = id, restored, retained, "Consolidation undone");
         Ok(UnconsolidateResult {
             summary_id: id.into(),

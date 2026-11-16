@@ -31,26 +31,22 @@ use crate::config::AppConfig;
 pub use crate::engine::watcher::{FileChangeEvent, FileWatcher};
 use crate::storage::qdrant::{MemoryWithVector, QdrantStore};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Minimum fraction of live memories a TurboVec index must cover to be
-/// trusted for search.
+/// Whether a persisted compressed index may be trusted for the live corpus.
 ///
-/// TurboVec is preferred over Qdrant in the search path, so an index that
-/// covers only a fraction of the corpus silently shrinks the searchable set:
-/// it does not just return stale results, it returns *fewer* results. A 90%
-/// threshold tolerates the normal gap (memories ingested since the last
-/// rebuild) while rejecting an index that is genuinely stale.
-pub const TURBOVEC_MIN_COVERAGE_PERCENT: u64 = 90;
-
-/// Whether a TurboVec index holding `indexed` vectors covers the `live`
-/// memory corpus closely enough to be used for search.
-pub fn turbovec_index_covers_live(indexed: u64, live: u64) -> bool {
-    if live == 0 {
-        return true;
-    }
-    indexed.saturating_mul(100) >= live.saturating_mul(TURBOVEC_MIN_COVERAGE_PERCENT)
+/// Counting is not enough. TurboVec is preferred over Qdrant in the search path,
+/// so a stale index does not merely return old results — it returns *fewer*
+/// results. Slumber's consolidation deletes source memories and inserts
+/// summaries, which keeps the vector count roughly stable while changing every
+/// ID in the affected region: a count-only check accepted exactly that index and
+/// left the summaries unsearchable after a restart. Compare the ID sets instead.
+/// Any disagreement rejects the index and search falls back to Qdrant, which is
+/// always authoritative.
+pub fn turbovec_index_matches_corpus(indexed: &[String], live: &HashSet<String>) -> bool {
+    indexed.len() == live.len() && indexed.iter().all(|id| live.contains(id))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,7 +128,16 @@ pub struct Engine {
     /// Path to the config file (for persisting watch configs).
     config_path: String,
     /// TurboVec compressed vector index for fast search.
-    /// Loaded from disk on startup, rebuilt during slumber.
+    /// Loaded from disk on startup, rebuilt at the end of every slumber run.
+    /// Cleared by `invalidate_compressed_index` on every corpus mutation.
+    ///
+    /// There is no in-process freshness counter here: every mutation already
+    /// drops this handle, so nothing can observe a lagging index in memory. The
+    /// freshness guarantee lives on disk instead — the persisted pair carries a
+    /// corpus fingerprint and file digests (`CompressedIndexMeta`) that are
+    /// re-checked before an index is ever installed (see
+    /// `init_turbovec_index`). An index that describes a different corpus is
+    /// rejected there, so search falls back to Qdrant, which is complete.
     turbovec_index: Arc<RwLock<Option<quantizer::TurboQuantVectorIndex>>>,
     /// BM25 keyword index (a cache rebuilt from Qdrant; see `lexical`).
     lexical: Arc<RwLock<lexical::LexicalIndex>>,
@@ -194,7 +199,7 @@ impl Engine {
         store.ensure_collections(dimensions).await?;
 
         // Try to load TurboVec index from disk for fast search
-        let turbovec_index = Self::init_turbovec_index(&config, &store).await;
+        let turbovec_index = Self::init_turbovec_index(&config, &store, dimensions as usize).await;
 
         // Dreams sit next to the TurboVec index, so they're on the data volume and in backups.
         let dreams = dream::DreamStore::new(
@@ -323,57 +328,144 @@ impl Engine {
 
     /// Load TurboVec index from disk if it exists, otherwise return empty.
     ///
-    /// A loaded index is only trusted when it actually covers the memories in
-    /// Qdrant. TurboVec is preferred over Qdrant in the search path, so a stale
-    /// index does not merely return old results: it silently shrinks the
-    /// searchable set to whatever the index happens to contain. Comparing the
-    /// index size against the live Qdrant count catches that and falls back to
-    /// the (complete) Qdrant path until the next slumber rebuilds the index.
+    /// A persisted pair is only trusted when it can be *proven* to describe the
+    /// live corpus, which takes four checks:
+    ///
+    /// 1. the two files are self-consistent (`.tv` slot count == id-map length),
+    /// 2. the sidecar meta describes exactly these two files (byte digests),
+    /// 3. the corpus fingerprint in that meta equals the live corpus content,
+    /// 4. the ID set is exactly the live ID set.
+    ///
+    /// Every other outcome — missing files, a poisoned marker left by a failed
+    /// invalidation, an unreadable or mixed pair, a fingerprint mismatch, or a
+    /// stale ID set — is discarded and search stays on the (complete) Qdrant path
+    /// until the next slumber rebuilds the index.
     async fn init_turbovec_index(
         config: &AppConfig,
         store: &QdrantStore,
+        dims: usize,
     ) -> Arc<RwLock<Option<quantizer::TurboQuantVectorIndex>>> {
-        let index_path = config.turbovec.index_path.clone();
-        let id_map_path = config.turbovec.id_map_path.clone();
+        let (index_path, id_map_path) = compressed_index_paths(config);
         let bit_width = config.turbovec.bit_width;
-        let dims = config.embedding.dimensions as usize;
+        let nothing = Arc::new(RwLock::new(None));
 
-        let loaded =
-            quantizer::TurboQuantVectorIndex::load(&index_path, &id_map_path, dims, bit_width);
-        match loaded {
-            Ok(index) => {
-                let indexed = index.vector_count() as u64;
-                // If Qdrant can't be counted, keep the previous behaviour (use the index).
-                let live = store.count_memories().await.unwrap_or(0);
-                if turbovec_index_covers_live(indexed, live) {
-                    tracing::info!(
-                        "📦 Loaded TurboVec index: {} vectors from {} ({}d @ {}-bit, {:.1}x compression)",
-                        index.vector_count(),
-                        index_path,
-                        dims,
-                        bit_width,
-                        index.compression_ratio()
-                    );
-                    Arc::new(RwLock::new(Some(index)))
-                } else {
-                    tracing::warn!(
-                        "⚠️ TurboVec index at {} covers only {} of {} live memories; \
-                         ignoring it and falling back to Qdrant until the next slumber rebuilds it",
-                        index_path,
-                        indexed,
-                        live
-                    );
-                    Arc::new(RwLock::new(None))
-                }
+        if !std::path::Path::new(&index_path).exists()
+            || !std::path::Path::new(&id_map_path).exists()
+        {
+            tracing::debug!(
+                "TurboVec index not found at {} (will create on first slumber)",
+                index_path
+            );
+            return nothing;
+        }
+        // A failed unlink leaves files behind; the marker written at that moment
+        // is what keeps them from being trusted.
+        let marker = compressed_index_stale_marker(&index_path);
+        if std::path::Path::new(&marker).exists() {
+            tracing::warn!(
+                "⚠️ Compressed index pair at {} was marked stale by an invalidation that \
+                 could not remove it ({}); ignoring it and serving search from Qdrant \
+                 until the next slumber rebuilds it",
+                index_path,
+                marker
+            );
+            return nothing;
+        }
+        let index = match quantizer::TurboQuantVectorIndex::load(
+            &index_path,
+            &id_map_path,
+            dims,
+            bit_width,
+        ) {
+            Ok(index) => index,
+            Err(e) => {
+                // NotFound is handled above, so anything here is a corrupt or
+                // mixed pair: never silently treat it as "no index yet".
+                tracing::warn!(
+                    "⚠️ Compressed index at {} is unreadable or inconsistent ({e}); \
+                     ignoring it and falling back to Qdrant until the next slumber rebuilds it",
+                    index_path
+                );
+                return nothing;
+            }
+        };
+        let meta = match read_compressed_index_meta(&index_path) {
+            Ok(Some(meta)) => meta,
+            Ok(None) => {
+                tracing::warn!(
+                    "⚠️ Compressed index at {} has no fingerprint sidecar, so it cannot be \
+                     proven fresh; ignoring it and falling back to Qdrant",
+                    index_path
+                );
+                return nothing;
             }
             Err(e) => {
-                tracing::debug!(
-                    "TurboVec index not found at {} (will create on first slumber): {}",
-                    index_path,
-                    e
+                tracing::warn!(
+                    "⚠️ Compressed index sidecar for {} could not be read ({e}); \
+                     ignoring the pair and falling back to Qdrant",
+                    index_path
                 );
-                Arc::new(RwLock::new(None))
+                return nothing;
             }
+        };
+        if let Err(e) = meta.validate_pair(&index_path, &id_map_path, &index, dims) {
+            tracing::warn!(
+                "⚠️ Compressed index at {} does not match its own sidecar ({e}); \
+                 ignoring it and falling back to Qdrant until the next slumber rebuilds it",
+                index_path
+            );
+            return nothing;
+        }
+        // Without the live corpus the index cannot be proven fresh, and a stale
+        // index hides memories instead of returning old ones.
+        let live = match store.scroll_all_memories().await {
+            Ok(memories) => memories,
+            Err(e) => {
+                tracing::warn!(
+                    "⚠️ Could not read the live corpus to validate {} ({e}); \
+                     ignoring it and serving search from Qdrant",
+                    index_path
+                );
+                return nothing;
+            }
+        };
+        if meta.fingerprint != corpus_fingerprint(&live) {
+            tracing::warn!(
+                "⚠️ TurboVec index at {} was built for a different corpus: memory content \
+                 changed since the rebuild ({} live memories); ignoring it and falling back \
+                 to Qdrant until the next slumber rebuilds it",
+                index_path,
+                live.len()
+            );
+            return nothing;
+        }
+        let live_ids: HashSet<String> = live.into_iter().map(|m| m.id).collect();
+        if turbovec_index_matches_corpus(index.ids(), &live_ids) {
+            tracing::info!(
+                "📦 Loaded TurboVec index: {} vectors from {} ({}d @ {}-bit, {:.1}x compression)",
+                index.vector_count(),
+                index_path,
+                dims,
+                bit_width,
+                index.compression_ratio()
+            );
+            Arc::new(RwLock::new(Some(index)))
+        } else {
+            let stale = index
+                .ids()
+                .iter()
+                .filter(|id| !live_ids.contains(*id))
+                .count();
+            tracing::warn!(
+                "⚠️ TurboVec index at {} holds {} vectors for {} live memories \
+                 ({} indexed IDs are no longer live); ignoring it and falling back \
+                 to Qdrant until the next slumber rebuilds it",
+                index_path,
+                index.vector_count(),
+                live_ids.len(),
+                stale
+            );
+            nothing
         }
     }
 
@@ -418,6 +510,11 @@ impl Engine {
         let embedder = self.make_embedder()?;
         let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
         let vectors = embedder.embed_batch(&texts).await?;
+
+        // A loaded compressed index cannot answer for memories that did not exist
+        // when it was built, so it would hide every chunk ingested here. Drop it
+        // (and the files on disk) before the first write, like `store_memory`.
+        self.invalidate_compressed_index().await;
 
         for (i, chunk) in chunks.iter().enumerate() {
             let id = uuid::Uuid::new_v4().to_string();
@@ -465,6 +562,10 @@ impl Engine {
                 let mut state = self.slumber_state.write().await;
                 state.memories_processed += 1;
             }
+
+            // Keep the keyword index in step with the dense one, as `store_memory`
+            // does; it is rebuilt from Qdrant on the next slumber anyway.
+            self.lexical.write().await.upsert(&id, &chunk.content);
         }
 
         tracing::info!("Stored {} memories", chunks.len());
@@ -665,6 +766,10 @@ impl Engine {
         let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
         let vectors = embedder.embed_batch(&texts).await?;
 
+        // Same hazard as `ingest_path`: the watcher can fire while an index is
+        // loaded, and the new chunks are not in it.
+        self.invalidate_compressed_index().await;
+
         for (i, chunk) in chunks.iter().enumerate() {
             let id = uuid::Uuid::new_v4().to_string();
             let vector = vectors.get(i).cloned().unwrap_or_default();
@@ -705,6 +810,9 @@ impl Engine {
                     "private",
                 )
                 .await?;
+
+            // Keep the keyword index in step with the dense one.
+            self.lexical.write().await.upsert(&id, &chunk.content);
         }
 
         tracing::info!(
@@ -785,6 +893,9 @@ impl Engine {
         let _read = self.store.maintenance_read_guard().await;
         let erased = self.erased_ids()?;
         let tv_guard = self.turbovec_index.read().await;
+        // The index handle is only ever installed by the load path after the
+        // persisted pair was validated against this corpus, and dropped by every
+        // mutation, so holding it here is enough: no epoch to compare.
         let results = if let Some(tv) = tv_guard
             .as_ref()
             .filter(|_| tags.is_none_or(|t| t.is_empty()))
@@ -1283,19 +1394,20 @@ impl Engine {
         let _guard = self.store.maintenance_guard().await;
         if let Some(ledger) = self.evidence_store()? {
             if ledger.begin_erase(id)?.is_some() {
+                // The compressed index has no per-ID removal; never keep a stale
+                // candidate map that still resolves this ID.
+                self.invalidate_compressed_index().await;
                 self.store
                     .delete_projection_after_erasure_intent(id)
                     .await?;
                 ledger.finish_erase(id)?;
                 self.lexical.write().await.remove(id);
-                // TurboVec has no per-ID removal; never retain a stale candidate map.
-                *self.turbovec_index.write().await = None;
                 return Ok(());
             }
         }
+        self.invalidate_compressed_index().await;
         self.store.delete_memory(id).await?;
         self.lexical.write().await.remove(id);
-        *self.turbovec_index.write().await = None;
         Ok(())
     }
 
@@ -1321,6 +1433,9 @@ impl Engine {
         existing.last_verified = None;
         existing.verification_confidence = None;
         existing.reaction_score = crate::engine::reactions::infer_reaction(new_content);
+        // The stored vector changes, so the compressed index no longer describes
+        // this memory. Drop it before the write and let search serve from Qdrant.
+        self.invalidate_compressed_index().await;
         self.store.replace_memory(&existing, &vector).await?;
         self.lexical
             .write()
@@ -1342,10 +1457,52 @@ impl Engine {
         }
     }
 
-    /// Qdrant remains authoritative while compressed indexes are rebuilt.
-    pub(crate) async fn invalidate_search_index(&self) -> anyhow::Result<()> {
+    /// The single place that discards derived search structures after a corpus
+    /// mutation. Qdrant stays authoritative while they are rebuilt.
+    ///
+    /// Lock order is `maintenance gate → compressed index → lexical`. Callers
+    /// that already hold the gate call this before releasing it; search takes the
+    /// same order (gate, then the index), so no cycle exists. In-memory state is
+    /// always dropped; if the files on disk cannot be unlinked, a stale marker is
+    /// written so the pair is rejected at the next load instead of being trusted.
+    ///
+    /// Every mutation that changes content, a vector, or which IDs are live must
+    /// call this. Payload-only updates (importance, access counts, verification
+    /// stamps) do not: they change neither the vector nor the ID membership.
+    pub(crate) async fn invalidate_compressed_index(&self) {
         *self.turbovec_index.write().await = None;
-        dedup_removal::invalidate_index_files(&self.config)
+        let (index_path, id_map_path) = compressed_index_paths(&self.config);
+        if let Err(e) = dedup_removal::invalidate_index_files(&index_path, &id_map_path) {
+            // A pair that survives a failed unlink must never be accepted again.
+            // The marker is the load path's first check; if even that write fails
+            // the pair is still rejected, because its stored fingerprint no longer
+            // matches the corpus that just changed.
+            let marker = compressed_index_stale_marker(&index_path);
+            match std::fs::write(&marker, format!("invalidation failed: {e}\n")) {
+                Ok(()) => tracing::warn!(
+                    "Compressed index files could not be removed ({e}); wrote {marker} \
+                     so the pair is rejected at startup"
+                ),
+                Err(marker_error) => tracing::error!(
+                    "Compressed index files could not be removed ({e}) and the stale marker \
+                     could not be written ({marker_error}); the leftover pair is still rejected \
+                     at startup by its corpus fingerprint"
+                ),
+            }
+        }
+    }
+
+    /// Rebuild every derived search structure from the live corpus. Called after
+    /// multi-memory maintenance (slumber, import, restore) whose last mutation
+    /// is already durable.
+    pub(crate) async fn rebuild_derived_indexes(&self) {
+        self.invalidate_compressed_index().await;
+        if let Err(e) = rebuild_compressed_index(&self.store, &self.config).await {
+            tracing::warn!("Compressed index rebuild failed: {e}");
+        }
+        if let Err(e) = self.rebuild_lexical_index().await {
+            tracing::warn!("Lexical index rebuild failed: {e}");
+        }
     }
 
     pub async fn trigger_slumber(
@@ -1361,14 +1518,18 @@ impl Engine {
         tracing::info!("💤 Slumber started...");
         let slumber = slumber::SlumberEngine::new(self.config.clone(), self.store.clone_store());
         let result = async {
-            if !self.config.slumber.dedup_dry_run {
-                self.invalidate_search_index().await?;
-            }
+            // Slumber mutates the corpus outside the per-write hooks and rebuilds
+            // the compressed index at the end of its own pipeline. Drop the
+            // in-memory index first so searches during the run read Qdrant instead
+            // of a map the run is about to replace.
+            self.invalidate_compressed_index().await;
             slumber.run_full_pipeline(force_consolidation).await
         }
         .await;
         // Slumber rewrites, merges and deletes memories without going through the
-        // engine hooks, so refresh the keyword index from Qdrant afterwards.
+        // engine hooks, so refresh the keyword index from Qdrant afterwards. The
+        // compressed index was rebuilt by the pipeline's last phase; this engine
+        // keeps serving from Qdrant until the next restart, as before.
         if let Err(e) = self.rebuild_lexical_index().await {
             tracing::warn!("Lexical index rebuild after slumber failed: {e}");
         }
@@ -1506,6 +1667,10 @@ impl Engine {
         // retention.
         let memory_type_str = memory_type.unwrap_or("general");
 
+        // A new memory is not in any compressed index built earlier, and search
+        // prefers that index. Drop it before the write so the new memory is
+        // visible immediately instead of only after the next restart.
+        self.invalidate_compressed_index().await;
         self.store
             .store_memory_with_tags(
                 &id,
@@ -1631,9 +1796,9 @@ impl Engine {
             self.store.replace_memory(&memory, &vector).await?;
             stored += 1;
         }
-        if let Err(e) = self.rebuild_lexical_index().await {
-            tracing::warn!("Lexical index rebuild after import failed: {e}");
-        }
+        // Import replaces or adds memories behind the per-write hooks, so both
+        // derived caches are rebuilt from the final corpus.
+        self.rebuild_derived_indexes().await;
         Ok(stored)
     }
 
@@ -1868,9 +2033,9 @@ impl Engine {
             acknowledge_legacy_evidence_resurrection,
         )
         .await?;
-        if let Err(e) = self.rebuild_lexical_index().await {
-            tracing::warn!("Lexical index rebuild after restore failed: {e}");
-        }
+        // A restore replaces the corpus wholesale, so both derived caches are
+        // rebuilt from the restored state.
+        self.rebuild_derived_indexes().await;
         Ok(n)
     }
 
@@ -1881,6 +2046,295 @@ impl Engine {
     ) -> anyhow::Result<Vec<backup::BackupInfo>> {
         backup::list_backups(backup_dir)
     }
+}
+
+/// Configured compressed-index file pair, including the defaults used when the
+/// config leaves the paths empty.
+pub(crate) fn compressed_index_paths(config: &AppConfig) -> (String, String) {
+    let index_path = if config.turbovec.index_path.is_empty() {
+        "data/memories.tv".to_string()
+    } else {
+        config.turbovec.index_path.clone()
+    };
+    let id_map_path = if config.turbovec.id_map_path.is_empty() {
+        "data/memories_ids.json".to_string()
+    } else {
+        config.turbovec.id_map_path.clone()
+    };
+    (index_path, id_map_path)
+}
+
+/// Sidecar that records which corpus a persisted index pair was built from.
+///
+/// The pair alone is not self-describing: the `.tv` holds quantized codes and the
+/// id map holds slot→UUID, so stale *vectors* with unchanged IDs are invisible to
+/// an ID-set check. The sidecar carries a fingerprint of the corpus content (not
+/// `source_hash`, which `edit_memory` never updates) plus byte digests of both
+/// files, so a load can prove the pair describes this corpus.
+pub(crate) fn compressed_index_meta_path(index_path: &str) -> String {
+    format!("{index_path}.meta.json")
+}
+
+/// Marker written when an invalidation could not unlink the pair. Its existence
+/// alone rejects the pair at load; a successful rebuild removes it.
+pub(crate) fn compressed_index_stale_marker(index_path: &str) -> String {
+    format!("{index_path}.stale")
+}
+
+const COMPRESSED_INDEX_META_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct CompressedIndexMeta {
+    pub version: u32,
+    /// Number of vectors in the `.tv` at the time it was written.
+    pub vectors: usize,
+    /// Number of IDs in the companion map; must equal `vectors`.
+    pub id_map_len: usize,
+    pub dimensions: usize,
+    pub bit_width: usize,
+    /// SHA-256 over the (id, content) pairs of the corpus this pair was built for.
+    pub fingerprint: String,
+    /// SHA-256 of the `.tv` bytes: catches a file swapped in from elsewhere.
+    pub index_digest: String,
+    /// SHA-256 of the id-map bytes.
+    pub id_map_digest: String,
+}
+
+impl CompressedIndexMeta {
+    /// Prove the sidecar describes exactly these two files.
+    fn validate_pair(
+        &self,
+        index_path: &str,
+        id_map_path: &str,
+        index: &quantizer::TurboQuantVectorIndex,
+        dimensions: usize,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.version == COMPRESSED_INDEX_META_VERSION,
+            "unsupported sidecar version {}",
+            self.version
+        );
+        anyhow::ensure!(
+            index.slots() == index.ids().len()
+                && self.vectors == index.slots()
+                && self.id_map_len == index.ids().len(),
+            "sidecar describes {} vectors / {} ids but the files hold {} vectors / {} ids",
+            self.vectors,
+            self.id_map_len,
+            index.slots(),
+            index.ids().len()
+        );
+        anyhow::ensure!(
+            self.dimensions == dimensions && index.dimensions() == dimensions,
+            "index is {}-dimensional but this engine embeds {dimensions}d",
+            index.dimensions()
+        );
+        anyhow::ensure!(
+            self.bit_width == index.bit_width(),
+            "sidecar says {}-bit but the index file is {}-bit",
+            self.bit_width,
+            index.bit_width()
+        );
+        anyhow::ensure!(
+            self.index_digest == file_digest(index_path)?,
+            "{index_path} was replaced after the sidecar was written"
+        );
+        anyhow::ensure!(
+            self.id_map_digest == file_digest(id_map_path)?,
+            "{id_map_path} was replaced after the sidecar was written"
+        );
+        Ok(())
+    }
+}
+
+fn file_digest(path: &str) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path)?;
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+/// Fingerprint of the corpus content an index was built for.
+///
+/// Covers every memory's ID and stored content, order-independently. Content is
+/// what `edit_memory` rewrites and what a rebuild re-embeds, so an edit invalidates
+/// the pair even when `source_hash` is left alone. A vector changed without a
+/// content change is not representable here; Qdrant stays authoritative for the
+/// payload, so that only costs ranking fidelity, never visibility.
+pub(crate) fn corpus_fingerprint(memories: &[crate::storage::qdrant::MemoryPoint]) -> String {
+    fingerprint_pairs(memories.iter().map(|m| (m.id.as_str(), m.content.as_str())))
+}
+
+fn fingerprint_pairs<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut pairs: Vec<(&str, &str)> = pairs.collect();
+    pairs.sort_unstable();
+    let mut hasher = Sha256::new();
+    hasher.update(b"memex8-compressed-index-v1");
+    for (id, content) in pairs {
+        hasher.update((id.len() as u64).to_le_bytes());
+        hasher.update(id.as_bytes());
+        hasher.update((content.len() as u64).to_le_bytes());
+        hasher.update(content.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn read_compressed_index_meta(index_path: &str) -> anyhow::Result<Option<CompressedIndexMeta>> {
+    let path = compressed_index_meta_path(index_path);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(Some(serde_json::from_str(&text)?))
+}
+
+/// Build the compressed search index from the live corpus and persist it.
+///
+/// This is the *only* writer of the index files, and every caller runs it after
+/// its last corpus mutation: an index written before a consolidation would point
+/// at deleted sources and miss the summaries that replaced them.
+///
+/// The pair is written to temporary siblings and renamed, so a crash mid-write
+/// leaves either the previous pair or nothing — never a new index beside an old
+/// ID map. An empty corpus, or a failed build, removes the previous files rather
+/// than leaving an index that no longer describes the corpus; search falls back
+/// to Qdrant, which is complete.
+pub(crate) async fn rebuild_compressed_index(
+    store: &QdrantStore,
+    config: &AppConfig,
+) -> anyhow::Result<usize> {
+    let (index_path, id_map_path) = compressed_index_paths(config);
+    // The fingerprint covers the whole point set (including memories without a
+    // usable vector, which stay out of the index) so build-time and load-time
+    // fingerprints are computed from the same view.
+    let corpus = match store.scroll_all_memories().await {
+        Ok(corpus) => corpus,
+        Err(e) => {
+            let _ = dedup_removal::invalidate_index_files(&index_path, &id_map_path);
+            return Err(e);
+        }
+    };
+    let built = build_compressed_index(store).await;
+    let index = match built {
+        Ok(Some(index)) => index,
+        Ok(None) => {
+            dedup_removal::invalidate_index_files(&index_path, &id_map_path)?;
+            tracing::info!("  No memories to index; removed the compressed index");
+            return Ok(0);
+        }
+        Err(e) => {
+            dedup_removal::invalidate_index_files(&index_path, &id_map_path)?;
+            return Err(e);
+        }
+    };
+    if let Err(e) = save_compressed_index(
+        &index,
+        &index_path,
+        &id_map_path,
+        &corpus_fingerprint(&corpus),
+    ) {
+        let _ = dedup_removal::invalidate_index_files(&index_path, &id_map_path);
+        return Err(e);
+    }
+    tracing::info!(
+        "  Saved TurboVec index: {} vectors → {} ({:.1}x compression)",
+        index.vector_count(),
+        index_path,
+        index.compression_ratio()
+    );
+    Ok(index.vector_count())
+}
+
+/// Compress every memory that has a usable vector. Memories without one cannot
+/// be indexed; they are counted and warned about, and the resulting ID-set
+/// mismatch at load time keeps search on Qdrant rather than silently omitting
+/// them.
+async fn build_compressed_index(
+    store: &QdrantStore,
+) -> anyhow::Result<Option<quantizer::TurboQuantVectorIndex>> {
+    let mut rows: Vec<(String, Vec<f32>)> = Vec::new();
+    let mut dims = 0usize;
+    let mut skipped = 0usize;
+    for memory in store.scroll_all_memories_with_vectors().await? {
+        if memory.vector.is_empty() {
+            skipped += 1;
+            continue;
+        }
+        if dims == 0 {
+            dims = memory.vector.len();
+        }
+        if memory.vector.len() != dims {
+            skipped += 1;
+            continue;
+        }
+        rows.push((memory.memory.id, memory.vector));
+    }
+    if skipped > 0 {
+        tracing::warn!(
+            "  {} memories have no usable embedding and stay out of the compressed index",
+            skipped
+        );
+    }
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut index = quantizer::TurboQuantVectorIndex::new(dims, 4);
+    for chunk in rows.chunks(256) {
+        let ids: Vec<String> = chunk.iter().map(|(id, _)| id.clone()).collect();
+        let vectors: Vec<Vec<f32>> = chunk.iter().map(|(_, v)| v.clone()).collect();
+        index.add_batch(&ids, &vectors);
+    }
+    Ok(Some(index))
+}
+
+fn save_compressed_index(
+    index: &quantizer::TurboQuantVectorIndex,
+    index_path: &str,
+    id_map_path: &str,
+    fingerprint: &str,
+) -> anyhow::Result<()> {
+    for path in [index_path, id_map_path] {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let temp_index = format!("{}.tmp", index_path);
+    let temp_ids = format!("{}.tmp", id_map_path);
+    if let Err(e) = index.save(&temp_index, &temp_ids) {
+        let _ = std::fs::remove_file(&temp_index);
+        let _ = std::fs::remove_file(&temp_ids);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&temp_index, index_path)
+        .and_then(|()| std::fs::rename(&temp_ids, id_map_path))
+    {
+        let _ = std::fs::remove_file(&temp_index);
+        let _ = std::fs::remove_file(&temp_ids);
+        return Err(e.into());
+    }
+    // Written last, and only after the pair is in place: the digests describe
+    // exactly the bytes now on disk. A pair without a sidecar is never loaded.
+    let meta = CompressedIndexMeta {
+        version: COMPRESSED_INDEX_META_VERSION,
+        vectors: index.vector_count(),
+        id_map_len: index.ids().len(),
+        dimensions: index.dimensions(),
+        bit_width: index.bit_width(),
+        fingerprint: fingerprint.to_string(),
+        index_digest: file_digest(index_path)?,
+        id_map_digest: file_digest(id_map_path)?,
+    };
+    let meta_path = compressed_index_meta_path(index_path);
+    let temp_meta = format!("{meta_path}.tmp");
+    std::fs::write(&temp_meta, serde_json::to_vec(&meta)?)?;
+    if let Err(e) = std::fs::rename(&temp_meta, &meta_path) {
+        let _ = std::fs::remove_file(&temp_meta);
+        return Err(e.into());
+    }
+    // A successful rebuild supersedes any failure marker from an earlier write.
+    let _ = std::fs::remove_file(compressed_index_stale_marker(index_path));
+    Ok(())
 }
 
 /// Order memories for `GET /api/v1/memories`. `descending` puts the largest
@@ -1920,36 +2374,228 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[cfg(test)]
-mod turbovec_coverage_tests {
-    use super::turbovec_index_covers_live;
+mod turbovec_freshness_tests {
+    use super::{
+        compressed_index_paths, fingerprint_pairs, read_compressed_index_meta,
+        save_compressed_index, turbovec_index_matches_corpus, CompressedIndexMeta,
+    };
+    use crate::config::AppConfig;
+    use crate::engine::quantizer::TurboQuantVectorIndex;
+    use std::collections::HashSet;
 
-    /// The stale-index regression pin: a 342-vector index was once loaded for
-    /// a 12,374-memory corpus, silently hiding 97% of memories from search.
-    #[test]
-    fn test_stale_turbovec_index_is_rejected() {
-        assert!(!turbovec_index_covers_live(342, 12_374));
+    fn live(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|id| id.to_string()).collect()
     }
 
-    /// A freshly rebuilt index covering the whole corpus must be accepted.
-    #[test]
-    fn test_full_turbovec_index_is_accepted() {
-        assert!(turbovec_index_covers_live(12_367, 12_374));
-        assert!(turbovec_index_covers_live(12_374, 12_374));
+    fn indexed(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
     }
 
-    /// The normal gap (memories ingested since the last rebuild) must not
-    /// cause the index to be thrown away on every restart.
-    #[test]
-    fn test_small_index_gap_is_tolerated() {
-        assert!(turbovec_index_covers_live(9_500, 10_000));
-        assert!(!turbovec_index_covers_live(8_900, 10_000));
+    fn fingerprint(pairs: &[(&str, &str)]) -> String {
+        fingerprint_pairs(pairs.iter().copied())
     }
 
-    /// An empty corpus is not a reason to reject an index.
+    fn vector(dims: usize, seed: f32) -> Vec<f32> {
+        let mut v: Vec<f32> = (0..dims).map(|i| ((i as f32) + seed).sin()).collect();
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        v.iter_mut().for_each(|x| *x /= norm);
+        v
+    }
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "memex8-index-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A rebuilt index describes exactly the corpus it was built for.
     #[test]
-    fn test_empty_corpus_accepts_any_index() {
-        assert!(turbovec_index_covers_live(0, 0));
-        assert!(turbovec_index_covers_live(342, 0));
+    fn identical_id_sets_are_accepted() {
+        assert!(turbovec_index_matches_corpus(
+            &indexed(&["a", "b", "c"]),
+            &live(&["a", "b", "c"])
+        ));
+        assert!(turbovec_index_matches_corpus(&[], &live(&[])));
+    }
+
+    /// The consolidation regression: sources `a` and `b` are deleted and summary
+    /// `s` is inserted. Three vectors were live before and two after, but with a
+    /// one-for-one swap the count still matches — so a count-only freshness check
+    /// accepted an index that could not answer for `s` and still resolved `a`.
+    #[test]
+    fn replaced_ids_with_an_equal_count_are_rejected() {
+        let index = indexed(&["a", "b"]);
+        assert_eq!(index.len(), live(&["s", "b"]).len());
+        assert!(!turbovec_index_matches_corpus(&index, &live(&["s", "b"])));
+    }
+
+    /// An index that is larger than the corpus (deleted IDs still resident) is
+    /// stale even though it "covers" every live memory.
+    #[test]
+    fn deleted_ids_are_rejected_even_when_every_live_id_is_present() {
+        assert!(!turbovec_index_matches_corpus(
+            &indexed(&["a", "b", "deleted"]),
+            &live(&["a", "b"])
+        ));
+    }
+
+    /// Memories ingested after the last rebuild are not in the index, which is
+    /// exactly the store-then-search failure.
+    #[test]
+    fn live_ids_missing_from_the_index_are_rejected() {
+        assert!(!turbovec_index_matches_corpus(
+            &indexed(&["a", "b"]),
+            &live(&["a", "b", "new"])
+        ));
+    }
+
+    /// Empty config paths resolve to the same defaults slumber always used, so
+    /// invalidation and rebuild touch the same files.
+    #[test]
+    fn empty_paths_use_the_data_defaults() {
+        let mut config = AppConfig::default();
+        config.turbovec.index_path = String::new();
+        config.turbovec.id_map_path = String::new();
+        assert_eq!(
+            compressed_index_paths(&config),
+            (
+                "data/memories.tv".to_string(),
+                "data/memories_ids.json".to_string()
+            )
+        );
+        config.turbovec.index_path = "/tmp/x.tv".into();
+        config.turbovec.id_map_path = "/tmp/x-ids.json".into();
+        assert_eq!(
+            compressed_index_paths(&config),
+            ("/tmp/x.tv".to_string(), "/tmp/x-ids.json".to_string())
+        );
+    }
+
+    /// The ID set can be unchanged while every stored vector is stale — exactly
+    /// what `edit_memory` leaves behind, since it rewrites the content and the
+    /// vector but never `source_hash`. The fingerprint must follow the content.
+    #[test]
+    fn fingerprint_changes_when_content_changes_with_unchanged_ids() {
+        let before = fingerprint(&[("a", "original text"), ("b", "other text")]);
+        let after = fingerprint(&[("a", "edited text"), ("b", "other text")]);
+        assert_eq!(live(&["a", "b"]).len(), 2);
+        assert_ne!(before, after);
+    }
+
+    /// Scroll order is not part of the corpus, so it must not move the hash.
+    #[test]
+    fn fingerprint_is_order_independent() {
+        assert_eq!(
+            fingerprint(&[("a", "one"), ("b", "two")]),
+            fingerprint(&[("b", "two"), ("a", "one")])
+        );
+    }
+
+    /// Fields are length-prefixed, so a boundary shift cannot alias two corpora.
+    #[test]
+    fn fingerprint_separates_field_boundaries() {
+        assert_ne!(fingerprint(&[("ab", "c")]), fingerprint(&[("a", "bc")]));
+    }
+
+    fn pair_on_disk(tag: &str, rows: &[(&str, Vec<f32>)]) -> (std::path::PathBuf, String, String) {
+        let dir = tmp_dir(tag);
+        let index_path = dir.join("corpus.tv").to_string_lossy().to_string();
+        let id_map_path = dir.join("corpus-ids.json").to_string_lossy().to_string();
+        let mut index = TurboQuantVectorIndex::new(8, 4);
+        let ids: Vec<String> = rows.iter().map(|(id, _)| id.to_string()).collect();
+        let vectors: Vec<Vec<f32>> = rows.iter().map(|(_, v)| v.clone()).collect();
+        index.add_batch(&ids, &vectors);
+        save_compressed_index(&index, &index_path, &id_map_path, "fingerprint-of-build").unwrap();
+        (dir, index_path, id_map_path)
+    }
+
+    /// The pair as written validates against its own sidecar.
+    #[test]
+    fn sidecar_validates_the_pair_it_describes() {
+        let rows = [("a", vector(8, 1.0)), ("b", vector(8, 2.0))];
+        let (dir, index_path, id_map_path) = pair_on_disk("meta-ok", &rows);
+        let loaded = TurboQuantVectorIndex::load(&index_path, &id_map_path, 8, 4).unwrap();
+        let meta: CompressedIndexMeta = read_compressed_index_meta(&index_path).unwrap().unwrap();
+        assert_eq!(meta.vectors, 2);
+        assert_eq!(meta.id_map_len, 2);
+        assert_eq!(meta.fingerprint, "fingerprint-of-build");
+        meta.validate_pair(&index_path, &id_map_path, &loaded, 8)
+            .expect("a freshly written pair must validate");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `.tv` swapped in from another corpus whose slot count matches the id map
+    /// passes the length check, so the sidecar digests are what catch it.
+    #[test]
+    fn sidecar_rejects_a_foreign_index_of_the_same_length() {
+        let rows = [("a", vector(8, 1.0)), ("b", vector(8, 2.0))];
+        let (dir, index_path, id_map_path) = pair_on_disk("meta-swap", &rows);
+        let (_other, other_index, _other_ids) = pair_on_disk(
+            "meta-swap-foreign",
+            &[("x", vector(8, 3.0)), ("y", vector(8, 4.0))],
+        );
+        std::fs::copy(&other_index, &index_path).unwrap();
+        let loaded = TurboQuantVectorIndex::load(&index_path, &id_map_path, 8, 4).unwrap();
+        assert_eq!(
+            loaded.slots(),
+            2,
+            "same length: the count check cannot help"
+        );
+        let meta: CompressedIndexMeta = read_compressed_index_meta(&index_path).unwrap().unwrap();
+        let error = meta
+            .validate_pair(&index_path, &id_map_path, &loaded, 8)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("was replaced"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&_other);
+    }
+
+    /// A mixed pair whose lengths agree with each other but not with the sidecar
+    /// is still refused.
+    #[test]
+    fn sidecar_rejects_a_pair_of_a_different_size() {
+        let rows = [("a", vector(8, 1.0)), ("b", vector(8, 2.0))];
+        let (dir, index_path, id_map_path) = pair_on_disk("meta-size", &rows);
+        let (_other, other_index, other_ids) = pair_on_disk(
+            "meta-size-foreign",
+            &[
+                ("x", vector(8, 3.0)),
+                ("y", vector(8, 4.0)),
+                ("z", vector(8, 5.0)),
+            ],
+        );
+        std::fs::copy(&other_index, &index_path).unwrap();
+        std::fs::copy(&other_ids, &id_map_path).unwrap();
+        let loaded = TurboQuantVectorIndex::load(&index_path, &id_map_path, 8, 4).unwrap();
+        assert_eq!(loaded.slots(), 3);
+        let meta: CompressedIndexMeta = read_compressed_index_meta(&index_path).unwrap().unwrap();
+        let error = meta
+            .validate_pair(&index_path, &id_map_path, &loaded, 8)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sidecar describes 2 vectors"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&_other);
+    }
+
+    /// The sidecar lives beside the pair and must be named off the index path, so
+    /// invalidation and rebuild always hit the same file.
+    #[test]
+    fn sidecar_and_marker_paths_derive_from_the_index_path() {
+        assert_eq!(
+            super::compressed_index_meta_path("/data/m.tv"),
+            "/data/m.tv.meta.json"
+        );
+        assert_eq!(
+            super::compressed_index_stale_marker("/data/m.tv"),
+            "/data/m.tv.stale"
+        );
     }
 }
 
