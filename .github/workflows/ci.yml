@@ -95,6 +95,17 @@ jobs:
           MEMEX8_TEST_QDRANT_URL: http://127.0.0.1:6336
         run: cargo test --lib consolidation_tests -- --ignored --test-threads=1
 
+      # Slumber pause/resume, interrupted-consolidation resume, graph pruning and
+      # the certification/archive race depend on debug-only failpoints
+      # (MEMEX8_TEST_*), so this step deliberately runs the DEBUG binary even
+      # though the artifact above is release.
+      - name: Test slumber controls, consolidation resume and certified archives
+        env:
+          MEMEX8_TEST_BINARY: ${{ github.workspace }}/target/debug/memex8
+        run: |
+          cargo build
+          python3 tests/test_audit_control.py
+
       - name: Test explicit REST evidence against disposable Qdrant
         env:
           EVIDENCE_QDRANT_URL: http://127.0.0.1:6335
