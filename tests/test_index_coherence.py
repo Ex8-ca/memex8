@@ -80,6 +80,20 @@ def restore(f, files):
 
 
 class IndexCoherenceTests(unittest.TestCase):
+    def test_rebuild_uses_configured_two_bit_width(self):
+        """The slumber rebuild must use config.turbovec.bit_width, not a
+        hardcoded 4. The persisted sidecar reports the actual built width;
+        with the old code this assertion sees 4 even though config says 2."""
+        with fixture(turbovec_bit_width=2) as f:
+            store(f, "Sentinel two-bit compressed-index fact")
+            f["api"]("/slumber/trigger", {}, "POST")
+            meta = json.loads((f["work"] / "test.tv.meta.json").read_text())
+            self.assertEqual(meta["vectors"], 1)
+            self.assertEqual(meta["bit_width"], 2, meta)
+            self.assertTrue((f["work"] / "test.tv").is_file())
+            with restarted(f) as second:
+                self.assertIn("Loaded TurboVec index", log_text(second["log_path"]))
+
     def test_ingest_while_an_index_is_loaded_is_searchable(self):
         """A new file ingested over HTTP is not in a loaded index, so the write has
         to drop that index: otherwise the memories live in Qdrant and are invisible

@@ -23,7 +23,7 @@ from test_certification import request, wait_ready
 
 @contextmanager
 def fixture(preserve=False, archive_dimensions=1, dedup_dry_run=True,
-            idle_timeout="24h", paused=False, extra_env=None):
+            idle_timeout="24h", paused=False, extra_env=None, turbovec_bit_width=4):
     repo = Path(__file__).resolve().parents[1]
     binary = os.environ.get("MEMEX8_TEST_BINARY", str(repo / "target/debug/memex8"))
     container = subprocess.check_output([
@@ -101,6 +101,10 @@ def fixture(preserve=False, archive_dimensions=1, dedup_dry_run=True,
                                              env=env, text=True, stderr=subprocess.DEVNULL)
             config = config.replace('base_url = "https://api.openai.com/v1"',
                                     'base_url = ' + json.dumps(llm_url + "/v1"))
+            assert '[turbovec]\nbit_width = 4' in config
+            assert turbovec_bit_width in (2, 4)
+            config = config.replace('[turbovec]\nbit_width = 4',
+                                    f'[turbovec]\nbit_width = {turbovec_bit_width}')
             config = config.replace('backend = "openai"', 'backend = "local"')
             config = config.replace('[memex8_md]\nenabled = true', '[memex8_md]\nenabled = false')
             config = config.replace('[digest_md]\nenabled = true', '[digest_md]\nenabled = false')
