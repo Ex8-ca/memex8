@@ -571,7 +571,8 @@ impl QdrantStore {
         self.backfill_visibility().await?;
 
         // Also install the index for existing collections; creation is idempotent.
-        for field in ["verification_status", "related_memory_ids"] {
+        // `source_hash` backs idempotent webhook ingestion (exact-content lookup).
+        for field in ["verification_status", "related_memory_ids", "source_hash"] {
             self.client
                 .create_field_index(
                     CreateFieldIndexCollectionBuilder::new(MEMORIES, field, FieldType::Keyword)
@@ -1067,6 +1068,37 @@ impl QdrantStore {
             )
             .await?;
         Ok(result.result.into_iter().map(|r| r.score).collect())
+    }
+
+    /// Memories whose `source_hash` equals `hash` (at most `limit`). The caller
+    /// must still compare content: `edit_memory` rewrites content without
+    /// touching `source_hash`, so a hash match alone is not identity.
+    pub async fn memories_with_source_hash(
+        &self,
+        hash: &str,
+        limit: u32,
+    ) -> anyhow::Result<Vec<MemoryPoint>> {
+        let resp = self
+            .client
+            .scroll(
+                ScrollPointsBuilder::new(MEMORIES)
+                    .limit(limit)
+                    .with_payload(true)
+                    .with_vectors(false)
+                    .filter(Filter::must([Condition::matches(
+                        "source_hash",
+                        hash.to_string(),
+                    )])),
+            )
+            .await?;
+        Ok(resp
+            .result
+            .into_iter()
+            .map(|point| {
+                let pid = point_id_to_string(point.id.as_ref());
+                memory_from_payload(&pid, &map_to_json(&point.payload))
+            })
+            .collect())
     }
 
     pub async fn has_matching_memory(

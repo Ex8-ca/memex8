@@ -80,6 +80,62 @@ def restore(f, files):
 
 
 class IndexCoherenceTests(unittest.TestCase):
+    def test_slumber_installs_the_rebuilt_index_without_a_restart(self):
+        """Slumber rebuilds the compressed index on disk; the running server must
+        install it (after re-verifying it) instead of serving Qdrant until the
+        next restart. A write afterwards must still be visible immediately."""
+        with fixture() as f:
+            first = store(f, "Ledger reload alpha fact")
+            log = f["work"] / "server.log"
+            self.assertNotIn("Loaded TurboVec index", log.read_text())
+            f["api"]("/slumber/trigger", {}, "POST")
+            self.assertTrue((f["work"] / "test.tv").exists())
+            self.assertIn(
+                "Loaded TurboVec index",
+                log.read_text(),
+                "the rebuilt index was not installed in the running server",
+            )
+            self.assertEqual({r["id"] for r in search(f)}, {first})
+            second = store(f, "Ledger reload beta fact")
+            self.assertEqual(
+                {r["id"] for r in search(f)},
+                {first, second},
+                "a write after the reload was hidden by the installed index",
+            )
+
+    def test_cli_edit_after_reload_is_not_served_from_the_old_map(self):
+        """A CLI process shares the data volume but not this server's memory.
+        Its edit removes the pair on disk; the server must notice and stop
+        ranking by the vector the edit replaced."""
+        with fixture() as f:
+            original = "Zqxv reload original text"
+            edited = "Zqxv reload rewritten text"
+            f["state"]["embedding_vectors"][original] = [0.0, 1.0] + [0.0] * 62
+            f["state"]["embedding_vectors"][edited] = [1.0, 0.0] + [0.0] * 62
+            id_ = store(f, original)
+            f["api"]("/slumber/trigger", {}, "POST")
+            self.assertIn("Loaded TurboVec index", (f["work"] / "server.log").read_text())
+            editor = f["work"] / "editor.sh"
+            editor.write_text(
+                "#!/bin/sh\nprintf '%s' " + json.dumps(edited) + ' > "$1"\n'
+            )
+            editor.chmod(0o755)
+            result = subprocess.run(
+                f["command"] + ["edit", id_],
+                env={**f["env"], "EDITOR": str(editor)},
+                cwd=f["work"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # A query word in neither text keeps the keyword (BM25) path out of
+            # it: that path re-scores against Qdrant and would hide a stale map.
+            # The query embeds to [1, 0, ...], so only the post-edit vector
+            # reaches this score.
+            found = {r["id"] for r in search(f, query="northbound", min_score=0.5)}
+            self.assertIn(id_, found, "server ranked an edited memory by its old vector")
+
     def test_rebuild_uses_configured_two_bit_width(self):
         """The slumber rebuild must use config.turbovec.bit_width, not a
         hardcoded 4. The persisted sidecar reports the actual built width;
