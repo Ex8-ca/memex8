@@ -62,18 +62,17 @@ jobs:
       - name: Build
         run: cargo build --release
 
-      # test_kmeans_simple is non-deterministic on the tiny
-      # fixture vectors (K-means can converge to local minima
-      # on identical-input centroids). Skip it in CI; cover it
-      # locally when iterating.
+      # The k-means fixture was rewritten to use angular clusters, and the
+      # centroid recompute bug that made the old test fail is fixed. Keep this
+      # test in the gate: it was previously skipped on a misdiagnosis.
       - name: Run tests
-        run: cargo test -- --skip test_kmeans_simple
+        run: cargo test --
 
       - name: Test lifecycle recovery with disposable Qdrant
         env:
           MEMEX8_TEST_BINARY: ${{ github.workspace }}/target/release/memex8
         run: |
-          docker pull qdrant/qdrant:latest
+          docker pull qdrant/qdrant:v1.17.0
           python3 tests/test_dedup_inspection.py
           python3 tests/test_certification.py
           python3 tests/test_consolidation.py
@@ -82,6 +81,14 @@ jobs:
           python3 tests/test_search_coverage.py
           python3 tests/test_private_redaction.py
           python3 tests/test_timeline.py
+          # Derived-index freshness: an index must never outlive the corpus
+          # it describes, and ingest/undo must not be hidden by a loaded one.
+          python3 tests/test_index_freshness.py
+          python3 tests/test_index_coherence.py
+          # Ingestion must report partial/failed honestly on REST, CLI and MCP.
+          python3 tests/test_ingest_outcomes.py
+          # Root webhook aliases stay authenticated; MCP SSE handshake completes.
+          python3 tests/test_http_lifecycle.py
 
       - name: Test source-preserving consolidation against disposable Qdrant
         env:
@@ -141,8 +148,24 @@ jobs:
           python3 plugins/memex8/tests/test_search_coverage.py
           python3 plugins/memex8/tests/test_timeline.py
 
+      # These files existed but were named in no CI step, so they could rot
+      # silently (dreams and cron-filter findings were both in that state).
+      - name: Test dreams and cron findings
+        run: |
+          python3 tests/test_dreams.py
+          python3 tests/test_cron_filter.py
+          python3 plugins/memex8/tests/test_dreams.py
+          python3 plugins/memex8/tests/test_cron_findings.py
+
       - name: Test query-aware prefetch isolation and deadlines
         run: python3 -m pytest tests/test_prefetch.py -q
+
+      # Checkpoint archives are load-bearing: a required checkpoint must fail
+      # closed, keep the whole transcript, and never store private spans.
+      - name: Test checkpoint durability and private-span redaction
+        run: |
+          python3 -m pytest tests/test_plugin_checkpoint_privacy.py -q
+          python3 -m pytest tests/test_plugin_webhook_roundtrip.py -q
 
       - name: Validate plugin.yaml
         run: |
