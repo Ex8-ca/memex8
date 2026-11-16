@@ -69,27 +69,41 @@ pub async fn conversation_end(
 
     let realm_hint = payload.realm_hint.clone();
 
-    let id = state
+    // Idempotent: hosts re-send the same transcript (archived again at every
+    // compaction or eviction, or an end-of-session hook fired twice), and each
+    // send used to become another identical memory.
+    let (id, created) = state
         .engine
-        .store_memory(
+        .store_memory_once(
             &content,
-            Some(tags),
+            tags,
             realm_hint.as_deref(),
-            Some(source),
+            source,
             // Webhook ingestion is for the agent's own records; never
             // share these with peers. Operators can mark individual
             // conversations public later via PATCH.
-            Some("private"),
+            "private",
             // None keeps the pre-existing default ("general").
             memory_type,
         )
         .await?;
 
-    tracing::info!("📥 Webhook: stored {} conversation (id: {})", platform, id);
+    if created {
+        tracing::info!("📥 Webhook: stored {} conversation (id: {})", platform, id);
+    } else {
+        tracing::info!(
+            "📥 Webhook: {} conversation already stored (id: {}); not duplicated",
+            platform,
+            id
+        );
+    }
 
+    // `status` stays "stored" for existing clients: the content is durably
+    // stored under `id` either way. `deduplicated` says whether it was new.
     Ok(Json(serde_json::json!({
         "status": "stored",
         "id": id,
+        "deduplicated": !created,
         "source": source,
         "platform": platform,
     })))

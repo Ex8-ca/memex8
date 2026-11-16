@@ -786,6 +786,15 @@ aliases (they previously accepted unauthenticated writes). `/health` and
 the bundled SPA are served outside the auth layer), because the container
 healthcheck calls the latter without credentials.
 
+Conversation webhooks are idempotent: re-sending identical content with the same
+`memory_type`, tags and source returns the existing memory's `id` with
+`"deduplicated": true` instead of storing another copy (`status` stays
+`stored`). Hosts re-archive long sessions at every compaction or eviction, and
+an end-of-session hook can fire twice for one rotation; both used to add a full
+copy per send. Records that differ in type, tags or content are stored
+separately. Memories written before this change are not deduplicated
+retroactively.
+
 MCP SSE sessions are addressed by a session id embedded in the endpoint URL.
 The id is opaque and unguessable, but it is not bound to a key holder: anyone
 who can read a session id (for example from a reverse-proxy access log) can

@@ -89,6 +89,8 @@ jobs:
           python3 tests/test_ingest_outcomes.py
           # Root webhook aliases stay authenticated; MCP SSE handshake completes.
           python3 tests/test_http_lifecycle.py
+          # Re-sent transcripts are stored once; distinct records are not merged.
+          python3 tests/test_webhook_idempotency.py
           # These exercise the real memex8 binary; the plugin-only matrix has
           # no Rust build, so running them there fails (or silently skips).
           python3 tests/test_dreams.py

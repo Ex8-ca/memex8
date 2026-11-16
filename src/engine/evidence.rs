@@ -184,6 +184,9 @@ impl Engine {
         self.store
             .restore_memory(&crate::storage::qdrant::MemoryWithVector { memory, vector })
             .await?;
+        // Invalidate again now the projection is durable (see
+        // `reload_compressed_index`).
+        self.invalidate_compressed_index().await;
         self.lexical
             .write()
             .await
