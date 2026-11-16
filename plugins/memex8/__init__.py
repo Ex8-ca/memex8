@@ -212,6 +212,61 @@ def _render_system_prompt(template: str, base_url: str) -> str:
 # Config
 # ---------------------------------------------------------------------------
 
+class _PrivateRedactor:
+    """State spans ordered messages/fields, including content later filtered out."""
+
+    def __init__(self):
+        self.depth = 0
+
+    def text(self, text: str) -> str:
+        out = []
+        pos = 0
+        for match in re.finditer(r"</?private>", text, re.IGNORECASE):
+            if not self.depth:
+                out.append(text[pos:match.start()])
+            if match.group().lower() == "<private>":
+                if not self.depth:
+                    out.append("[private]")
+                self.depth += 1
+            elif self.depth:
+                self.depth -= 1
+            else:
+                out.append(match.group())
+            pos = match.end()
+        if not self.depth:
+            out.append(text[pos:])
+        return "".join(out)
+
+    def value(self, value):
+        if isinstance(value, str):
+            return self.text(value)
+        if isinstance(value, list):
+            return [self.value(item) for item in value]
+        if isinstance(value, dict):
+            # Keys can contain private data too; preserve insertion order.
+            clean = {}
+            for key, item in value.items():
+                # Structural keys are not part of the ordered text stream.
+                clean_key = _PrivateRedactor().text(key)
+                clean_item = self.value(item)
+                if clean_key in clean:
+                    raise ValueError("redacted metadata keys collide")
+                clean[clean_key] = clean_item
+            return clean
+        return value
+
+
+def _transcript(messages) -> str:
+    # Reject unsupported objects instead of silently dropping their evidence.
+    normalized = json.loads(json.dumps(messages, ensure_ascii=False, allow_nan=False))
+    return json.dumps(_PrivateRedactor().value(normalized), ensure_ascii=False, separators=(",", ":"))
+
+
+def _valid_receipt(value) -> bool:
+    return (isinstance(value, str) and 0 < len(value) <= 256
+            and re.fullmatch(r"[A-Za-z0-9_.:-]+", value) is not None)
+
+
 def _default_config() -> dict:
     return {
         "base_url": _DEFAULT_BASE_URL,
@@ -456,12 +511,11 @@ class _Client:
                 json_body=body,
                 timeout=15.0,
             )
-            # Server is allowed to return: {"id": "..."}, {"archive_id": "..."},
-            # or {"ok": true}. All three are accepted.
+            # A generic acknowledgement is not a retrievable durable receipt.
             if isinstance(resp_data, dict):
                 for key in ("id", "archive_id", "checkpoint_id", "uuid"):
-                    if resp_data.get(key):
-                        return str(resp_data[key])
+                    if _valid_receipt(resp_data.get(key)):
+                        return resp_data[key]
             return None
         except Exception:
             return None
@@ -827,6 +881,9 @@ class Memex8MemoryProvider(MemoryProvider):
         self._session_id = ""
         self._turn_counter = 0
         self._session_turns: List[dict] = []
+        self._sync_privacy = _PrivateRedactor()
+        self._sync_privacy_session = None
+        self._sync_privacy_lock = threading.Lock()
 
         # Prefetch caches
         self._recall_result: list = []
@@ -903,7 +960,7 @@ class Memex8MemoryProvider(MemoryProvider):
             },
             {
                 "key": "auto_sync",
-                "description": "Automatically save conversation turns to memory",
+                "description": "Automatically upload turns, session archives and optional checkpoints; required checkpoints remain explicit requests",
                 "default": "true",
                 "choices": ["true", "false"],
             },
@@ -1066,6 +1123,9 @@ class Memex8MemoryProvider(MemoryProvider):
         self._hermes_home = kwargs.get("hermes_home", os.path.expanduser("~/.hermes"))
         self._turn_counter = 0
         self._session_turns = []
+        with self._sync_privacy_lock:
+            self._sync_privacy = _PrivateRedactor()
+            self._sync_privacy_session = session_id
         self._recall_result = []
         # Feature 1: reset per-session dedup state on every new session
         with self._dedup_lock:
@@ -1334,13 +1394,63 @@ class Memex8MemoryProvider(MemoryProvider):
             return "fact"  # k=0.80, scale=1mo — durable
         return "event"
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Auto-store conversation turns as memories (non-blocking)."""
-        if self._is_breaker_open():
-            return
+    def _automatic_storage_allowed(self) -> bool:
+        value = (self._config or {}).get("auto_sync", True)
+        return value is True or (isinstance(value, str) and value.strip().lower() == "true")
 
-        auto_sync = self._config.get("auto_sync", True) if self._config else True
-        if not auto_sync:
+    def _archive_transcript(self, summary: str, source: str) -> str:
+        """Commit bounded chunks, then a receipt manifest, via the existing webhook.
+
+        Chunks are exact consecutive UTF-8 text slices. The manifest is written
+        last and is the only checkpoint referent. Partial writes are harmless
+        orphan chunks, never a successful checkpoint. Server durability is its
+        receipt contract; this client cannot prove disk flush independently.
+        """
+        client = self._get_client()
+
+        def write(text):
+            receipt = client.ingest_conversation(summary=text, source=source, platform="cli")
+            if not _valid_receipt(receipt):
+                raise RuntimeError("archive missing durable receipt")
+            return receipt
+
+        raw = summary.encode("utf-8")
+        chunks = []
+        offset = 0
+        while offset < len(raw):
+            end = min(offset + 24000, len(raw))
+            while end < len(raw) and raw[end] & 0xC0 == 0x80:
+                end -= 1
+            part = raw[offset:end]
+            chunks.append({"id": write(part.decode("utf-8")), "bytes": len(part),
+                           "sha256": hashlib.sha256(part).hexdigest()})
+            offset = end
+        # Manifest pages keep arbitrarily large transcripts bounded too.
+        nodes = chunks
+        level = 0
+        while True:
+            parents = []
+            for start in range(0, len(nodes), 64):
+                page = {"format": "memex8-transcript-manifest-v1", "level": level,
+                        "encoding": "utf-8", "chunks": nodes[start:start + 64],
+                        "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+                receipt = write(json.dumps(page, separators=(",", ":")))
+                parents.append({"id": receipt})
+            if len(parents) == 1:
+                return parents[0]["id"]
+            nodes = parents
+            level += 1
+
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+        """Auto-store turns; consume privacy delimiters BEFORE any skip/truncation."""
+        key = session_id or self._session_id
+        with self._sync_privacy_lock:
+            if self._sync_privacy_session != key:
+                self._sync_privacy = _PrivateRedactor()
+                self._sync_privacy_session = key
+            user_content = self._sync_privacy.text(user_content or "")
+            assistant_content = self._sync_privacy.text(assistant_content or "")
+        if not self._automatic_storage_allowed() or self._is_breaker_open():
             return
 
         # Skip trivial messages
@@ -1384,6 +1494,8 @@ class Memex8MemoryProvider(MemoryProvider):
 
         def _sync():
             try:
+                if not self._automatic_storage_allowed():
+                    return
                 client = self._get_client()
                 content = f"## User\n\n{user_content.strip()[:300]}\n\n## Assistant\n\n{assistant_content.strip()[:300]}"
                 memory_type = self._classify_memory_type(user_content, assistant_content)
@@ -1424,6 +1536,8 @@ class Memex8MemoryProvider(MemoryProvider):
 
         def _sync():
             try:
+                if not self._automatic_storage_allowed():
+                    return
                 self._get_client().store(
                     finding,
                     realm_hint="cron-findings",
@@ -1452,7 +1566,7 @@ class Memex8MemoryProvider(MemoryProvider):
         # Feature 1: clear per-session dedup state on session end
         with self._dedup_lock:
             self._injected_this_session = set()
-        if not messages or self._is_breaker_open():
+        if not messages or not self._automatic_storage_allowed() or self._is_breaker_open():
             return
 
         # Cron sessions: the finding (if any) was already stored by sync_turn.
@@ -1466,39 +1580,19 @@ class Memex8MemoryProvider(MemoryProvider):
             logger.debug("memex8 session-end skipped (cron session)")
             return
 
+        # Snapshot and sanitize before the background worker can race host edits.
+        try:
+            summary = _transcript(messages)
+        except Exception:
+            self._record_failure("transcript normalization failed")
+            return
+
         def _ingest():
             try:
-                client = self._get_client()
-
-                # Build summary from the full message history
-                summary_parts = []
-                user_turns = 0
-                for msg in messages:
-                    role = msg.get("role", "")
-                    content = msg.get("content", "")
-                    if isinstance(content, str) and len(content.strip()) > 0:
-                        preview = content[:200]
-                        if role == "user":
-                            user_turns += 1
-                            summary_parts.append(f"User: {preview}")
-                        elif role in ("assistant", "ai"):
-                            summary_parts.append(f"Assistant: {preview}")
-
-                if not summary_parts:
+                if not self._automatic_storage_allowed():
                     return
-
-                summary = "\n".join(summary_parts)
-                archive_id = client.ingest_conversation(
-                    summary=summary,
-                    source="hermes",
-                    platform="cli",
-                )
-                if archive_id is not None:
-                    self._record_success()
-                    logger.info(
-                        "memex8 session-end: ingested %d turns, %d chars (id=%s)",
-                        user_turns, len(summary), archive_id,
-                    )
+                self._archive_transcript(summary, "hermes")
+                self._record_success()
             except Exception as e:
                 self._record_failure(str(e))
                 logger.debug("memex8 on_session_end failed: %s", e)
@@ -1541,6 +1635,11 @@ class Memex8MemoryProvider(MemoryProvider):
         if not messages:
             return ""
 
+        # Optional checkpoints obey automatic-upload consent. A required
+        # checkpoint is an explicit operator request, independent of auto_sync.
+        if not require_checkpoint and not self._automatic_storage_allowed():
+            return ""
+
         # Circuit-breaker short-circuit: don't even try when the store is known
         # unhealthy. With require_checkpoint, the operator explicitly opted into
         # fail-closed behavior — bypass the breaker so a single bad outage
@@ -1562,43 +1661,11 @@ class Memex8MemoryProvider(MemoryProvider):
         ):
             return ""
 
-        # Build the durable summary we want to archive. Use the same shape as
-        # on_session_end so a later recall finds it consistently. The host passes
-        # ``evidence_messages`` (normalized) to checkpoint providers — we accept
-        # the raw list to keep this plugin portable across host versions.
-        summary_parts: List[str] = []
-        user_turns = 0
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if isinstance(content, str) and content.strip():
-                preview = content[:500]
-                if role == "user":
-                    user_turns += 1
-                    summary_parts.append(f"User: {preview}")
-                elif role in ("assistant", "ai"):
-                    summary_parts.append(f"Assistant: {preview}")
-
-        if not summary_parts:
-            return ""
-
-        summary = "\n".join(summary_parts)
-
-        # SYNCHRONOUS archive. Unlike on_session_end (which is best-effort,
-        # background), checkpoint semantics demand that the archive is durable
-        # before we return — so the host can include the id in the summary
-        # prompt and the lossy rewrite only proceeds on our success.
+        # Normalize/redact the COMPLETE ordered evidence before chunking. All
+        # roles, tool calls, structured blocks and metadata remain represented.
         try:
-            client = self._get_client()
-            archive_id = client.ingest_conversation(
-                summary=summary,
-                source="hermes-pre-compress-checkpoint",
-                platform="cli",
-                tags=["pre-compress-checkpoint", f"turns:{user_turns}"],
-                # Synchronous path: ingest_conversation should return the id
-                # when the underlying memex8 store supports it; for stores that
-                # return only a bool, fall back to a synthetic id.
-            )
+            summary = _transcript(messages)
+            archive_id = self._archive_transcript(summary, "hermes-pre-compress-checkpoint")
         except Exception as e:
             self._record_failure(str(e))
             if require_checkpoint:
@@ -1614,11 +1681,8 @@ class Memex8MemoryProvider(MemoryProvider):
         # Success — record and return a marker. The host forwards this into the
         # summary prompt so a future recall can cross-reference the checkpoint.
         self._record_success()
-        marker = f"checkpoint: {archive_id}" if archive_id else "checkpoint: archived"
-        logger.info(
-            "memex8 pre-compress checkpoint: archived %d turns (%d chars)",
-            user_turns, len(summary),
-        )
+        marker = f"checkpoint: {archive_id}"
+        logger.info("memex8 pre-compress checkpoint: archived %d chars", len(summary))
         return marker
 
     # -- Export / Import (Feature 5) --
