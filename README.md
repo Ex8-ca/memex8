@@ -778,6 +778,11 @@ webhooks with no remaining meaningful content return 422. Imports re-embed any
 body changed by redaction even when vector reuse was requested; metadata-only
 changes can retain the existing vector.
 
+Conversation webhooks require the API key, including the root `/webhooks/...`
+aliases (they previously accepted unauthenticated writes). `/health` and
+`/api/v1/health` are the only public endpoints, because the container
+healthcheck calls the latter without credentials.
+
 Redaction applies to new capture and does not erase existing memories, original
 files, backups, exports, or copies already sent elsewhere. Exact backup/recovery
 paths reject marked legacy snapshots rather than silently changing archived
