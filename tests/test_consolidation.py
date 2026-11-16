@@ -39,7 +39,8 @@ def fixture(preserve=False, archive_dimensions=1, dedup_dry_run=True):
         wait_ready(qhttp + "/readyz")
         request(qhttp + "/collections/consolidation_archive",
                 {"vectors": {"size": archive_dimensions, "distance": "Dot"}}, "PUT")
-        state = {"fail_embedding": None, "summaries": 0, "embeddings": 0, "embedding_vectors": {}, "requests": []}
+        state = {"fail_embedding": None, "summaries": 0, "embeddings": 0, "embedding_vectors": {},
+                 "wrong_dimension_for": None, "requests": []}
 
         class MockLLM(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
@@ -54,8 +55,16 @@ def fixture(preserve=False, archive_dimensions=1, dedup_dry_run=True):
                     if state["fail_embedding"] in inputs:
                         status, response = 500, {"error": state.get("error_body", "injected restore embedding failure")}
                     else:
-                        response = {"data": [{"index": i, "embedding": state["embedding_vectors"].get(text, [1.] + [0.] * 63)}
-                                             for i, text in enumerate(inputs)]}
+                        # `wrong_dimension_for` returns a deliberately undersized
+                        # vector for inputs containing that marker, so a single
+                        # chunk of one file fails to store while its siblings
+                        # land — a same-file partial ingest.
+                        bad = state.get("wrong_dimension_for")
+                        response = {"data": [
+                            {"index": i, "embedding": ([1., 0., 0.] if bad and bad in text
+                                                       else state["embedding_vectors"].get(text, [1.] + [0.] * 63))}
+                            for i, text in enumerate(inputs)
+                        ]}
                 elif self.path == "/generate":
                     response = {"response": state.get("session_response", "{}")}
                 else:

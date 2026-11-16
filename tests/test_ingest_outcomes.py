@@ -6,10 +6,12 @@ starts a throwaway Qdrant container and a local mock embedding server.
 """
 import json
 import os
+import subprocess
 import unittest
 import urllib.error
 
 from test_consolidation import fixture, points
+from test_compact_retrieval import mcp
 
 
 def issue(report, path):
@@ -98,6 +100,59 @@ class IngestOutcomeTests(unittest.TestCase):
             report = f["api"]("/memories/ingest", {"path": str(empty)}, "POST")
             self.assertEqual(report["status"], "empty", report)
             self.assertEqual(report["stored"], 0)
+
+    def test_same_file_mixed_chunk_outcomes_are_partial_not_ingested(self):
+        """One file, one chunk that stores, one chunk that fails.
+
+        Regression for the reviewer probe: `finalize_store` used to subtract a
+        file already counted in `files_stored`, so `status=ingested stored=1
+        failed=0` while an issue said the file failed. The chunk failure must
+        survive; the CLI must tell the same story.
+        """
+        with fixture() as f:
+            root = f["work"] / "mixed"
+            root.mkdir()
+            (root / "a.md").write_text(
+                "## Keep\n\nFirst section body text for the mixed file.\n\n"
+                "## Drop\n\nINJECT-WRONG-DIM second section body text for the mixed file.\n"
+            )
+            f["state"]["wrong_dimension_for"] = "INJECT-WRONG-DIM"
+
+            report = f["api"]("/memories/ingest", {"path": str(root), "chunk_by": "section"}, "POST")
+
+            self.assertEqual(report["attempted"], 1, report)
+            self.assertEqual(report["failed"], 1, report)
+            self.assertEqual(report["stored"], 0, "the file is not fully stored")
+            self.assertEqual(report["partial_files"], 1, report)
+            self.assertGreaterEqual(report["chunks"], 2, report)
+            self.assertEqual(report["chunks_stored"], report["chunks"] - 1, report)
+            self.assertEqual(report["status"], "partial", report)
+            bad = issue(report, "a.md")
+            self.assertEqual(bad["outcome"], "failed")
+            self.assertEqual(bad["reason"], "store_failed")
+            self.assertTrue(points(f), "the chunk that embedded must still be stored")
+
+            cli = subprocess.run(f["command"] + ["ingest", str(root)], env=f["env"],
+                                 cwd=str(f["work"]), capture_output=True, text=True)
+            self.assertEqual(cli.returncode, 0, cli.stderr[-2000:])
+            receipt = cli.stdout.strip().splitlines()[-1]
+            self.assertIn("status=partial", receipt)
+            self.assertIn("failed=1", receipt)
+            self.assertIn("partial_files=1", receipt)
+            self.assertIn(
+                f"chunks_stored={report['chunks'] - 1}/{report['chunks']}", receipt)
+
+            # The MCP receipt must tell the same truth, not "ingested".
+            reply = mcp(f, [("memex8_ingest", {"path": str(root), "chunk_by": "section"})])[0]
+            receipt = reply["result"]
+            self.assertEqual(receipt["status"], "partial", reply)
+            self.assertEqual(receipt["stored"], 0, reply)
+            self.assertEqual(receipt["failed"], 1, reply)
+            self.assertEqual(receipt["partial_files"], 1, reply)
+            self.assertEqual(receipt["chunks"], report["chunks"], reply)
+            self.assertEqual(receipt["chunks_stored"], report["chunks"] - 1, reply)
+            self.assertEqual(receipt["issues"][0]["reason"], "store_failed", reply)
+            self.assertEqual(receipt["path"], str(root), "compatible path field kept")
 
     def test_missing_path_is_an_api_error(self):
         with fixture() as f:

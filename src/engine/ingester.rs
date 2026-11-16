@@ -95,15 +95,25 @@ pub struct IngestIssue {
 
 /// Truthful outcome of one ingestion request.
 ///
-/// Counts are per *file* except `chunks`/`chunks_stored`:
+/// Counts are per *file* except `chunks`/`chunks_stored`, and the file
+/// categories are disjoint: `stored + failed + skipped` never exceeds
+/// `attempted`.
 /// - `attempted`: candidate markdown files considered (the single file for a
 ///   file request).
-/// - `stored`: files that landed at least one chunk in the store.
+/// - `stored`: files whose every chunk landed in the store.
+/// - `partial_files`: subset of `failed` — files that stored at least one
+///   chunk but also failed at least one. Exposed so a caller can tell "this
+///   file went in completely" from "some of this file went in".
 /// - `skipped`: candidates with nothing storable, plus refused symlinks and
 ///   bounded-out entries.
-/// - `failed`: files or subtrees that could not be read/parsed/stored.
+/// - `failed`: files or subtrees that could not be read/parsed/stored. A file
+///   with any failed chunk is failed, even when other chunks of the same file
+///   stored, so a chunk failure can never be netted out against a sibling
+///   chunk success.
 /// - `ignored`: entries that are not ingestible content (non-markdown,
 ///   hidden/`node_modules`/`target` dirs, sockets/devices).
+/// - `chunks`: chunks produced upstream (i.e. attempted against the store).
+/// - `chunks_stored`: chunks that actually persisted.
 ///
 /// Ingester-level construction sets `stored` optimistically for files that
 /// produced chunks; `finalize_store` restates it from actual persistence.
@@ -111,6 +121,7 @@ pub struct IngestIssue {
 pub struct IngestReport {
     pub attempted: usize,
     pub stored: usize,
+    pub partial_files: usize,
     pub skipped: usize,
     pub failed: usize,
     pub ignored: usize,
@@ -132,6 +143,7 @@ impl Default for IngestReport {
         Self {
             attempted: 0,
             stored: 0,
+            partial_files: 0,
             skipped: 0,
             failed: 0,
             ignored: 0,
@@ -149,11 +161,12 @@ impl Default for IngestReport {
 
 impl IngestReport {
     /// Overall outcome: `"ingested"` (all candidates stored, none failed),
-    /// `"partial"` (some stored, some failed), `"failed"` (nothing stored and
-    /// something failed), `"empty"` (nothing to ingest, nothing failed).
+    /// `"partial"` (something persisted and something failed), `"failed"`
+    /// (nothing persisted and something failed), `"empty"` (nothing to ingest,
+    /// nothing failed).
     pub fn status(&self) -> &'static str {
         if self.failed > 0 {
-            if self.stored > 0 {
+            if self.stored > 0 || self.chunks_stored > 0 {
                 "partial"
             } else {
                 "failed"
@@ -166,7 +179,7 @@ impl IngestReport {
     }
 
     pub fn is_partial(&self) -> bool {
-        self.failed > 0 && self.stored > 0
+        self.status() == "partial"
     }
 
     /// Record that one chunk from `source_file` was persisted.
@@ -178,7 +191,11 @@ impl IngestReport {
     /// Record that one chunk from `source_file` failed to persist, with a
     /// sanitized issue carrying only the relative path and a stable code.
     pub fn note_chunk_failed(&mut self, source_file: &str) {
-        self.files_store_failed.insert(source_file.to_string());
+        // One issue per file: a second failed chunk from the same file adds no
+        // signal and would consume the issue cap.
+        if !self.files_store_failed.insert(source_file.to_string()) {
+            return;
+        }
         let rel = self.display(source_file);
         self.push_issue(IngestIssue {
             path: rel,
@@ -193,13 +210,18 @@ impl IngestReport {
         if self.files_stored.is_empty() && self.files_store_failed.is_empty() {
             return;
         }
-        self.stored = self.files_stored.len();
-        let store_only_failures = self
+        // A file counts as stored only when *every* chunk of it landed. A file
+        // with any failed chunk is failed even if sibling chunks stored, so one
+        // file's chunk failure can never be cancelled out by its own chunk
+        // success (the bug that reported a same-file partial as "ingested").
+        let partial = self
             .files_store_failed
             .iter()
-            .filter(|f| !self.files_stored.contains(*f))
+            .filter(|f| self.files_stored.contains(*f))
             .count();
-        self.failed = self.base_failures + store_only_failures;
+        self.partial_files = partial;
+        self.stored = self.files_stored.len() - partial;
+        self.failed = self.base_failures + self.files_store_failed.len();
     }
 
     /// Append a detail entry, enforcing the response-size cap.
@@ -836,6 +858,58 @@ mod tests {
             .issues
             .iter()
             .any(|i| i.path == "b.md" && i.reason == IssueReason::StoreFailed));
+    }
+
+    #[test]
+    fn finalize_store_counts_same_file_mixed_chunks_as_failed() {
+        // Reviewer reproduction: one file, one chunk stored, one chunk failed.
+        // The failed chunk must not be netted out by the sibling success.
+        let mut report = IngestReport {
+            attempted: 1,
+            stored: 1,
+            chunks: 2,
+            root: PathBuf::from("/root"),
+            ..Default::default()
+        };
+        report.note_chunk_stored("/root/a.md");
+        report.note_chunk_failed("/root/a.md");
+        // A second failed chunk from the same file must not duplicate the issue.
+        report.note_chunk_failed("/root/a.md");
+        report.finalize_store();
+
+        assert_eq!(report.stored, 0, "the file is not fully stored");
+        assert_eq!(report.failed, 1, "a file with a failed chunk is failed");
+        assert_eq!(report.partial_files, 1);
+        assert_eq!(report.chunks, 2, "both chunks were attempted");
+        assert_eq!(report.chunks_stored, 1, "one chunk did land");
+        assert_eq!(report.status(), "partial");
+        assert!(report.is_partial());
+        assert_eq!(report.issues.len(), 1, "one issue per file");
+        assert_eq!(report.issues[0].path, "a.md");
+        assert_eq!(report.issues[0].reason, IssueReason::StoreFailed);
+        // Categories stay disjoint: stored + failed <= attempted.
+        assert!(report.stored + report.failed <= report.attempted);
+    }
+
+    #[test]
+    fn finalize_store_counts_file_with_all_chunks_failed_once() {
+        let mut report = IngestReport {
+            attempted: 1,
+            stored: 1,
+            chunks: 3,
+            root: PathBuf::from("/root"),
+            ..Default::default()
+        };
+        report.note_chunk_failed("/root/a.md");
+        report.note_chunk_failed("/root/a.md");
+        report.finalize_store();
+
+        assert_eq!(report.stored, 0);
+        assert_eq!(report.failed, 1, "one failed file, not one per chunk");
+        assert_eq!(report.partial_files, 0);
+        assert_eq!(report.chunks_stored, 0);
+        assert_eq!(report.status(), "failed");
+        assert_eq!(report.issues.len(), 1);
     }
 
     #[test]

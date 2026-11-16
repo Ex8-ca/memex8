@@ -325,8 +325,10 @@ async fn handle_tool_call(
                 .unwrap_or("section");
             let realm_hint = arguments.get("realm_hint").and_then(|v| v.as_str());
 
-            engine.ingest_path(path, chunk_by, realm_hint).await?;
-            Ok(json!({ "status": "ingested", "path": path }))
+            let report = engine.ingest_path(path, chunk_by, realm_hint).await?;
+            // Same receipt shape as POST /api/v1/memories/ingest: a partial or
+            // failed ingest must never be reported as a clean success.
+            Ok(crate::api::routes::memories::ingest_response(path, &report))
         }
         "memex8_realms_list" => {
             let realms = engine.list_realms().await?;

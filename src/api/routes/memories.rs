@@ -490,9 +490,11 @@ pub(crate) fn ingest_response(
         "path": path,
         "attempted": report.attempted,
         "stored": report.stored,
+        "partial_files": report.partial_files,
         "skipped": report.skipped,
         "failed": report.failed,
         "ignored": report.ignored,
+        "chunks": report.chunks,
         "chunks_stored": report.chunks_stored,
         "issues": issues,
         "issues_truncated": report.issues_truncated,
@@ -657,8 +659,36 @@ mod ingest_response_tests {
         assert_eq!(body["attempted"], 2);
         assert_eq!(body["stored"], 2);
         assert_eq!(body["failed"], 0);
+        assert_eq!(body["partial_files"], 0);
+        assert_eq!(body["chunks"], 5);
         assert_eq!(body["chunks_stored"], 5);
         assert_eq!(body["issues"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn same_file_partial_ingest_is_not_reported_as_success() {
+        // Reviewer reproduction at the receipt layer: one file, one chunk
+        // stored, one failed. Must not render as status=ingested stored=1
+        // failed=0.
+        let mut report = IngestReport {
+            attempted: 1,
+            chunks: 2,
+            root: "/watch/docs".into(),
+            ..Default::default()
+        };
+        report.note_chunk_stored("/watch/docs/a.md");
+        report.note_chunk_failed("/watch/docs/a.md");
+        report.finalize_store();
+
+        let body = ingest_response("/watch/docs/a.md", &report);
+        assert_eq!(body["status"], "partial");
+        assert_eq!(body["stored"], 0);
+        assert_eq!(body["failed"], 1);
+        assert_eq!(body["partial_files"], 1);
+        assert_eq!(body["chunks"], 2);
+        assert_eq!(body["chunks_stored"], 1);
+        assert_eq!(body["issues"][0]["path"], "a.md");
+        assert_eq!(body["issues"][0]["reason"], "store_failed");
     }
 
     #[test]
