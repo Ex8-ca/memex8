@@ -3,7 +3,7 @@
 **Scope:** Correct confirmed audit failures in isolated local branches, integrate with regression evidence, and stop before push, PR, deployment, production-memory changes, or deletion. All tests use disposable stores and synthetic fixtures.
 
 ## Scheduling and clustering
-- Replace duration-based approximations of five-field cron with wall-clock scheduling; reject zero/invalid steps and coalesce missed ticks. Keep idle triggers. Test midnight, hourly, invalid expressions, and pause/resume interaction.
+- Replace duration-based approximations of five-field cron with wall-clock scheduling; reject zero/invalid steps, reject ambiguous mixed-name/numeric weekdays and bare weekday steps with actionable errors, validate before `serve` binds, and coalesce missed ticks. Keep idle triggers. Test midnight, hourly, invalid expressions, and pause/resume interaction.
 - Recompute k-means centroids per component. Use angular clustering fixtures and re-enable the previously skipped test in CI.
 
 ## Plugin privacy and checkpoint integrity

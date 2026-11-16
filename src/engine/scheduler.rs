@@ -235,7 +235,7 @@ fn parse_duration(s: &str) -> anyhow::Result<Duration> {
 /// Parse the configured five-field cron in local wall-clock time.
 /// The cron crate includes seconds and numbers weekdays 1=Sunday..7=Saturday;
 /// our existing Unix-style configuration uses 0/7=Sunday..6=Saturday.
-fn parse_cron_schedule(expression: &str) -> anyhow::Result<Schedule> {
+pub(crate) fn parse_cron_schedule(expression: &str) -> anyhow::Result<Schedule> {
     let mut fields: Vec<String> = expression.split_whitespace().map(str::to_owned).collect();
     anyhow::ensure!(fields.len() == 5, "Expected five cron fields: {expression}");
     // Reject zero steps explicitly (including range/list steps).
@@ -247,6 +247,31 @@ fn parse_cron_schedule(expression: &str) -> anyhow::Result<Schedule> {
                     "Invalid cron step: {item}"
                 );
             }
+        }
+    }
+    // The crate uses 1=Sunday..7=Saturday, while this five-field config uses
+    // Unix 0/7=Sunday..6=Saturday. Translating an all-numeric field is safe,
+    // and an all-named field needs no translation. Mixing them (MON,3) would
+    // silently interpret 3 as Tuesday rather than Unix Wednesday. A bare
+    // weekday step (5/2 or MON/2) has no portable endpoint, so require an
+    // explicit range (1-5/2) or wildcard (*/2) instead.
+    let weekday = &fields[4];
+    let has_name = weekday.chars().any(|c| c.is_ascii_alphabetic());
+    let has_number = weekday.chars().any(|c| c.is_ascii_digit());
+    anyhow::ensure!(
+        !has_name || !has_number,
+        "Ambiguous cron weekday '{weekday}': do not mix names and numbers; use all names or all Unix numbers"
+    );
+    anyhow::ensure!(
+        !has_name || !weekday.contains('/'),
+        "Ambiguous cron weekday '{weekday}': use explicit numeric ranges for steps, or names without steps"
+    );
+    for item in weekday.split(',') {
+        if let Some((base, _)) = item.split_once('/') {
+            anyhow::ensure!(
+                base == "*" || base.contains('-'),
+                "Ambiguous cron weekday step '{item}': use an explicit range or */step"
+            );
         }
     }
     // Expand numeric weekdays using the same Unix matching semantics as the
@@ -434,6 +459,32 @@ mod tests {
         ] {
             assert!(parse_cron_schedule(expr).is_err(), "{expr}");
         }
+    }
+
+    #[test]
+    fn reject_ambiguous_weekday_expressions() {
+        for weekday in ["MON,3", "1,FRI", "SUN,0-2", "5/2", "MON/2", "MON-FRI/2"] {
+            let expression = format!("0 9 * * {weekday}");
+            let error = parse_cron_schedule(&expression)
+                .err()
+                .expect(&expression)
+                .to_string();
+            assert!(
+                error.contains("weekday") && error.contains(weekday),
+                "{expression}: {error}"
+            );
+        }
+        // Explicit ranges and wildcard steps are unambiguous Unix numbering.
+        for weekday in ["0,3", "1-5", "1-5/2", "*/2", "MON,FRI"] {
+            assert!(
+                parse_cron_schedule(&format!("0 9 * * {weekday}")).is_ok(),
+                "{weekday}"
+            );
+        }
+        assert_eq!(
+            next("0 9 * * 1-5/2", "2026-11-14T12:17:00-06:00"),
+            at("2026-11-16T09:00:00-06:00")
+        );
     }
 
     #[test]

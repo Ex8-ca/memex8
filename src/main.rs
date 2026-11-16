@@ -668,6 +668,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
+            // A bad schedule must stop startup, not leave the API healthy while
+            // the background scheduler exits immediately without ingest/slumber.
+            engine::scheduler::parse_cron_schedule(&serve_config.slumber.cron_ingest)?;
+
             // Build engine for the scheduler
             let engine = std::sync::Arc::new(engine::Engine::new(serve_config.clone()).await?);
 

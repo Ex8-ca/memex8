@@ -23,7 +23,7 @@ This branch contains local code, tests, documentation, and CI changes only. It h
 ## Review notes / limitations
 
 - Clippy remains informational (`continue-on-error`) for pre-existing lint debt; CI does not claim lint-clean.
-- Cron weekday edge syntax is not normalized to strict POSIX. The five-field parser translates all-numeric weekday fields from Unix numbering to the crate's numbering, but mixed symbolic/numeric fields are passed directly to the crate. For example, `MON,3` can mean Monday and Tuesday rather than Monday and Wednesday. A bare `5/2` is expanded by the parser to Friday and Sunday (whereas POSIX cron does not standardize this syntax). These are rare expression shapes; decide separately whether to reject them or define compatibility semantics. Do not silently change existing schedules here.
+- Cron weekday edge syntax is rejected rather than silently reinterpreted. The five-field parser translates all-numeric weekday fields from Unix numbering to the crate's numbering; all-named fields retain names. Mixed fields (`MON,3`) and weekday steps without an explicit range or wildcard (`5/2`, `MON/2`) are refused. Named steps (`MON-FRI/2`) are also refused because their expansion is crate-dependent; use numeric `1-5/2`. `serve` validates the schedule before building the engine so the API cannot appear healthy with a dead background scheduler. Existing configs using these ambiguous forms must be rewritten before upgrade.
 - Queue-saturation, one-hour MCP session expiry, and tool-call cancellation have not been exercised end to end. Release publishing still needs an actual GitHub Actions run after explicit approval.
 
 ## Reviewer checklist
