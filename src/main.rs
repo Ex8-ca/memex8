@@ -368,9 +368,26 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let mut engine = engine::Engine::new(config).await?;
             engine.set_config_path(&cli.config);
-            engine
+            let report = engine
                 .ingest_path(&path, &chunk_by, realm_hint.as_deref())
                 .await?;
+            // One-line truthful receipt: status, per-file counts and chunk
+            // counts, so a partial/failed ingest is visible on the CLI too.
+            println!(
+                "{}: status={} attempted={} stored={} failed={} partial_files={} skipped={} ignored={} chunks_stored={}/{} issues={}{}",
+                path,
+                report.status(),
+                report.attempted,
+                report.stored,
+                report.failed,
+                report.partial_files,
+                report.skipped,
+                report.ignored,
+                report.chunks_stored,
+                report.chunks,
+                report.issues.len(),
+                if report.issues_truncated { "+" } else { "" }
+            );
             if watch {
                 engine.watch_path(&path).await?;
             }

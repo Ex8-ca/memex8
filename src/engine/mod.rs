@@ -499,12 +499,37 @@ impl Engine {
         path: &str,
         chunk_by: &str,
         realm_hint: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<ingester::IngestReport> {
         let ingester = ingester::Ingester::new(self.config.clone());
-        let chunks = ingester.ingest_path(path, chunk_by).await?;
-        tracing::info!("Ingested {} chunks from {}", chunks.len(), path);
+        let outcome = ingester.ingest_path(path, chunk_by).await?;
+        tracing::info!(
+            "Ingest {}: attempted={} stored={} skipped={} failed={} ignored={} chunks={}",
+            path,
+            outcome.report.attempted,
+            outcome.report.stored,
+            outcome.report.skipped,
+            outcome.report.failed,
+            outcome.report.ignored,
+            outcome.chunks.len()
+        );
+        self.persist_ingested_chunks(outcome.chunks, realm_hint, outcome.report)
+            .await
+    }
+
+    /// Persist parsed chunks, recording the outcome of each one.
+    ///
+    /// A chunk-level failure (store error, realm lookup error) is logged and
+    /// counted so the caller learns the ingestion was partial; only a batch
+    /// embedding failure — which stores nothing — is returned as an error.
+    async fn persist_ingested_chunks(
+        &self,
+        chunks: Vec<ingester::RawChunk>,
+        realm_hint: Option<&str>,
+        mut report: ingester::IngestReport,
+    ) -> anyhow::Result<ingester::IngestReport> {
         if chunks.is_empty() {
-            return Ok(());
+            report.finalize_store();
+            return Ok(report);
         }
 
         let embedder = self.make_embedder()?;
@@ -517,59 +542,83 @@ impl Engine {
         self.invalidate_compressed_index().await;
 
         for (i, chunk) in chunks.iter().enumerate() {
-            let id = uuid::Uuid::new_v4().to_string();
             let vector = vectors.get(i).cloned().unwrap_or_default();
-
-            // Assign to realm
-            let realm_id = if let Some(hint) = realm_hint {
-                self.store.find_realm_by_name(hint).await?.map(|r| r.id)
-            } else {
-                None
-            };
-
-            let realm_id = match realm_id {
-                Some(rid) => rid,
-                None => self.auto_assign_realm(&vector).await?,
-            };
-
-            let realm = self.store.get_realm(&realm_id).await?;
-            let realm_name = realm.map(|r| r.name.clone()).unwrap_or_default();
-
-            // Infer reaction score from content
-            let reaction_score = crate::engine::reactions::infer_reaction(&chunk.content);
-
-            self.store
-                .store_memory(
-                    &id,
-                    &vector,
-                    &chunk.content,
-                    chunk.heading.as_deref(),
-                    Some(chunk.source_file.as_str()),
-                    &realm_id,
-                    &realm_name,
-                    &chunk.source_hash,
-                    &chunk.chunk_type,
-                    "general",
-                    reaction_score,
-                    // File ingestion is operator-driven; mark private
-                    // by default. Use PATCH /api/v1/memories/{id} to
-                    // flip a batch to public after ingestion.
-                    "private",
-                )
-                .await?;
-
-            {
-                let mut state = self.slumber_state.write().await;
-                state.memories_processed += 1;
+            match self.store_one_chunk(chunk, &vector, realm_hint).await {
+                Ok(id) => {
+                    report.note_chunk_stored(&chunk.source_file);
+                    let mut state = self.slumber_state.write().await;
+                    state.memories_processed += 1;
+                    // Keep the keyword index in step with the dense one, as
+                    // `store_memory` does; it is rebuilt from Qdrant on the
+                    // next slumber anyway.
+                    self.lexical.write().await.upsert(&id, &chunk.content);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to store chunk from {}: {}", chunk.source_file, e);
+                    report.note_chunk_failed(&chunk.source_file);
+                }
             }
-
-            // Keep the keyword index in step with the dense one, as `store_memory`
-            // does; it is rebuilt from Qdrant on the next slumber anyway.
-            self.lexical.write().await.upsert(&id, &chunk.content);
         }
 
-        tracing::info!("Stored {} memories", chunks.len());
-        Ok(())
+        report.finalize_store();
+        tracing::info!(
+            "Stored {} of {} chunk(s): files stored={} failed={} status={}",
+            report.chunks_stored,
+            chunks.len(),
+            report.stored,
+            report.failed,
+            report.status()
+        );
+        Ok(report)
+    }
+
+    /// Store a single chunk (realm assignment included) as a private memory.
+    async fn store_one_chunk(
+        &self,
+        chunk: &ingester::RawChunk,
+        vector: &[f32],
+        realm_hint: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+
+        // Assign to realm
+        let realm_id = if let Some(hint) = realm_hint {
+            self.store.find_realm_by_name(hint).await?.map(|r| r.id)
+        } else {
+            None
+        };
+
+        let realm_id = match realm_id {
+            Some(rid) => rid,
+            None => self.auto_assign_realm(vector).await?,
+        };
+
+        let realm = self.store.get_realm(&realm_id).await?;
+        let realm_name = realm.map(|r| r.name.clone()).unwrap_or_default();
+
+        // Infer reaction score from content
+        let reaction_score = crate::engine::reactions::infer_reaction(&chunk.content);
+
+        self.store
+            .store_memory(
+                &id,
+                vector,
+                &chunk.content,
+                chunk.heading.as_deref(),
+                Some(chunk.source_file.as_str()),
+                &realm_id,
+                &realm_name,
+                &chunk.source_hash,
+                &chunk.chunk_type,
+                "general",
+                reaction_score,
+                // File ingestion is operator-driven; mark private
+                // by default. Use PATCH /api/v1/memories/{id} to
+                // flip a batch to public after ingestion.
+                "private",
+            )
+            .await?;
+        Ok(id)
     }
 
     async fn auto_assign_realm(&self, vector: &[f32]) -> anyhow::Result<String> {
@@ -755,70 +804,19 @@ impl Engine {
         realm_hint: Option<&str>,
     ) -> anyhow::Result<()> {
         let ingester = ingester::Ingester::new(self.config.clone());
-        let chunks = ingester
+        let outcome = ingester
             .ingest_path(&path.to_string_lossy(), chunk_by)
             .await?;
 
-        if chunks.is_empty() {
-            return Ok(());
-        }
-        let embedder = self.make_embedder()?;
-        let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
-        let vectors = embedder.embed_batch(&texts).await?;
-
-        // Same hazard as `ingest_path`: the watcher can fire while an index is
-        // loaded, and the new chunks are not in it.
-        self.invalidate_compressed_index().await;
-
-        for (i, chunk) in chunks.iter().enumerate() {
-            let id = uuid::Uuid::new_v4().to_string();
-            let vector = vectors.get(i).cloned().unwrap_or_default();
-
-            let realm_id = if let Some(hint) = realm_hint {
-                self.store.find_realm_by_name(hint).await?.map(|r| r.id)
-            } else {
-                None
-            };
-
-            let realm_id = match realm_id {
-                Some(rid) => rid,
-                None => self.auto_assign_realm(&vector).await?,
-            };
-
-            let realm = self.store.get_realm(&realm_id).await?;
-            let realm_name = realm.map(|r| r.name.clone()).unwrap_or_default();
-
-            // Infer reaction score from content
-            let reaction_score = crate::engine::reactions::infer_reaction(&chunk.content);
-
-            self.store
-                .store_memory(
-                    &id,
-                    &vector,
-                    &chunk.content,
-                    chunk.heading.as_deref(),
-                    Some(chunk.source_file.as_str()),
-                    &realm_id,
-                    &realm_name,
-                    &chunk.source_hash,
-                    &chunk.chunk_type,
-                    "general",
-                    reaction_score,
-                    // File ingestion is operator-driven; mark private
-                    // by default. Use PATCH /api/v1/memories/{id} to
-                    // flip a batch to public after ingestion.
-                    "private",
-                )
-                .await?;
-
-            // Keep the keyword index in step with the dense one.
-            self.lexical.write().await.upsert(&id, &chunk.content);
-        }
+        let report = self
+            .persist_ingested_chunks(outcome.chunks, realm_hint, outcome.report)
+            .await?;
 
         tracing::info!(
-            "  ✅ Re-ingested {} chunks from {}",
-            chunks.len(),
-            path.display()
+            "  ✅ Re-ingested {} chunk(s) from {} (status={})",
+            report.chunks_stored,
+            path.display(),
+            report.status()
         );
         Ok(())
     }
