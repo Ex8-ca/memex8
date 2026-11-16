@@ -91,9 +91,10 @@ class IndexFreshnessTests(unittest.TestCase):
             self.assertFalse(set(ids) & found)
 
     def test_stale_index_is_rejected_and_search_falls_back_to_qdrant(self):
-        """Same vector count, different IDs: exactly what a consolidation leaves
-        behind. The index must be rejected on ID identity, not on size, and
-        search must still return the live corpus from Qdrant."""
+        """Same vector count, different IDs: the pair no longer matches the corpus
+        it was built from. It must be refused (its id map also disagrees with the
+        sidecar that describes the pair) and search must still return the live
+        corpus from Qdrant rather than a truncated index result."""
         with fixture() as f:
             ids = [store(f, "Fallback alpha source"), store(f, "Fallback beta source")]
             f["api"]("/slumber/trigger", {}, "POST")
@@ -105,7 +106,7 @@ class IndexFreshnessTests(unittest.TestCase):
                 found = {r["id"] for r in search(second)}
             text = log_text(second["log_path"])
             self.assertNotIn("Loaded TurboVec index", text)
-            self.assertIn("no longer live", text)
+            self.assertIn("was replaced after the sidecar was written", text)
             self.assertEqual(found, set(ids), "live corpus not served from Qdrant")
 
     def test_memory_stored_after_the_index_was_loaded_is_searchable(self):

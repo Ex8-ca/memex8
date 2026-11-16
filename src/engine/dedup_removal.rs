@@ -8,17 +8,27 @@ use crate::storage::qdrant::{
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-/// Remove the persisted compressed-index pair. Callers pass the resolved paths
+/// Remove the persisted compressed-index pair (and everything that describes it:
+/// the fingerprint sidecar and any stale marker). Callers pass the resolved paths
 /// (`super::compressed_index_paths`) so the empty-config defaults are honoured.
+///
+/// Every file is removed before the first error is returned, so a partial failure
+/// cannot leave a pair that still looks loadable.
 pub(crate) fn invalidate_index_files(index_path: &str, id_map_path: &str) -> anyhow::Result<()> {
-    for path in [index_path, id_map_path] {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+    let meta_path = super::compressed_index_meta_path(index_path);
+    let marker_path = super::compressed_index_stale_marker(index_path);
+    let mut first_error: Option<anyhow::Error> = None;
+    for path in [index_path, id_map_path, &meta_path, &marker_path] {
+        if let Err(error) = std::fs::remove_file(path) {
+            if error.kind() != std::io::ErrorKind::NotFound && first_error.is_none() {
+                first_error = Some(error.into());
+            }
         }
     }
-    Ok(())
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// Attribute accesses since the last merge to this point's own identity. Combining

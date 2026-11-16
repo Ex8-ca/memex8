@@ -84,6 +84,11 @@ pub struct SlumberReport {
     /// Per-status breakdown of the Phase 13 verification sweep ratings.
     #[serde(default)]
     pub verification_counts: VerificationStatusCounts,
+    /// Set when the final compressed-index rebuild failed. `quantized == 0` alone
+    /// cannot be told apart from an empty corpus, so the failure is recorded and
+    /// surfaced instead of being folded into that count.
+    #[serde(default)]
+    pub compressed_index_rebuild_error: Option<String>,
 }
 
 impl SlumberEngine {
@@ -257,13 +262,20 @@ impl SlumberEngine {
             Err(e) => {
                 // The previous pair is already removed, so search falls back to
                 // Qdrant instead of trusting an index for a corpus that changed.
-                tracing::warn!("  Compressed index rebuild failed: {}", e);
+                // Record it: `quantized == 0` is also what an empty corpus
+                // reports, and a silent 0 would hide a broken index until the
+                // next restart.
+                tracing::error!(
+                    "  ✗ Compressed index rebuild FAILED ({e}); search stays on Qdrant \
+                     and no index will be loaded until a rebuild succeeds"
+                );
+                report.compressed_index_rebuild_error = Some(e.to_string());
                 0
             }
         };
 
         tracing::info!(
-            "✅ Slumber complete: scanned={} dedup={} quantized={} re_quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={} gaps={} sessions_reviewed={} realms_pruned={} verified={}",
+            "✅ Slumber complete: scanned={} dedup={} quantized={} re_quantized={} realms={} renamed={} consolidated={} prune={} md={} index_opt={} digest_md={} decayed={} associated={} gaps={} sessions_reviewed={} realms_pruned={} verified={} index_error={:?}",
             report.memories_scanned,
             report.deduplicated,
             report.quantized,
@@ -281,6 +293,7 @@ impl SlumberEngine {
             report.sessions_reviewed,
             report.realms_pruned,
             report.memories_verified,
+            report.compressed_index_rebuild_error,
         );
 
         Ok(report)
