@@ -109,6 +109,21 @@ pub async fn run_with_engine(
         state.clone(),
         memory_read_response_gate,
     ));
+    let guarded_routes = Router::new()
+        .nest("/api/v1", guarded_routes)
+        .route(
+            "/webhooks/conversation",
+            axum::routing::post(crate::api::routes::webhook::conversation_end),
+        )
+        .route(
+            "/webhooks/skill",
+            axum::routing::post(crate::api::routes::webhook::skill_executed),
+        )
+        .route("/mcp", axum::routing::get(crate::mcp::http::sse_handler))
+        .route(
+            "/mcp/messages",
+            axum::routing::post(crate::mcp::http::message_handler),
+        );
     let api_router = if allow_no_api_key && !has_key {
         guarded_routes
     } else {
@@ -120,15 +135,8 @@ pub async fn run_with_engine(
 
     // Health and root must be explicit; wildcard must come last
     let app = Router::new()
-        .nest("/api/v1", api_router)
-        .route(
-            "/webhooks/conversation",
-            axum::routing::post(crate::api::routes::webhook::conversation_end),
-        )
-        .route(
-            "/webhooks/skill",
-            axum::routing::post(crate::api::routes::webhook::skill_executed),
-        )
+        .merge(api_router)
+        .route("/api/v1/health", axum::routing::get(health))
         .route("/health", axum::routing::get(health))
         .route(
             "/auth/login",
@@ -139,7 +147,6 @@ pub async fn run_with_engine(
             axum::routing::post(crate::api::session::logout),
         )
         .route("/auth/me", axum::routing::get(crate::api::session::me))
-        .route("/mcp", axum::routing::get(crate::mcp::http::sse_handler))
         .route("/", axum::routing::get(crate::web::serve_root))
         // Wildcard route for static assets + SPA fallback. Note: this must be
         // a literal `/*path` (or `/{path}`) route, NOT .fallback(), because
@@ -339,7 +346,6 @@ fn api_routes() -> Router<Arc<AppState>> {
             "/graph/build",
             axum::routing::post(crate::api::routes::graph::build),
         )
-        .route("/health", axum::routing::get(health))
 }
 
 async fn health() -> &'static str {
