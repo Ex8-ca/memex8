@@ -43,7 +43,29 @@ pub async fn conversation_end(
         }
     }
 
-    let tags = vec!["conversation".to_string(), format!("platform:{}", platform)];
+    // Callers that send no tags keep the historical defaults exactly.
+    let mut tags = vec!["conversation".to_string(), format!("platform:{}", platform)];
+    if let Some(extra) = &payload.tags {
+        // Bounded: an archive's chunk tags ride along on every write, but a
+        // caller should not be able to grow the payload without limit.
+        for tag in extra.iter().take(MAX_EXTRA_TAGS) {
+            let tag = tag.trim();
+            if tag.is_empty() || tag.chars().count() > MAX_TAG_CHARS {
+                continue;
+            }
+            if !tags.iter().any(|existing| existing == tag) {
+                tags.push(tag.to_string());
+            }
+        }
+    }
+
+    // Optional caller-declared type. Unknown names fall back to `general` in
+    // the decay table, so this cannot widen decay beyond what the server knows.
+    let memory_type = payload
+        .memory_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.chars().count() <= MAX_MEMORY_TYPE_CHARS);
 
     let realm_hint = payload.realm_hint.clone();
 
@@ -58,7 +80,8 @@ pub async fn conversation_end(
             // share these with peers. Operators can mark individual
             // conversations public later via PATCH.
             Some("private"),
-            None, // memory_type: webhook ingestion uses the default "general"
+            // None keeps the pre-existing default ("general").
+            memory_type,
         )
         .await?;
 
@@ -122,6 +145,11 @@ pub async fn skill_executed(
 
 // ─── Payload Types ──────────────────────────────────────────────
 
+/// Caps on caller-supplied provenance so one webhook body stays bounded.
+const MAX_EXTRA_TAGS: usize = 16;
+const MAX_TAG_CHARS: usize = 64;
+const MAX_MEMORY_TYPE_CHARS: usize = 32;
+
 #[derive(Deserialize, Serialize)]
 pub struct WebhookPayload {
     pub summary: Option<String>,
@@ -130,6 +158,9 @@ pub struct WebhookPayload {
     pub platform: Option<String>,
     pub realm_hint: Option<String>,
     pub tags: Option<Vec<String>>,
+    /// Optional memory_type (e.g. `artifact` for checkpoint archives). When
+    /// absent the stored memory keeps the historical `general` default.
+    pub memory_type: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
