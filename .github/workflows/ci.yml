@@ -89,6 +89,16 @@ jobs:
           python3 tests/test_ingest_outcomes.py
           # Root webhook aliases stay authenticated; MCP SSE handshake completes.
           python3 tests/test_http_lifecycle.py
+          # These exercise the real memex8 binary; the plugin-only matrix has
+          # no Rust build, so running them there fails (or silently skips).
+          python3 tests/test_dreams.py
+
+      - name: Test real webhook checkpoint round trip
+        env:
+          MEMEX8_TEST_BINARY: ${{ github.workspace }}/target/release/memex8
+        run: |
+          python3 -m pip install pytest requests
+          python3 -m pytest tests/test_plugin_webhook_roundtrip.py -q
 
       - name: Test source-preserving consolidation against disposable Qdrant
         env:
@@ -163,7 +173,6 @@ jobs:
       # silently (dreams and cron-filter findings were both in that state).
       - name: Test dreams and cron findings
         run: |
-          python3 tests/test_dreams.py
           python3 tests/test_cron_filter.py
           python3 plugins/memex8/tests/test_dreams.py
           python3 plugins/memex8/tests/test_cron_findings.py
@@ -171,12 +180,10 @@ jobs:
       - name: Test query-aware prefetch isolation and deadlines
         run: python3 -m pytest tests/test_prefetch.py -q
 
-      # Checkpoint archives are load-bearing: a required checkpoint must fail
-      # closed, keep the whole transcript, and never store private spans.
+      # Checkpoint archive unit tests are Python-only. The real webhook
+      # round trip requires the Rust binary and runs in the Rust job above.
       - name: Test checkpoint durability and private-span redaction
-        run: |
-          python3 -m pytest tests/test_plugin_checkpoint_privacy.py -q
-          python3 -m pytest tests/test_plugin_webhook_roundtrip.py -q
+        run: python3 -m pytest tests/test_plugin_checkpoint_privacy.py -q
 
       - name: Validate plugin.yaml
         run: |
