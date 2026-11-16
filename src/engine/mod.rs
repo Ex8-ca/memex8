@@ -1344,9 +1344,46 @@ impl Engine {
             .collect())
     }
 
+    /// Archive a memory by dropping its importance so slumber's prune phase
+    /// reclaims it.
+    ///
+    /// Certified memories never decay, and archiving is decay by another name:
+    /// it is refused (409) so an operator has to revoke certification first.
+    /// The write itself is the certified-excluding filtered update used by every
+    /// other automatic mutation, under the maintenance gate — a certification
+    /// that lands concurrently wins the race and this call reports the conflict
+    /// instead of decaying a certified memory. Explicit deletion is a separate
+    /// path and stays allowed for certified memories.
     pub async fn archive_memory(&self, id: &str) -> anyhow::Result<()> {
-        // Reduce importance to near-zero so slumber will prune it
-        self.store.update_upvotes(id, 0, 0.01).await
+        let _guard = self.store.maintenance_guard().await;
+        let Some(memory) = self.store.get_memory(id).await? else {
+            return Err(crate::storage::qdrant::RecoveryError::NotFound(format!(
+                "Memory not found: {}",
+                id
+            ))
+            .into());
+        };
+        if memory.is_certified() {
+            return Err(crate::storage::qdrant::CertifiedMemoryError.into());
+        }
+        self.store
+            .update_unprotected_payload(
+                id,
+                serde_json::json!({"upvotes": 0, "importance": 0.01}).try_into()?,
+            )
+            .await?;
+        // Read back: if another writer certified the memory between the check
+        // and the filtered write, the update was a no-op and the caller must
+        // not be told the memory was archived.
+        if self
+            .store
+            .get_memory(id)
+            .await?
+            .is_some_and(|memory| memory.is_certified())
+        {
+            return Err(crate::storage::qdrant::CertifiedMemoryError.into());
+        }
+        Ok(())
     }
 
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {

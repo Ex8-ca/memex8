@@ -322,5 +322,28 @@ class AuditControlTests(unittest.TestCase):
             self.assertIn(remaining, {p["id"] for p in points(f)})
 
 
+    def test_archive_refuses_certified_but_explicit_delete_is_allowed(self):
+        with fixture() as f:
+            ordinary = store(f, "Ordinary memory to archive")
+            self.assertEqual(f["api"]("/memories/" + ordinary)["importance"], 1.0)
+            f["api"](f"/memories/{ordinary}/archive", {}, "POST")
+            self.assertAlmostEqual(f["api"]("/memories/" + ordinary)["importance"], 0.01)
+
+            certified = store(f, "CERTIFIED_ONLY: never decay this importance.", certified=True)
+            self.assert_http(409, lambda: f["api"](f"/memories/{certified}/archive", {}, "POST"))
+            kept = f["api"]("/memories/" + certified)
+            self.assertEqual(kept["verification_status"], "certified")
+            self.assertEqual(kept["importance"], 1.0, "archive decayed a certified memory")
+
+            # A concurrent certification wins the write itself, not just the check:
+            # slumber's decay path (same filtered primitive) leaves it untouched.
+            f["api"]("/slumber/trigger", {}, "POST")
+            self.assertEqual(f["api"]("/memories/" + certified)["importance"], 1.0)
+
+            # Explicit user deletion stays allowed for certified memories.
+            f["api"]("/memories/" + certified, method="DELETE")
+            self.assert_http(404, lambda: f["api"]("/memories/" + certified))
+
+
 if __name__ == "__main__":
     unittest.main()
