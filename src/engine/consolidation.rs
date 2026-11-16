@@ -86,7 +86,7 @@ impl Engine {
                 no_consolidate_until: operation.cooldown_until,
             });
         }
-        if !["prepared", "complete", "restoring"].contains(&operation.state.as_str()) {
+        if !["prepared", "deleting", "complete", "restoring"].contains(&operation.state.as_str()) {
             return Err(
                 RecoveryError::Conflict("Unknown consolidation journal state".into()).into(),
             );

@@ -273,5 +273,54 @@ class AuditControlTests(unittest.TestCase):
             )
 
 
+    def test_interrupted_source_deletion_resumes_the_same_plan(self):
+        """A failure inside the source-deletion loop used to abort with the journal
+        at `prepared`, the summary stored and some sources gone. The next run then
+        planned over the survivors, whose fingerprint no longer matched, producing
+        a second overlapping summary. The journal must record the interruption and
+        the next run must finish that same plan."""
+        with fixture() as f:
+            ids = [store(f, "Interrupted source alpha"), store(f, "Interrupted source beta")]
+            same_realm(f, ids)
+
+            # Fail the second delete of the run: the first source is already gone
+            # when the pipeline aborts.
+            first = run_cli(f, ["slumber", "trigger"], {"MEMEX8_TEST_FAIL_NTH_DELETE": "2"})
+            self.assertNotEqual(first.returncode, 0, "injected failure was silently swallowed")
+            summaries = [
+                p for p in points(f) if p["payload"].get("chunk_type") == "consolidated"
+            ]
+            self.assertEqual(len(summaries), 1, "summary was not stored before the deletion phase")
+            journal = operation(f, summaries[0]["id"])
+            self.assertEqual(journal["state"], "deleting", "interruption was not recorded")
+            live = {p["id"] for p in points(f)}
+            self.assertEqual(len(live & set(ids)), 1, "expected exactly one source to remain")
+            remaining = next(id_ for id_ in ids if id_ in live)
+
+            # Retrying while the failure persists must not plan a second summary:
+            # the unfinished journal is resumed first and its failure aborts.
+            chats = f["state"]["summaries"]
+            second = run_cli(f, ["slumber", "trigger"], {"MEMEX8_TEST_FAIL_NTH_DELETE": "1"})
+            self.assertNotEqual(second.returncode, 0)
+            self.assertEqual(f["state"]["summaries"], chats, "re-planned over the survivors")
+            self.assertEqual(
+                len([p for p in points(f) if p["payload"].get("chunk_type") == "consolidated"]),
+                1,
+            )
+            self.assertEqual(operation(f, summaries[0]["id"])["state"], "deleting")
+
+            # With the failure cleared the same plan finishes: one summary.
+            third = run_cli(f, ["slumber", "trigger"])
+            self.assertEqual(third.returncode, 0, third.stderr)
+            self.assertEqual(operation(f, summaries[0]["id"])["state"], "complete")
+            self.assertEqual({p["id"] for p in points(f)}, {summaries[0]["id"]})
+
+            # Undo restores exactly the sources this run deleted.
+            restored = f["api"](f"/memories/{summaries[0]['id']}/unconsolidate", method="POST")
+            self.assertEqual(restored["restored"], 2)
+            self.assertEqual({p["id"] for p in points(f)}, set(ids))
+            self.assertIn(remaining, {p["id"] for p in points(f)})
+
+
 if __name__ == "__main__":
     unittest.main()
