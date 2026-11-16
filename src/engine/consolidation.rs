@@ -199,6 +199,10 @@ impl Engine {
         }
         if let Some(summary) = summary {
             self.store.delete_consolidation_snapshot(&summary).await?;
+            // The summary is gone; drop graph edges and association entries that
+            // name it so traversal and `related_memory_ids` cannot return an ID
+            // that no longer resolves.
+            self.store.prune_duplicate_references(&summary.id).await?;
         }
         self.store
             .update_consolidation_state(&mut operation, "restored")

@@ -198,5 +198,80 @@ class AuditControlTests(unittest.TestCase):
             self.assertEqual(f["api"]("/slumber/status")["state"], "idle")
 
 
+    def test_delete_prunes_graph_edges_and_related_ids(self):
+        with fixture() as f:
+            texts = [
+                "Marc uses Qdrant for vector storage in memex8.",
+                "Marc runs memex8 on the homelab server nightly.",
+                "Marc prefers Rust for the memex8 services.",
+            ]
+            ids = [store(f, text) for text in texts]
+            authored, doomed, survivor = ids[0], ids[1], ids[2]
+            f["api"]("/slumber/trigger", {}, "POST")
+            built = f["api"]("/graph/build", {}, "POST")
+            self.assertEqual(built["status"], "built")
+            self.assertTrue(edges(f), "graph build produced no edges to prune")
+            related = f["api"]("/memories/" + survivor)["related_memory_ids"]
+            self.assertIn(doomed, related, "fixture never linked the memories")
+            before = f["api"](f"/graph/traverse?memory_id={authored}&depth=2")
+            self.assertTrue(
+                any(step["to_id"] == doomed or step["from_id"] == doomed
+                    for result in before["results"] for step in result["path"]),
+                "fixture traversal never reached the memory about to be deleted",
+            )
+
+            f["api"]("/memories/" + doomed, method="DELETE")
+
+            after = f["api"]("/memories/" + survivor)
+            self.assertNotIn(doomed, after["related_memory_ids"], "stale related_memory_ids")
+            self.assertEqual(
+                len(after["related_memory_ids"]), len(after["association_strengths"])
+            )
+            traversal = f["api"](f"/graph/traverse?memory_id={authored}&depth=2")
+            named = {
+                step[key]
+                for result in traversal["results"]
+                for step in result["path"]
+                for key in ("from_id", "to_id")
+            }
+            named |= {result["memory_id"] for result in traversal["results"]}
+            self.assertNotIn(doomed, named, "graph traversal still names a deleted memory")
+            self.assertFalse(
+                [p for p in edges(f) if doomed in (p["payload"]["from_memory_id"],
+                                                   p["payload"]["to_memory_id"])],
+                "graph edge survived the delete",
+            )
+
+    def test_unconsolidate_prunes_summary_references(self):
+        with fixture() as f:
+            certified = store(
+                f, "CERTIFIED_ONLY: my confirmed preference survives maintenance.", certified=True
+            )
+            sources = [store(f, "Consolidated source alpha"), store(f, "Consolidated source beta")]
+            same_realm(f, [certified] + sources)
+            f["api"]("/slumber/trigger?force_consolidation=true", {}, "POST")
+            summary = [
+                p for p in points(f) if p["payload"].get("chunk_type") == "consolidated"
+            ]
+            self.assertEqual(len(summary), 1, "consolidation did not replace the sources")
+            summary_id = summary[0]["id"]
+            self.assertTrue(
+                summary_id in f["api"]("/memories/" + certified)["related_memory_ids"],
+                "fixture never linked the survivor to the summary",
+            )
+
+            f["api"](f"/memories/{summary_id}/unconsolidate", method="POST")
+
+            survivor = f["api"]("/memories/" + certified)
+            self.assertNotIn(
+                summary_id, survivor["related_memory_ids"], "stale related id after undo"
+            )
+            self.assertFalse(
+                [p for p in edges(f) if summary_id in (p["payload"]["from_memory_id"],
+                                                       p["payload"]["to_memory_id"])],
+                "graph edge to the deleted summary survived the undo",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

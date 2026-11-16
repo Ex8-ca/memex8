@@ -1355,6 +1355,13 @@ impl Engine {
             "expected UUID memory identifier"
         );
         let _guard = self.store.maintenance_guard().await;
+        // Graph edges and association lists are projections of the live corpus,
+        // and nothing re-derives them for a single deletion. Drop every reference
+        // to this memory *before* the delete: afterwards a success would leave
+        // `graph/traverse` paths and `related_memory_ids` pointing at an ID that
+        // no longer resolves. Pruning is idempotent, so a delete that fails after
+        // this point just means the next run prunes again.
+        self.store.prune_duplicate_references(id).await?;
         if let Some(ledger) = self.evidence_store()? {
             if ledger.begin_erase(id)?.is_some() {
                 // The compressed index has no per-ID removal; never keep a stale
