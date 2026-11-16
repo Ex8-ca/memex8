@@ -1,13 +1,44 @@
 """Offline checkpoint/consent/privacy boundary regressions."""
+import hashlib
 import json
 from unittest.mock import Mock, patch
 
 import pytest
 from test_prefetch import plugin, provider
 
+BUDGET = plugin._WEBHOOK_CHUNK_BYTES
+
 
 def immediate(fn, name=""):
     return Mock(start=fn)
+
+
+def receipts():
+    """Mock ingest_conversation returning unique, receipt-shaped ids."""
+    client = Mock()
+    client.ingest_conversation = Mock(side_effect=lambda **kw: (
+        'receipt-' + str(client.ingest_conversation.call_count)))
+    return client
+
+
+def writes(client):
+    return [call.kwargs['summary'] for call in client.ingest_conversation.call_args_list]
+
+
+def stored(client):
+    """Mock fetch(id) over what the mock client received (no server framing)."""
+    bodies = writes(client)
+    return lambda receipt: bodies[int(receipt.rsplit('-', 1)[1]) - 1]
+
+
+def assert_within_budget(text):
+    """Every webhook write is one embedding input: 8191 tokens at most.
+
+    8000 bytes is safe under both the densest realistic encodings: CJK runs
+    ~1 token/character (3 bytes) and base64/hex ~2 characters per token.
+    """
+    assert len(text.encode('utf-8')) <= BUDGET
+    assert len(text) <= 8191  # worst case: 1 token per character
 
 
 @pytest.mark.parametrize("response", [None, False, True, "", {}, {"ok": True}])
@@ -125,16 +156,120 @@ def test_nested_private_spans_structured_fields_and_unclosed_tail():
 
 
 def test_manifest_tree_bounds_large_conversation():
-    c = Mock()
-    c.ingest_conversation.side_effect = lambda **kw: 'id-' + str(c.ingest_conversation.call_count)
+    c = receipts()
     p = provider(c)
     text = plugin._transcript([{'role': 'tool', 'content': 'z' * 1600000}])
-    p._archive_transcript(text, 'test')
-    writes = [call.kwargs['summary'] for call in c.ingest_conversation.call_args_list]
-    root = json.loads(writes[-1])
+    root_id = p._archive_transcript(text, 'test')
+    bodies = writes(c)
+    root = json.loads(bodies[int(root_id.rsplit('-', 1)[1]) - 1])
     assert root['level'] == 1
-    assert len(root['chunks']) == 2
-    assert all(len(value.encode('utf-8')) < 64000 for value in writes)
-    pages = [json.loads(writes[int(node['id'][3:]) - 1]) for node in root['chunks']]
-    parts = [writes[int(chunk['id'][3:]) - 1] for page in pages for chunk in page['chunks']]
-    assert ''.join(parts) == text
+    assert len(root['chunks']) > 1
+    for body in bodies:
+        assert_within_budget(body)
+    # Full multi-level reassembly, hash-verified at every node.
+    assert plugin.reassemble_transcript(root, stored(c)) == text
+
+
+def test_dense_24kb_payload_never_exceeds_one_embedding_input():
+    """A realistic dense 24KB window used to be embedded as ~24KB single inputs.
+
+    That is ~8000 tokens for CJK (3 bytes/char) and a long way past the 8191
+    limit for base64 tool output: the webhook 400s, no receipt comes back, and
+    a required checkpoint blocks compression forever.
+    """
+    c = receipts()
+    p = provider(c)
+    messages = [
+        {'role': 'user', 'content': '分析这个部署记录 <private>APIKEY_hidden</private>'},
+        {'role': 'tool', 'tool_call_id': 'call-1', 'content': {
+            'argv': ['--flag', '--token=' + 'A' * 300],
+            'stdout': '界' * 2000,                       # ~6KB of CJK
+            'blob': hashlib.sha256(b'x').hexdigest() * 40,  # ~2.5KB of hex
+            'path': '/srv/' + 'deeply/nested/segment/' * 30,
+        }},
+        {'role': 'assistant', 'content': [{'type': 'text', 'text': '結果' * 1000}]},
+        {'role': 'user', 'content': '继续' * 800 + ' END_MARKER'},
+    ]
+    summary = plugin._transcript(messages)
+    assert 20000 <= len(summary.encode('utf-8')) <= 30000  # the reviewed size
+    p.on_pre_compress(messages, require_checkpoint=True)
+    bodies = writes(c)
+    assert len(bodies) > 2
+    for body in bodies:
+        assert_within_budget(body)
+    assert 'APIKEY_hidden' not in ''.join(bodies)
+    assert plugin.reassemble_transcript(json.loads(bodies[-1]), stored(c)) == summary
+
+
+def test_window_starting_inside_private_span_stays_redacted():
+    """Compression rotates the session, so the next window can start mid-span.
+
+    A fresh redactor sees only the closing tag and archives the span's text.
+    """
+    c = receipts()
+    p = provider(c)
+    p.on_pre_compress([
+        {'role': 'user', 'content': 'public opening <private>SECRET_IN_SPAN'},
+        {'role': 'assistant', 'content': 'SECRET_STILL_IN_SPAN'},
+    ], require_checkpoint=True)
+    # Post-compression window: begins inside the span, closes later.
+    p.on_pre_compress([
+        {'role': 'user', 'content': 'SECRET_INSIDE_WINDOW</private> visible after close'},
+        {'role': 'assistant', 'content': 'ordinary answer'},
+    ], require_checkpoint=True)
+    archived = ''.join(writes(c))
+    assert 'SECRET_' not in archived
+    assert 'visible after close' in archived and 'ordinary answer' in archived
+
+
+def test_cumulative_resend_of_a_window_is_not_redacted_twice():
+    c = receipts()
+    p = provider(c)
+    first = [{'role': 'user', 'content': 'IMPORTANT_HEAD <private>SEED'}]
+    p.on_pre_compress(first, require_checkpoint=True)  # ends inside the span
+    # Same leading message re-sent with the span still open: the head must not
+    # be swallowed by the depth carried over from the previous archive.
+    resent = first + [{'role': 'tool', 'content': 'PRIVATE_TAIL</private> public tail'}]
+    p.on_pre_compress(resent, require_checkpoint=True)
+    # Second archive only: the re-sent head survives, text still inside the
+    # span does not, and text after the closing tag does.
+    second = ''.join(writes(c)[2:])
+    assert 'IMPORTANT_HEAD' in second and 'public tail' in second
+    assert 'PRIVATE_TAIL' not in second and 'SEED' not in second
+
+
+def test_empty_transcript_refuses_instead_of_looping():
+    c = receipts()
+    p = provider(c)
+    with pytest.raises(RuntimeError, match='empty transcript'):
+        p._archive_transcript('', 'test')
+    assert not c.ingest_conversation.called
+    # Unreachable in practice (transcripts are JSON), but the loop must not
+    # depend on the payload being non-empty to terminate.
+    p._archive_transcript(' ', 'test')
+    assert writes(c)[0] == ' '
+    assert json.loads(writes(c)[-1])['chunks'][0]['bytes'] == 1
+
+
+def test_manifest_records_framing_and_rejects_tampered_chunks():
+    c = receipts()
+    p = provider(c)
+    messages = [{'role': 'tool', 'content': 'y' * 20000}]
+    p.on_pre_compress(messages, require_checkpoint=True)
+    bodies = writes(c)
+    page = json.loads(bodies[-1])
+    assert page['framing'] == {
+        'prefix': plugin._WEBHOOK_FRAMING_PREFIX,
+        'suffix': plugin._WEBHOOK_FRAMING_SUFFIX,
+    }
+    # A server that stores the chunk inside the documented wrapper reassembles
+    # exactly; the framing is stripped from what the manifest recorded.
+    framed = lambda receipt: (plugin._WEBHOOK_FRAMING_PREFIX
+                             + bodies[int(receipt.rsplit('-', 1)[1]) - 1]
+                             + plugin._WEBHOOK_FRAMING_SUFFIX)
+    assert plugin.reassemble_transcript(page, framed) == plugin._transcript(messages)
+    def tampered(receipt):
+        body = bodies[int(receipt.rsplit('-', 1)[1]) - 1]
+        return plugin._WEBHOOK_FRAMING_PREFIX + body.replace('y', 'z', 1) + plugin._WEBHOOK_FRAMING_SUFFIX
+    with pytest.raises(ValueError, match='recorded hash'):
+        plugin.reassemble_transcript(page, tampered)

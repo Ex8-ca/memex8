@@ -209,6 +209,37 @@ def _render_system_prompt(template: str, base_url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Archive transport limits
+# ---------------------------------------------------------------------------
+
+# One webhook write becomes one embedding input: the server embeds the whole
+# ``summary`` string in a single request, and the embedding model caps one
+# input at 8191 tokens. Chunks are therefore bounded in BYTES with margin for
+# the densest realistic text — CJK runs ~1 token per character (3 bytes/char)
+# and base64/hex tool output ~2 characters per token — so 8000 bytes stays far
+# under the cap in every case. A 24000-byte CJK chunk is ~8000 tokens of a
+# single string: one 400 there fails that chunk, hence the whole checkpoint,
+# and with ``compression.checkpoint_required`` that blocks compression for good.
+_WEBHOOK_CHUNK_BYTES = 8000
+
+# The webhook stores what it is sent inside this framing
+# (src/api/routes/webhook.rs). Every manifest page records it so reassembly
+# strips it exactly instead of guessing.
+_WEBHOOK_FRAMING_PREFIX = "# Conversation Summary\n\n"
+_WEBHOOK_FRAMING_SUFFIX = "\n\n"
+
+_MANIFEST_FORMAT = "memex8-transcript-manifest-v1"
+
+# Checkpoint archives are evidence, not chatter: tag them so recall can find
+# them and they are distinguishable from ordinary conversation memory, and
+# store them as ``artifact`` (Weibull k=0.75/eta=2160h => ~273 days to reach the
+# default prune score) instead of the webhook's ``general`` (~7 days, at which
+# point slumber drops importance to ~0).
+_ARCHIVE_TAGS = ("checkpoint", "transcript-archive")
+_ARCHIVE_MEMORY_TYPE = "artifact"
+
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
@@ -256,10 +287,99 @@ class _PrivateRedactor:
         return value
 
 
-def _transcript(messages) -> str:
+def _transcript(messages, redactor: Optional["_PrivateRedactor"] = None) -> str:
+    """Serialize the complete ordered evidence, redacting ``<private>`` spans.
+
+    ``redactor`` carries span depth owned by the caller: an archive window can
+    begin inside a span opened by an earlier window, and a fresh redactor would
+    only see the closing tag and keep the plaintext.
+    """
     # Reject unsupported objects instead of silently dropping their evidence.
     normalized = json.loads(json.dumps(messages, ensure_ascii=False, allow_nan=False))
-    return json.dumps(_PrivateRedactor().value(normalized), ensure_ascii=False, separators=(",", ":"))
+    return json.dumps((redactor or _PrivateRedactor()).value(normalized),
+                      ensure_ascii=False, separators=(",", ":"))
+
+
+def _slice_bytes(raw: bytes, start: int, limit: int) -> int:
+    """End offset of the next chunk: at most ``limit`` bytes, rune-aligned."""
+    end = min(start + limit, len(raw))
+    while end > start and end < len(raw) and raw[end] & 0xC0 == 0x80:
+        end -= 1
+    if end <= start:
+        raise ValueError("cannot cut transcript on a UTF-8 boundary")
+    return end
+
+
+def _manifest_page(level: int, chunks: list, total_bytes: int, total_sha: str) -> dict:
+    return {
+        "format": _MANIFEST_FORMAT, "level": level, "encoding": "utf-8",
+        "chunks": chunks, "bytes": total_bytes, "sha256": total_sha,
+        # Recorded so a reassembly is exact: the webhook wraps each write in
+        # this framing before storing it (src/api/routes/webhook.rs).
+        "framing": {"prefix": _WEBHOOK_FRAMING_PREFIX, "suffix": _WEBHOOK_FRAMING_SUFFIX},
+    }
+
+
+def _pack_pages(nodes: list, level: int, total_bytes: int, total_sha: str) -> list:
+    """Group manifest nodes into pages that each fit one webhook write.
+
+    Manifest pages are embedded too, so they obey the same byte budget as the
+    transcript chunks: a fixed 64-entry fan-out grows its own JSON past the
+    embedding input limit.
+    """
+    pages: list = []
+    current: list = []
+    for node in nodes:
+        current.append(node)
+        encoded = json.dumps(_manifest_page(level, current, total_bytes, total_sha),
+                             separators=(",", ":"))
+        if len(encoded.encode("utf-8")) <= _WEBHOOK_CHUNK_BYTES:
+            continue
+        current.pop()
+        if not current:
+            raise ValueError("manifest node exceeds the webhook write budget")
+        pages.append(_manifest_page(level, current, total_bytes, total_sha))
+        current = [node]
+    if current:
+        pages.append(_manifest_page(level, current, total_bytes, total_sha))
+    return pages
+
+
+def _unframe(stored: str, framing: Optional[dict] = None) -> str:
+    """Undo the webhook's content wrapper using the framing the manifest recorded."""
+    prefix = (framing or {}).get("prefix", _WEBHOOK_FRAMING_PREFIX)
+    suffix = (framing or {}).get("suffix", _WEBHOOK_FRAMING_SUFFIX)
+    if (stored.startswith(prefix) and stored.endswith(suffix)
+            and len(stored) >= len(prefix) + len(suffix)):
+        return stored[len(prefix):len(stored) - len(suffix)]
+    return stored
+
+
+def reassemble_transcript(manifest: dict, fetch) -> str:
+    """Rebuild an archived transcript from stored memories, verifying hashes.
+
+    ``fetch(memory_id)`` returns the stored memory content. Every node records
+    the sha256 of the bytes that were sent, so a mismatch — including one caused
+    by server-side redaction rewriting a span — raises instead of silently
+    yielding a corrupted transcript.
+    """
+    framing = manifest.get("framing")
+    parts = []
+    for node in manifest.get("chunks") or []:
+        body = _unframe(fetch(node["id"]), framing)
+        if node.get("sha256"):
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            if digest != node["sha256"]:
+                raise ValueError(f"archive node {node['id']} does not match its recorded hash")
+        try:
+            page = json.loads(body)
+        except ValueError:
+            page = None
+        if isinstance(page, dict) and page.get("format") == _MANIFEST_FORMAT:
+            parts.append(reassemble_transcript(page, fetch))
+        else:
+            parts.append(body)
+    return "".join(parts)
 
 
 def _valid_receipt(value) -> bool:
@@ -492,20 +612,23 @@ class _Client:
 
     def ingest_conversation(
         self, summary: str, source: str = "hermes", platform: str = "cli",
-        tags: Optional[List[str]] = None,
+        tags: Optional[List[str]] = None, memory_type: Optional[str] = None,
     ) -> Optional[str]:
         """Send conversation summary via webhook. Returns the archive id if the
         server returns one, else None. Returns False-y on transport failure.
 
         The bool→id change is intentional: pre-compress checkpoint API v2 wants
         a referent it can put into the summary prompt so a later recall can
-        cite the checkpoint. We pass tags through as a list inside the JSON
-        body for stores that surface them.
+        cite the checkpoint. ``tags`` and ``memory_type`` are forwarded when
+        set; callers that omit them keep the server's historical defaults
+        (``conversation``/``platform:<platform>``, memory_type ``general``).
         """
         try:
             body: Dict[str, Any] = {"summary": summary, "source": source, "platform": platform}
             if tags:
                 body["tags"] = tags
+            if memory_type:
+                body["memory_type"] = memory_type
             resp_data = self.request(
                 "POST", "/api/v1/webhooks/conversation",
                 json_body=body,
@@ -884,6 +1007,12 @@ class Memex8MemoryProvider(MemoryProvider):
         self._sync_privacy = _PrivateRedactor()
         self._sync_privacy_session = None
         self._sync_privacy_lock = threading.Lock()
+        # Span depth for ARCHIVE windows (on_pre_compress / on_session_end).
+        # Separate from _sync_privacy: turns and transcripts are different
+        # ordered streams, so consuming a tag in one must not affect the other.
+        self._archive_privacy = {"session": None, "head": None,
+                                 "start_depth": 0, "end_depth": 0}
+        self._archive_privacy_lock = threading.Lock()
 
         # Prefetch caches
         self._recall_result: list = []
@@ -1126,6 +1255,9 @@ class Memex8MemoryProvider(MemoryProvider):
         with self._sync_privacy_lock:
             self._sync_privacy = _PrivateRedactor()
             self._sync_privacy_session = session_id
+        with self._archive_privacy_lock:
+            self._archive_privacy = {"session": session_id, "head": None,
+                                     "start_depth": 0, "end_depth": 0}
         self._recall_result = []
         # Feature 1: reset per-session dedup state on every new session
         with self._dedup_lock:
@@ -1401,45 +1533,90 @@ class Memex8MemoryProvider(MemoryProvider):
     def _archive_transcript(self, summary: str, source: str) -> str:
         """Commit bounded chunks, then a receipt manifest, via the existing webhook.
 
-        Chunks are exact consecutive UTF-8 text slices. The manifest is written
-        last and is the only checkpoint referent. Partial writes are harmless
-        orphan chunks, never a successful checkpoint. Server durability is its
-        receipt contract; this client cannot prove disk flush independently.
+        Chunks are exact consecutive UTF-8 text slices, each small enough to
+        survive as a single embedding input. The manifest is written last and is
+        the only checkpoint referent. Partial writes are harmless orphan chunks,
+        never a successful checkpoint. Server durability is its receipt
+        contract; this client cannot prove disk flush independently.
+
+        Every write carries archive provenance (tags + ``artifact`` memory
+        type) so checkpoint evidence is durable and distinguishable from
+        ordinary conversation memory instead of decaying with it.
         """
         client = self._get_client()
 
         def write(text):
-            receipt = client.ingest_conversation(summary=text, source=source, platform="cli")
+            if len(text.encode("utf-8")) > _WEBHOOK_CHUNK_BYTES:
+                # Refuse locally rather than eat a 400 for the whole checkpoint.
+                raise RuntimeError("archive write exceeds the embedding input budget")
+            receipt = client.ingest_conversation(
+                summary=text, source=source, platform="cli",
+                tags=list(_ARCHIVE_TAGS) + [f"source:{source}"],
+                memory_type=_ARCHIVE_MEMORY_TYPE,
+            )
             if not _valid_receipt(receipt):
                 raise RuntimeError("archive missing durable receipt")
             return receipt
 
         raw = summary.encode("utf-8")
+        if not raw:
+            raise RuntimeError("refusing to archive an empty transcript")
         chunks = []
         offset = 0
         while offset < len(raw):
-            end = min(offset + 24000, len(raw))
-            while end < len(raw) and raw[end] & 0xC0 == 0x80:
-                end -= 1
+            end = _slice_bytes(raw, offset, _WEBHOOK_CHUNK_BYTES)
             part = raw[offset:end]
             chunks.append({"id": write(part.decode("utf-8")), "bytes": len(part),
                            "sha256": hashlib.sha256(part).hexdigest()})
             offset = end
+        total_bytes = len(raw)
+        total_sha = hashlib.sha256(raw).hexdigest()
         # Manifest pages keep arbitrarily large transcripts bounded too.
         nodes = chunks
         level = 0
         while True:
             parents = []
-            for start in range(0, len(nodes), 64):
-                page = {"format": "memex8-transcript-manifest-v1", "level": level,
-                        "encoding": "utf-8", "chunks": nodes[start:start + 64],
-                        "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
-                receipt = write(json.dumps(page, separators=(",", ":")))
-                parents.append({"id": receipt})
+            for page in _pack_pages(nodes, level, total_bytes, total_sha):
+                body = json.dumps(page, separators=(",", ":"))
+                parents.append({"id": write(body), "bytes": len(body.encode("utf-8")),
+                                "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest()})
             if len(parents) == 1:
                 return parents[0]["id"]
             nodes = parents
             level += 1
+
+    def _archive_text(self, messages) -> str:
+        """Serialize an archive window, continuing the session's span depth.
+
+        The host hands ``on_pre_compress``/``on_session_end`` windows that can
+        begin inside a ``<private>`` span opened earlier in the session, because
+        compression rotates the session and later windows start after the cut.
+        Redaction depth is therefore session state, like ``_sync_privacy``:
+        carrying it across calls is what stops a mid-span window from archiving
+        the span's plaintext. A window that re-sends one already seen (same
+        leading message) starts at the same depth it started at before, so a
+        cumulative re-send is not redacted twice.
+        """
+        head = messages[0] if messages else None
+        fingerprint = hashlib.sha256(json.dumps(
+            head, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        key = self._session_id or ""
+        with self._archive_privacy_lock:
+            state = self._archive_privacy
+            if state["session"] != key:
+                state = {"session": key, "head": None, "start_depth": 0, "end_depth": 0}
+                self._archive_privacy = state
+            start_depth = state["start_depth"] if state["head"] == fingerprint else state["end_depth"]
+            redactor = _PrivateRedactor()
+            redactor.depth = start_depth
+            state["head"] = fingerprint
+            state["start_depth"] = start_depth
+        text = _transcript(messages, redactor)
+        with self._archive_privacy_lock:
+            if self._archive_privacy["session"] == key:
+                self._archive_privacy["end_depth"] = redactor.depth
+        return text
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Auto-store turns; consume privacy delimiters BEFORE any skip/truncation."""
@@ -1582,7 +1759,7 @@ class Memex8MemoryProvider(MemoryProvider):
 
         # Snapshot and sanitize before the background worker can race host edits.
         try:
-            summary = _transcript(messages)
+            summary = self._archive_text(messages)
         except Exception:
             self._record_failure("transcript normalization failed")
             return
@@ -1664,7 +1841,7 @@ class Memex8MemoryProvider(MemoryProvider):
         # Normalize/redact the COMPLETE ordered evidence before chunking. All
         # roles, tool calls, structured blocks and metadata remain represented.
         try:
-            summary = _transcript(messages)
+            summary = self._archive_text(messages)
             archive_id = self._archive_transcript(summary, "hermes-pre-compress-checkpoint")
         except Exception as e:
             self._record_failure(str(e))
