@@ -109,8 +109,14 @@ pub async fn run_with_engine(
         state.clone(),
         memory_read_response_gate,
     ));
+    // Health is mounted *inside* the `/api/v1` namespace that carries the auth
+    // middleware, and is opened by `auth::is_public_path` rather than by
+    // registration order. That makes the public contract explicit and
+    // testable: if the exemption is dropped, health starts returning 401
+    // instead of silently staying open through route placement.
+    let api_v1 = guarded_routes.merge(public_api_routes());
     let guarded_routes = Router::new()
-        .nest("/api/v1", guarded_routes)
+        .nest("/api/v1", api_v1)
         .route(
             "/webhooks/conversation",
             axum::routing::post(crate::api::routes::webhook::conversation_end),
@@ -133,10 +139,13 @@ pub async fn run_with_engine(
         ))
     };
 
-    // Health and root must be explicit; wildcard must come last
+    // Health and root must be explicit; wildcard must come last.
+    // `/api/v1/health` is NOT registered here — it lives inside the guarded
+    // `/api/v1` nest above so the auth middleware sees it (and exempts it
+    // explicitly). `/health` is the legacy un-prefixed alias and stays on the
+    // outer router where it is public by construction.
     let app = Router::new()
         .merge(api_router)
-        .route("/api/v1/health", axum::routing::get(health))
         .route("/health", axum::routing::get(health))
         .route(
             "/auth/login",
@@ -164,6 +173,15 @@ pub async fn run_with_engine(
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Routes inside `/api/v1` that are deliberately reachable without an API key.
+///
+/// Kept separate from `api_routes()` so the public surface is one greppable
+/// list, and merged into the `/api/v1` nest *after* the read-gate layer so a
+/// health probe never queues behind an erasure.
+fn public_api_routes() -> Router<Arc<AppState>> {
+    Router::new().route("/health", axum::routing::get(health))
 }
 
 fn api_routes() -> Router<Arc<AppState>> {

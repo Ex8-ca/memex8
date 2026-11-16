@@ -37,6 +37,53 @@ class HttpLifecycle(unittest.TestCase):
                 process.terminate()
                 process.wait(timeout=10)
 
+    def test_health_is_public_and_rest_requires_key(self):
+        """The auth contract: health is public by design, everything else is not.
+
+        The Docker healthcheck runs `curl -sf http://localhost:8080/api/v1/health`
+        with no credentials, so both health paths must answer 200 unauthenticated.
+        Every other API route must fail closed on no key and on a wrong key, and
+        keep working with the configured key.
+        """
+        with fixture() as f:
+            url = urlsplit(f['api_url'])
+
+            def call(path, token=None, method='GET', raw=None):
+                c = http.client.HTTPConnection(url.hostname, url.port, timeout=5)
+                headers = {'Content-Type': 'application/json'}
+                if token is not None:
+                    headers['Authorization'] = 'Bearer ' + token
+                c.request(method, path, '{}' if raw is None else raw, headers=headers)
+                r = c.getresponse()
+                status, payload = r.status, r.read()
+                c.close()
+                return status, payload
+
+            before = points(f)
+
+            # Public by design: unauthenticated and even with a bogus key.
+            for path in ('/health', '/api/v1/health'):
+                for token in (None, 'wrong'):
+                    status, payload = call(path, token)
+                    self.assertEqual(status, 200, (path, token))
+                    self.assertEqual(payload, b'OK', (path, token))
+
+            # Everything else: 401 without a key and with a wrong key.
+            protected = (('/api/v1/stats', 'GET'),
+                         ('/api/v1/memories', 'GET'),
+                         ('/api/v1/webhooks/conversation', 'POST'))
+            for path, method in protected:
+                self.assertEqual(call(path, None, method)[0], 401, path)
+                self.assertEqual(call(path, 'wrong', method)[0], 401, path)
+
+            # ...and authorized requests still reach their handlers.
+            self.assertEqual(call('/api/v1/stats', 'test-only')[0], 200)
+            self.assertEqual(call('/api/v1/memories', 'test-only')[0], 200)
+            self.assertEqual(call('/api/v1/webhooks/conversation', 'test-only', 'POST', raw='{')[0], 400)
+
+            # None of the above persisted anything (no store side effects).
+            self.assertEqual(points(f), before)
+
     def test_auth_sessions_and_cleanup(self):
         with fixture() as f:
             url = urlsplit(f['api_url'])
