@@ -301,9 +301,10 @@ enum SlumberActions {
     Status,
     /// Manually trigger slumber pipeline
     Trigger,
-    /// Pause slumber (during heavy use)
+    /// Pause scheduled slumber. Persisted next to the compressed index, so a
+    /// running daemon on the same data volume stops triggering within one tick.
     Pause,
-    /// Resume slumber
+    /// Resume scheduled slumber
     Resume,
 }
 
@@ -565,6 +566,33 @@ async fn main() -> anyhow::Result<()> {
             let report = slumber.inspect_duplicates().await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        Commands::Slumber {
+            action: action @ (SlumberActions::Pause | SlumberActions::Resume),
+        } => {
+            // Pause and resume are a persisted flag, not in-process state. Write
+            // it without building an Engine (which needs Qdrant and storage) so
+            // an operator can stop maintenance precisely when the store is
+            // degraded. The scheduler re-reads the flag on every tick.
+            let paused = matches!(action, SlumberActions::Pause);
+            let path = engine::slumber_pause_path(&config);
+            engine::write_slumber_pause(&path, paused)?;
+            if paused {
+                println!("⏸️  Slumber paused for every process using {path}");
+                println!(
+                    "    A running daemon re-reads this flag within one scheduler tick (≤30s) \
+                     and refuses explicit triggers until `memex8 slumber resume`."
+                );
+            } else {
+                println!("▶️  Slumber resumed for every process using {path}");
+                println!(
+                    "    Scheduled runs may start on the next tick; explicit triggers work now."
+                );
+            }
+            println!(
+                "    This flag is per data volume: a daemon with different paths/volumes \
+                 needs `POST /api/v1/slumber/pause` (or resume) against its own API."
+            );
+        }
         Commands::Slumber { action } => {
             let engine = engine::Engine::new(config).await?;
             match action {
@@ -572,20 +600,26 @@ async fn main() -> anyhow::Result<()> {
                 SlumberActions::Status => {
                     let status = engine.slumber_status().await;
                     println!("{}", serde_json::to_string_pretty(&status)?);
+                    println!("pause file: {}", engine.slumber_pause_path());
                 }
                 SlumberActions::Trigger => {
                     println!("💤 Triggering slumber...");
-                    engine.trigger_slumber(true).await?;
-                    println!("✅ Slumber complete.");
+                    match engine.trigger_slumber(true).await {
+                        Ok(_) => println!("✅ Slumber complete."),
+                        // A pause is a deliberate refusal, not a crash: say so and
+                        // point at the remedy instead of a raw error dump.
+                        Err(e) if e.is::<engine::SlumberPausedError>() => {
+                            eprintln!("⏸️  Slumber is paused — nothing was run.");
+                            eprintln!(
+                                "    Resume with `memex8 slumber resume` or \
+                                 `POST /api/v1/slumber/resume`."
+                            );
+                            std::process::exit(1);
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
-                SlumberActions::Pause => {
-                    engine.pause_slumber().await;
-                    println!("⏸️  Slumber paused.");
-                }
-                SlumberActions::Resume => {
-                    engine.resume_slumber().await;
-                    println!("▶️  Slumber resumed.");
-                }
+                SlumberActions::Pause | SlumberActions::Resume => unreachable!(),
             }
         }
         Commands::Serve {

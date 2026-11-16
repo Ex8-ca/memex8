@@ -526,7 +526,9 @@ memex8 stats         # System statistics
 | `PATCH` | `/api/v1/memories/{id}` | Partial payload update — accepts `{memory_type, importance}`. Used by the retroactive classifier script |
 | `DELETE` | `/api/v1/memories/{id}` | Delete memory |
 | `GET`  | `/api/v1/realms` | List realms |
-| `POST` | `/api/v1/slumber/trigger` | Trigger slumber |
+| `POST` | `/api/v1/slumber/trigger` | Trigger slumber (409 while paused) |
+| `POST` | `/api/v1/slumber/pause` | Pause scheduled slumber; persisted beside the compressed index and re-read by the scheduler every tick |
+| `POST` | `/api/v1/slumber/resume` | Clear the persisted pause |
 | `GET`  | `/api/v1/health` | Health check (no auth) |
 
 ### Web login & settings

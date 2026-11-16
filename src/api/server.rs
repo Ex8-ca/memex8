@@ -292,6 +292,14 @@ fn api_routes() -> Router<Arc<AppState>> {
             axum::routing::post(crate::api::routes::slumber::trigger),
         )
         .route(
+            "/slumber/pause",
+            axum::routing::post(crate::api::routes::slumber::pause),
+        )
+        .route(
+            "/slumber/resume",
+            axum::routing::post(crate::api::routes::slumber::resume),
+        )
+        .route(
             "/stats",
             axum::routing::get(crate::api::routes::stats::stats),
         )

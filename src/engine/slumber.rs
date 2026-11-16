@@ -99,6 +99,13 @@ impl SlumberEngine {
         &self,
         force_consolidation: bool,
     ) -> anyhow::Result<SlumberReport> {
+        // Debug-only failpoint: the panic-resets-status regression needs a
+        // pipeline that crashes the way an unwrap/assert bug would. Compiled out
+        // of release builds.
+        #[cfg(debug_assertions)]
+        if std::env::var("MEMEX8_TEST_PANIC_SLUMBER").is_ok() {
+            panic!("injected slumber panic for the status-reset regression");
+        }
         let _certification_guard = self.store.maintenance_guard().await;
         let path = Path::new(&self.config.turbovec.index_path)
             .parent()
