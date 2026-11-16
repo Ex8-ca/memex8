@@ -43,8 +43,9 @@ impl Engine {
                         .await?;
                     ledger.finish_erase(&intent.memory_id)?;
                 }
-                // A loaded TurboVec index can still contain erased IDs; discard it.
-                *self.turbovec_index.write().await = None;
+                // A loaded TurboVec index can still contain erased IDs; discard it
+                // and the files behind it, exactly like a normal deletion.
+                self.invalidate_compressed_index().await;
             }
         }
         Ok(())
@@ -175,9 +176,18 @@ impl Engine {
                 end_byte: record.content.len(),
             }],
         };
+        let lexical_text = crate::engine::lexical::memory_text(&memory);
+        // A captured memory is a new corpus member; a loaded index built before
+        // this point would hide it. Invalidate before the projection write, the
+        // same way `store_memory` does.
+        self.invalidate_compressed_index().await;
         self.store
             .restore_memory(&crate::storage::qdrant::MemoryWithVector { memory, vector })
             .await?;
+        self.lexical
+            .write()
+            .await
+            .upsert(&record.memory_id, &lexical_text);
         Ok(record.memory_id)
     }
     pub async fn read_evidence(

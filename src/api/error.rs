@@ -75,6 +75,9 @@ impl From<anyhow::Error> for ApiError {
         if e.is::<crate::storage::qdrant::CertifiedMemoryError>() {
             return Self::Conflict(e.to_string());
         }
+        if e.is::<crate::engine::SlumberPausedError>() {
+            return Self::Conflict(e.to_string());
+        }
         ApiError::Internal(e)
     }
 }

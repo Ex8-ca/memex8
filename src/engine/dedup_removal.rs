@@ -8,15 +8,27 @@ use crate::storage::qdrant::{
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-pub(crate) fn invalidate_index_files(config: &AppConfig) -> anyhow::Result<()> {
-    for path in [&config.turbovec.index_path, &config.turbovec.id_map_path] {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+/// Remove the persisted compressed-index pair (and everything that describes it:
+/// the fingerprint sidecar and any stale marker). Callers pass the resolved paths
+/// (`super::compressed_index_paths`) so the empty-config defaults are honoured.
+///
+/// Every file is removed before the first error is returned, so a partial failure
+/// cannot leave a pair that still looks loadable.
+pub(crate) fn invalidate_index_files(index_path: &str, id_map_path: &str) -> anyhow::Result<()> {
+    let meta_path = super::compressed_index_meta_path(index_path);
+    let marker_path = super::compressed_index_stale_marker(index_path);
+    let mut first_error: Option<anyhow::Error> = None;
+    for path in [index_path, id_map_path, &meta_path, &marker_path] {
+        if let Err(error) = std::fs::remove_file(path) {
+            if error.kind() != std::io::ErrorKind::NotFound && first_error.is_none() {
+                first_error = Some(error.into());
+            }
         }
     }
-    Ok(())
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// Attribute accesses since the last merge to this point's own identity. Combining
@@ -161,7 +173,8 @@ pub async fn remove_duplicates(
         return Ok(report);
     }
     report.dry_run = false;
-    invalidate_index_files(config)?;
+    let (index_path, id_map_path) = super::compressed_index_paths(config);
+    invalidate_index_files(&index_path, &id_map_path)?;
     let mut handled = HashSet::new();
     for mut op in store.pending_dedup_operations().await? {
         for source in &op.sources {
@@ -280,7 +293,7 @@ impl Engine {
         self.store
             .update_consolidation_state(&mut op, "restoring")
             .await?;
-        self.invalidate_search_index().await?;
+        self.invalidate_compressed_index().await;
         let mut restored = 0;
         let mut retained = 0;
         for source in &op.sources {
@@ -342,6 +355,12 @@ impl Engine {
         self.store
             .update_consolidation_state(&mut op, "restored")
             .await?;
+        // The archived loser is live again: drop the compressed index (done above)
+        // and resync the keyword index so BM25 reflects the restored memory.
+        self.invalidate_compressed_index().await;
+        if let Err(e) = self.rebuild_lexical_index().await {
+            tracing::warn!("Lexical index rebuild after duplicate restore failed: {e}");
+        }
         Ok(DuplicateRestoreResult {
             operation_id: operation_id.into(),
             winner_id,

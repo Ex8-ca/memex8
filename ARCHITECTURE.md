@@ -524,7 +524,9 @@ DELETE /realms/:id                  # Delete a realm (memories reassigned)
 ```
 GET    /stats                       # System statistics
 GET    /slumber/status              # Slumber pipeline status
-POST   /slumber/trigger             # Manually trigger slumber
+POST   /slumber/trigger             # Manually trigger slumber (409 while paused)
+POST   /slumber/pause               # Persisted pause; scheduler re-reads it each tick
+POST   /slumber/resume              # Clear the pause
 GET    /config                      # Get configuration (redacted secrets)
 GET    /health                      # Health check
 ```

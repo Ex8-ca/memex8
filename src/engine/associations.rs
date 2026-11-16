@@ -229,19 +229,8 @@ pub fn kmeans_topic_clusters(
 
         for (j, c) in centroids.iter_mut().enumerate() {
             if counts[j] > 0 {
-                for x in c.iter_mut() {
-                    *x = 0.0;
-                }
-                for x in sums[j].iter() {
-                    *c.iter_mut().nth(j).unwrap_or(&mut 0.0) += x / counts[j] as f32;
-                }
-            }
-        }
-
-        for (j, c) in centroids.iter_mut().enumerate() {
-            if counts[j] > 0 {
-                for x in c.iter_mut() {
-                    *x /= counts[j] as f32;
+                for (component, sum) in c.iter_mut().zip(&sums[j]) {
+                    *component = *sum / counts[j] as f32;
                 }
             }
         }
@@ -1347,12 +1336,15 @@ mod tests {
     }
 
     #[test]
-    fn test_kmeans_simple() {
+    fn audit_kmeans_angular_clusters() {
+        // Distinct directions, not collinear vectors separated only by magnitude.
+        // Neither group is axis-aligned: corrupt intermediate means must not
+        // collapse both groups onto the same axis on the next iteration.
         let vectors = vec![
-            vec![0.0, 0.0],
-            vec![0.1, 0.1],
-            vec![10.0, 10.0],
-            vec![10.1, 10.1],
+            vec![1.0, 3.0],
+            vec![2.0, 6.0],
+            vec![-1.0, 3.0],
+            vec![-2.0, 6.0],
         ];
         let ids = vec!["a".into(), "b".into(), "c".into(), "d".into()];
         let (centroids, assignments) = kmeans_topic_clusters(&vectors, &ids, 2, 20);
@@ -1362,6 +1354,34 @@ mod tests {
         assert_eq!(assignments[0], assignments[1]);
         assert_eq!(assignments[2], assignments[3]);
         assert_ne!(assignments[0], assignments[2]);
+        assert_eq!(centroids[assignments[0] as usize], vec![1.5, 4.5]);
+        assert_eq!(centroids[assignments[2] as usize], vec![-1.5, 4.5]);
+    }
+
+    #[test]
+    fn audit_kmeans_more_clusters_than_dimensions() {
+        let vectors = vec![
+            vec![1.0, 3.0],
+            vec![2.0, 6.0],
+            vec![-1.0, 3.0],
+            vec![-2.0, 6.0],
+            vec![0.0, -2.0],
+            vec![0.0, -4.0],
+        ];
+        let (centroids, assignments) = kmeans_topic_clusters(&vectors, &[], 3, 20);
+        for pair in 0..3 {
+            assert_eq!(assignments[pair * 2], assignments[pair * 2 + 1]);
+            let c = &centroids[assignments[pair * 2] as usize];
+            for d in 0..2 {
+                assert_eq!(
+                    c[d],
+                    (vectors[pair * 2][d] + vectors[pair * 2 + 1][d]) / 2.0
+                );
+            }
+        }
+        assert_ne!(assignments[0], assignments[2]);
+        assert_ne!(assignments[0], assignments[4]);
+        assert_ne!(assignments[2], assignments[4]);
     }
 
     #[test]

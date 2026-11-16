@@ -255,7 +255,7 @@ Hermes Agent
 - **Auto-recall**: Before each turn, relevant memories are fetched in the background and injected as context
 - **Auto-sync**: Conversation turns are stored as memories (skips trivial replies like "ok", "thanks")
 - **Session-end**: Full conversation summary is sent via webhook at session close
-- **Memory mirroring**: When you use Hermes' built-in `memory` tool (add/replace/remove), memex8 stores a copy too
+- **Memory mirroring**: When you use Hermes' built-in `memory` tool (add/replace/remove), memex8 stores a copy too. This is the plugin's core job (it *is* the memory backend), so it runs even when `auto_sync` is off; `<private>...</private>` spans are stripped by the server on capture. To stop mirroring entirely, set `memory_enabled: false` (the built-in flat-file memory takes over).
 - **Circuit breaker**: After 5 consecutive failures, API calls pause for 2 minutes to avoid hammering a down server. **The breaker is bypassed during a pre-compress checkpoint** when `require_checkpoint=True` — see below.
 
 ## Pre-Compress Checkpoints (Hermes API v2)
@@ -283,6 +283,31 @@ compression:
 
 See [Hermes memory-provider docs](https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-plugin#pre-compress-checkpoints-fail-closed)
 for the full contract.
+
+### Archive format and reassembly
+
+A checkpoint is a tree of ordinary webhook memories, so a store that accepts
+one write can hold an archive of any size:
+
+- **Chunks** are exact consecutive UTF-8 slices, at most
+  `_WEBHOOK_CHUNK_BYTES` (8000) bytes each. One webhook write is one embedding
+  input, and the embedding model caps an input at 8191 tokens — 8000 bytes
+  stays under that even for CJK (~1 token/character) or hex/base64 output
+  (~2 characters/token). Oversized chunks would 400, return no receipt, and a
+  required checkpoint would then block compression permanently.
+- **Manifest pages** (`memex8-transcript-manifest-v1`) list their children with
+  `bytes` + `sha256`, are packed to the same byte budget, and the root manifest
+  is written last — it is the only checkpoint referent.
+- Each page also records the **framing** the webhook applies before storing
+  (`"# Conversation Summary\n\n" … "\n\n"`), so
+  `reassemble_transcript(manifest, fetch)` can rebuild the exact archived bytes
+  and verify every recorded hash. A hash mismatch (for example, server-side
+  redaction rewriting a secret-like span) raises instead of returning a
+  silently corrupted transcript.
+- Every write carries provenance: tags `checkpoint` + `transcript-archive` +
+  `source:<source>`, and `memory_type=artifact` (~273 days to reach the default
+  prune score) instead of the webhook's `general` (its 16-day per-type age gate). Callers that send
+  neither tags nor `memory_type` keep the server's historical defaults.
 
 ### Implementation note
 

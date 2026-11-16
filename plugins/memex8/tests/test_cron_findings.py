@@ -81,7 +81,9 @@ class CronFilterTests(unittest.TestCase):
         self.assertEqual(self.provider.on_pre_compress(msgs), "")
         self.client.ingest_conversation.assert_not_called()
         self.provider.on_pre_compress(msgs, require_checkpoint=True)
-        self.client.ingest_conversation.assert_called_once()
+        self.assertEqual(self.client.ingest_conversation.call_count, 2)  # data + manifest
+        self.assertIn("memex8-transcript-manifest-v1",
+                      self.client.ingest_conversation.call_args.kwargs["summary"])
 
     def test_realms_tool_strips_centroid(self):
         self.client.realms.return_value = [

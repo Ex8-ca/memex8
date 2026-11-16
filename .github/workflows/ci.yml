@@ -62,18 +62,17 @@ jobs:
       - name: Build
         run: cargo build --release
 
-      # test_kmeans_simple is non-deterministic on the tiny
-      # fixture vectors (K-means can converge to local minima
-      # on identical-input centroids). Skip it in CI; cover it
-      # locally when iterating.
+      # The k-means fixture was rewritten to use angular clusters, and the
+      # centroid recompute bug that made the old test fail is fixed. Keep this
+      # test in the gate: it was previously skipped on a misdiagnosis.
       - name: Run tests
-        run: cargo test -- --skip test_kmeans_simple
+        run: cargo test --
 
       - name: Test lifecycle recovery with disposable Qdrant
         env:
           MEMEX8_TEST_BINARY: ${{ github.workspace }}/target/release/memex8
         run: |
-          docker pull qdrant/qdrant:latest
+          docker pull qdrant/qdrant:v1.17.0
           python3 tests/test_dedup_inspection.py
           python3 tests/test_certification.py
           python3 tests/test_consolidation.py
@@ -82,11 +81,40 @@ jobs:
           python3 tests/test_search_coverage.py
           python3 tests/test_private_redaction.py
           python3 tests/test_timeline.py
+          # Derived-index freshness: an index must never outlive the corpus
+          # it describes, and ingest/undo must not be hidden by a loaded one.
+          python3 tests/test_index_freshness.py
+          python3 tests/test_index_coherence.py
+          # Ingestion must report partial/failed honestly on REST, CLI and MCP.
+          python3 tests/test_ingest_outcomes.py
+          # Root webhook aliases stay authenticated; MCP SSE handshake completes.
+          python3 tests/test_http_lifecycle.py
+          # These exercise the real memex8 binary; the plugin-only matrix has
+          # no Rust build, so running them there fails (or silently skips).
+          python3 tests/test_dreams.py
+
+      - name: Test real webhook checkpoint round trip
+        env:
+          MEMEX8_TEST_BINARY: ${{ github.workspace }}/target/release/memex8
+        run: |
+          python3 -m pip install pytest requests
+          python3 -m pytest tests/test_plugin_webhook_roundtrip.py -q
 
       - name: Test source-preserving consolidation against disposable Qdrant
         env:
           MEMEX8_TEST_QDRANT_URL: http://127.0.0.1:6336
         run: cargo test --lib consolidation_tests -- --ignored --test-threads=1
+
+      # Slumber pause/resume, interrupted-consolidation resume, graph pruning and
+      # the certification/archive race depend on debug-only failpoints
+      # (MEMEX8_TEST_*), so this step deliberately runs the DEBUG binary even
+      # though the artifact above is release.
+      - name: Test slumber controls, consolidation resume and certified archives
+        env:
+          MEMEX8_TEST_BINARY: ${{ github.workspace }}/target/debug/memex8
+        run: |
+          cargo build
+          python3 tests/test_audit_control.py
 
       - name: Test explicit REST evidence against disposable Qdrant
         env:
@@ -141,8 +169,21 @@ jobs:
           python3 plugins/memex8/tests/test_search_coverage.py
           python3 plugins/memex8/tests/test_timeline.py
 
+      # These files existed but were named in no CI step, so they could rot
+      # silently (dreams and cron-filter findings were both in that state).
+      - name: Test dreams and cron findings
+        run: |
+          python3 tests/test_cron_filter.py
+          python3 plugins/memex8/tests/test_dreams.py
+          python3 plugins/memex8/tests/test_cron_findings.py
+
       - name: Test query-aware prefetch isolation and deadlines
         run: python3 -m pytest tests/test_prefetch.py -q
+
+      # Checkpoint archive unit tests are Python-only. The real webhook
+      # round trip requires the Rust binary and runs in the Rust job above.
+      - name: Test checkpoint durability and private-span redaction
+        run: python3 -m pytest tests/test_plugin_checkpoint_privacy.py -q
 
       - name: Validate plugin.yaml
         run: |

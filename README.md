@@ -526,7 +526,9 @@ memex8 stats         # System statistics
 | `PATCH` | `/api/v1/memories/{id}` | Partial payload update — accepts `{memory_type, importance}`. Used by the retroactive classifier script |
 | `DELETE` | `/api/v1/memories/{id}` | Delete memory |
 | `GET`  | `/api/v1/realms` | List realms |
-| `POST` | `/api/v1/slumber/trigger` | Trigger slumber |
+| `POST` | `/api/v1/slumber/trigger` | Trigger slumber (409 while paused) |
+| `POST` | `/api/v1/slumber/pause` | Pause scheduled slumber; persisted beside the compressed index and re-read by the scheduler every tick |
+| `POST` | `/api/v1/slumber/resume` | Clear the persisted pause |
 | `GET`  | `/api/v1/health` | Health check (no auth) |
 
 ### Web login & settings
@@ -777,6 +779,19 @@ a reason, and no stored IDs, without calling the LLM or embedder. Conversation
 webhooks with no remaining meaningful content return 422. Imports re-embed any
 body changed by redaction even when vector reuse was requested; metadata-only
 changes can retain the existing vector.
+
+Conversation webhooks require the API key, including the root `/webhooks/...`
+aliases (they previously accepted unauthenticated writes). `/health` and
+`/api/v1/health` are the only public *API* endpoints (the web-login routes and
+the bundled SPA are served outside the auth layer), because the container
+healthcheck calls the latter without credentials.
+
+MCP SSE sessions are addressed by a session id embedded in the endpoint URL.
+The id is opaque and unguessable, but it is not bound to a key holder: anyone
+who can read a session id (for example from a reverse-proxy access log) can
+inject JSON-RPC into that stream until it disconnects or hits its one-hour
+lifetime. Under the single shared key this is not a privilege escalation, but
+treat session ids as secrets.
 
 Redaction applies to new capture and does not erase existing memories, original
 files, backups, exports, or copies already sent elsewhere. Exact backup/recovery

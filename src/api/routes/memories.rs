@@ -445,11 +445,18 @@ pub struct PublicMemoriesResponse {
     pub offset: usize,
 }
 
+/// `POST /api/v1/memories/ingest` — ingest a file or directory.
+///
+/// Response preserves the original `status` + `path` fields but `status` is now
+/// truthful: `"ingested"` (everything requested was stored), `"partial"` (some
+/// stored, some failed), `"failed"` (nothing stored, something failed) or
+/// `"empty"` (nothing ingestible found). Counts are per file; `issues` carries a
+/// bounded, sanitized per-path detail list — never raw OS or service error text.
 pub async fn ingest(
     State(state): State<Arc<AppState>>,
     Json(req): Json<IngestRequest>,
 ) -> Result<Json<serde_json::Value>, crate::api::error::ApiError> {
-    state
+    let report = state
         .engine
         .ingest_path(
             &req.path,
@@ -457,9 +464,41 @@ pub async fn ingest(
             req.realm_hint.as_deref(),
         )
         .await?;
-    Ok(Json(
-        serde_json::json!({"status": "ingested", "path": req.path}),
-    ))
+    Ok(Json(ingest_response(&req.path, &report)))
+}
+
+/// Build the public ingest response body. Kept separate from the handler so the
+/// shape (including the "no private error text" rule) is unit-testable.
+pub(crate) fn ingest_response(
+    path: &str,
+    report: &crate::engine::ingester::IngestReport,
+) -> serde_json::Value {
+    let issues: Vec<serde_json::Value> = report
+        .issues
+        .iter()
+        .map(|issue| {
+            serde_json::json!({
+                "path": issue.path,
+                "outcome": issue.outcome.as_str(),
+                "reason": issue.reason.as_str(),
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "status": report.status(),
+        "path": path,
+        "attempted": report.attempted,
+        "stored": report.stored,
+        "partial_files": report.partial_files,
+        "skipped": report.skipped,
+        "failed": report.failed,
+        "ignored": report.ignored,
+        "chunks": report.chunks,
+        "chunks_stored": report.chunks_stored,
+        "issues": issues,
+        "issues_truncated": report.issues_truncated,
+    })
 }
 
 pub async fn upvote(
@@ -597,4 +636,112 @@ pub async fn timeline(
     Query(request): Query<crate::engine::timeline::TimelineRequest>,
 ) -> Result<Json<crate::engine::timeline::TimelineResponse>, ApiError> {
     Ok(Json(state.engine.timeline_request(request).await?))
+}
+
+#[cfg(test)]
+mod ingest_response_tests {
+    use super::*;
+    use crate::engine::ingester::{IngestIssue, IngestReport, IssueOutcome, IssueReason};
+
+    #[test]
+    fn successful_ingest_keeps_compatible_fields() {
+        let report = IngestReport {
+            attempted: 2,
+            stored: 2,
+            chunks: 5,
+            chunks_stored: 5,
+            ..Default::default()
+        };
+        let body = ingest_response("/watch/docs", &report);
+
+        assert_eq!(body["status"], "ingested");
+        assert_eq!(body["path"], "/watch/docs");
+        assert_eq!(body["attempted"], 2);
+        assert_eq!(body["stored"], 2);
+        assert_eq!(body["failed"], 0);
+        assert_eq!(body["partial_files"], 0);
+        assert_eq!(body["chunks"], 5);
+        assert_eq!(body["chunks_stored"], 5);
+        assert_eq!(body["issues"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn same_file_partial_ingest_is_not_reported_as_success() {
+        // Reviewer reproduction at the receipt layer: one file, one chunk
+        // stored, one failed. Must not render as status=ingested stored=1
+        // failed=0.
+        let mut report = IngestReport {
+            attempted: 1,
+            chunks: 2,
+            root: "/watch/docs".into(),
+            ..Default::default()
+        };
+        report.note_chunk_stored("/watch/docs/a.md");
+        report.note_chunk_failed("/watch/docs/a.md");
+        report.finalize_store();
+
+        let body = ingest_response("/watch/docs/a.md", &report);
+        assert_eq!(body["status"], "partial");
+        assert_eq!(body["stored"], 0);
+        assert_eq!(body["failed"], 1);
+        assert_eq!(body["partial_files"], 1);
+        assert_eq!(body["chunks"], 2);
+        assert_eq!(body["chunks_stored"], 1);
+        assert_eq!(body["issues"][0]["path"], "a.md");
+        assert_eq!(body["issues"][0]["reason"], "store_failed");
+    }
+
+    #[test]
+    fn partial_ingest_reports_sanitized_issues_only() {
+        let mut report = IngestReport {
+            attempted: 3,
+            stored: 2,
+            failed: 1,
+            base_failures: 1,
+            chunks_stored: 4,
+            root: "/watch/docs".into(),
+            ..Default::default()
+        };
+        report.push_issue(IngestIssue {
+            path: "sub/bad.md".into(),
+            outcome: IssueOutcome::Failed,
+            reason: IssueReason::InvalidUtf8,
+        });
+        let body = ingest_response("/watch/docs", &report);
+
+        assert_eq!(body["status"], "partial");
+        let issues = body["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0]["path"], "sub/bad.md");
+        assert_eq!(issues[0]["outcome"], "failed");
+        assert_eq!(issues[0]["reason"], "invalid_utf8");
+
+        // The body must not carry raw error text, absolute paths or server detail.
+        let rendered = body.to_string();
+        assert!(!rendered.contains("No such file"), "{rendered}");
+        assert!(!rendered.contains("Permission denied"), "{rendered}");
+        assert!(!rendered.contains("os error"), "{rendered}");
+        let issues_json = serde_json::to_string(issues).unwrap();
+        assert!(
+            !issues_json.contains("/watch"),
+            "issue paths must be relative: {issues_json}"
+        );
+    }
+
+    #[test]
+    fn nothing_stored_with_failure_reports_failed() {
+        let report = IngestReport {
+            attempted: 1,
+            failed: 1,
+            base_failures: 1,
+            ..Default::default()
+        };
+        assert_eq!(ingest_response("/tmp/x", &report)["status"], "failed");
+    }
+
+    #[test]
+    fn nothing_to_ingest_reports_empty() {
+        let report = IngestReport::default();
+        assert_eq!(ingest_response("/tmp/x", &report)["status"], "empty");
+    }
 }

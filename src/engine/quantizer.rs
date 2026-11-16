@@ -82,6 +82,12 @@ impl TurboQuantVectorIndex {
     }
 
     /// Load index + companion id_map from disk.
+    ///
+    /// The two files are renamed into place one after the other, so a crash can
+    /// leave a new `.tv` beside an old id map (or a foreign `.tv` beside a
+    /// deliberately matching map). The slot count and the map length must agree
+    /// or the pair is refused: a wrong slot→UUID mapping returns the wrong
+    /// memory for a score, which no later check can undo.
     pub fn load(index_path: &str, id_map_path: &str, dim: usize, bit_width: usize) -> Result<Self> {
         let index = TurboQuantIndex::load(index_path)
             .with_context(|| format!("Failed to load TurboVec index from {}", index_path))?;
@@ -89,17 +95,40 @@ impl TurboQuantVectorIndex {
             .with_context(|| format!("Failed to read id_map from {}", id_map_path))?;
         let id_map: Vec<String> = serde_json::from_str(&id_map_json)
             .with_context(|| format!("Failed to parse id_map from {}", id_map_path))?;
+        if index.len() != id_map.len() {
+            anyhow::bail!(
+                "TurboVec index {} holds {} vectors but its id map {} lists {} IDs: \
+                 refusing a mixed pair",
+                index_path,
+                index.len(),
+                id_map_path,
+                id_map.len()
+            );
+        }
         Ok(Self {
+            vector_count: index.len(),
             index,
             dim,
             bit_width,
-            vector_count: id_map.len(),
             id_map,
         })
     }
 
     pub fn vector_count(&self) -> usize {
         self.vector_count
+    }
+    /// Number of vectors actually present in the compressed file itself, as
+    /// opposed to the id map that is stored beside it.
+    pub fn slots(&self) -> usize {
+        self.index.len()
+    }
+    /// Memory IDs this index can currently answer for, in slot order.
+    ///
+    /// Used to prove a persisted index matches the live corpus by ID set rather
+    /// than by count: consolidation swaps deleted sources for summaries, so the
+    /// count can match while every affected ID is wrong.
+    pub fn ids(&self) -> &[String] {
+        &self.id_map
     }
     pub fn bit_width(&self) -> usize {
         self.bit_width
@@ -209,6 +238,7 @@ mod tests {
 
         let loaded = TurboQuantVectorIndex::load(&index_path, &id_map_path, dims, 4).unwrap();
         assert_eq!(loaded.vector_count(), 5);
+        assert_eq!(loaded.slots(), 5);
         assert_eq!(loaded.id_map.len(), 5);
         assert_eq!(loaded.id_map[0], "test-0");
         assert_eq!(loaded.id_map[4], "test-4");
@@ -216,6 +246,44 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_file(&index_path);
         let _ = std::fs::remove_file(&id_map_path);
+    }
+
+    /// A `.tv` and an id map are renamed into place separately, so a crash (or a
+    /// hand-restored backup) can pair a stale index with a fresh map of a
+    /// different length. Every slot would then resolve to the wrong memory, so
+    /// load must refuse the pair rather than trust the id-map length.
+    #[test]
+    fn test_load_rejects_a_pair_whose_lengths_disagree() {
+        let dims = 32;
+        let dir = std::env::temp_dir().join(format!("memex8-mixed-pair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index_path = dir.join("pair.tv").to_string_lossy().to_string();
+        let id_map_path = dir.join("pair-ids.json").to_string_lossy().to_string();
+
+        {
+            let mut index = TurboQuantVectorIndex::new(dims, 4);
+            let ids: Vec<String> = (0..3).map(|i| format!("slot-{}", i)).collect();
+            let vectors: Vec<Vec<f32>> = (0..3).map(|i| make_vector(dims, i)).collect();
+            index.add_batch(&ids, &vectors);
+            index.save(&index_path, &id_map_path).unwrap();
+        }
+        assert_eq!(
+            TurboQuantVectorIndex::load(&index_path, &id_map_path, dims, 4)
+                .unwrap()
+                .slots(),
+            3
+        );
+
+        // Keep the foreign 3-vector index, shrink the map to 2 IDs.
+        std::fs::write(&id_map_path, r#"["slot-0","slot-1"]"#).unwrap();
+        let error = match TurboQuantVectorIndex::load(&index_path, &id_map_path, dims, 4) {
+            Ok(_) => panic!("a 3-vector index beside a 2-ID map must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(error.contains("holds 3 vectors"), "{error}");
+        assert!(error.contains("lists 2 IDs"), "{error}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

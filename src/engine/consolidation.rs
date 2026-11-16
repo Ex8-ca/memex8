@@ -86,7 +86,7 @@ impl Engine {
                 no_consolidate_until: operation.cooldown_until,
             });
         }
-        if !["prepared", "complete", "restoring"].contains(&operation.state.as_str()) {
+        if !["prepared", "deleting", "complete", "restoring"].contains(&operation.state.as_str()) {
             return Err(
                 RecoveryError::Conflict("Unknown consolidation journal state".into()).into(),
             );
@@ -123,7 +123,7 @@ impl Engine {
 
         // Invalidate both memory and disk caches before restoring sources. Search
         // falls back to Qdrant until slumber builds a fresh compressed index.
-        self.invalidate_search_index().await?;
+        self.invalidate_compressed_index().await;
         let mut restored = 0;
         let mut retained = 0;
         let mut embedder = None;
@@ -199,10 +199,22 @@ impl Engine {
         }
         if let Some(summary) = summary {
             self.store.delete_consolidation_snapshot(&summary).await?;
+            // The summary is gone; drop graph edges and association entries that
+            // name it so traversal and `related_memory_ids` cannot return an ID
+            // that no longer resolves.
+            self.store.prune_duplicate_references(&summary.id).await?;
         }
         self.store
             .update_consolidation_state(&mut operation, "restored")
             .await?;
+        // The summary is deleted and every source is back, so both derived search
+        // structures describe a corpus that no longer exists. The compressed index
+        // is already gone; rebuild the keyword index from the restored corpus so
+        // keyword-only hits (summaries, rare terms) follow the same change.
+        self.invalidate_compressed_index().await;
+        if let Err(e) = self.rebuild_lexical_index().await {
+            tracing::warn!("Lexical index rebuild after undo failed: {e}");
+        }
         tracing::info!(summary_id = id, restored, retained, "Consolidation undone");
         Ok(UnconsolidateResult {
             summary_id: id.into(),

@@ -6,9 +6,23 @@ use axum::middleware::Next;
 use axum::response::Response;
 use std::sync::Arc;
 
+/// Paths that are intentionally reachable without credentials.
+///
+/// Health is public *by design*: `docker-compose.yml` probes
+/// `/api/v1/health` with plain `curl` and no `Authorization` header, so the
+/// container is marked unhealthy by its own healthcheck if health requires a
+/// key. `/health` is the legacy alias used by the test fixtures and by
+/// reverse proxies. Both routes are mounted on the auth-guarded router, so
+/// this list — not route placement — is what keeps them open.
+///
+/// Nothing else belongs here. Every other path must fail closed.
+pub fn is_public_path(path: &str) -> bool {
+    matches!(path.trim_end_matches('/'), "/health" | "/api/v1/health")
+}
+
 /// Bearer token auth middleware.
-/// Validates `Authorization: Bearer <key>` against the configured API key.
-/// Exempts `/health` endpoint.
+/// Validates `Authorization: Bearer *** against the configured API key.
+/// Exempts only the health endpoints listed in [`is_public_path`].
 pub async fn auth_middleware(
     state: axum::extract::State<Arc<AppState>>,
     req: Request<Body>,
@@ -16,8 +30,8 @@ pub async fn auth_middleware(
 ) -> Result<Response, (StatusCode, &'static str)> {
     let path = req.uri().path();
 
-    // Exempt health check
-    if path == "/health" {
+    // Public-by-design health probes; see `is_public_path`.
+    if is_public_path(path) {
         return Ok(next.run(req).await);
     }
 

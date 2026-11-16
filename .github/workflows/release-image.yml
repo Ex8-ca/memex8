@@ -3,6 +3,11 @@ name: Release image
 # Builds the Docker image and publishes it to GitHub Container Registry when a
 # version tag (v0.2.0, v1.0.0, ...) is pushed. Tags: <version>, <major>.<minor>
 # and latest. linux/amd64 only.
+#
+# Publication is gated: the image is built and smoke-run locally first, and the
+# job does not start until the test suite passes. A tag used to publish a
+# completely untested build, so a broken release was only discoverable by
+# pulling it.
 on:
   push:
     tags: ["v*"]
@@ -13,7 +18,37 @@ permissions:
   packages: write
 
 jobs:
+  verify:
+    name: Verify before publishing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (OpenBLAS for ndarray)
+        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run test suite
+        run: cargo test --
+
   image:
+    name: Build, smoke-test and publish
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,11 +70,72 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
+      # Build and load without pushing, so the smoke test runs on the exact
+      # image that would be published.
       - uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          push: false
+          load: true
+          tags: memex8-smoke:local
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Smoke-test the built image
+        run: |
+          set -euo pipefail
+          # The engine connects to Qdrant *before* it binds the HTTP listener, so
+          # the smoke container needs a real, reachable Qdrant or it exits before
+          # the health probe. memex8 talks to Qdrant over gRPC (port 6334); the
+          # /healthz liveness check is on the HTTP port (6333). Publish both.
+          #
+          # The embedding env mirrors docker-compose.yml (EMBEDDING_PROVIDER=openai,
+          # text-embedding-3-small, 1536d). A dummy OPENAI_API_KEY is enough: the
+          # provider client is constructed lazily and the health probe never
+          # embeds, so no real API call (or secret) is needed to boot the image.
+          docker network create memex8-smoke-net >/dev/null
+          docker run -d --name memex8-smoke-qdrant --network memex8-smoke-net \
+            -p 16333:6333 -p 16334:6334 qdrant/qdrant:v1.17.0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:16333/healthz >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          docker run -d --name memex8-smoke --network memex8-smoke-net -p 18080:8080 \
+            -e MEMEX8_API_KEY=smoke-test-key \
+            -e QDRANT_URL=http://memex8-smoke-qdrant:6334 \
+            -e EMBEDDING_PROVIDER=openai \
+            -e EMBEDDING_MODEL=text-embedding-3-small \
+            -e EMBEDDING_DIMENSIONS=1536 \
+            -e OPENAI_API_KEY=sk-smoke-test-dummy \
+            memex8-smoke:local
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/api/v1/health | grep -q OK; then
+              echo "health OK after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::image did not become healthy; refusing to publish"
+          docker logs memex8-smoke || true
+          exit 1
+        # The containers are removed in an always-running step below so a failed
+        # smoke test still cleans up.
+
+      - name: Remove smoke container
+        if: always()
+        run: |
+          docker rm -f memex8-smoke || true
+          docker rm -f memex8-smoke-qdrant || true
+          docker network rm memex8-smoke-net || true
+
+      - name: Push the verified image
+        run: |
+          set -euo pipefail
+          echo "${{ steps.meta.outputs.tags }}" | while read -r tag; do
+            [ -n "$tag" ] || continue
+            docker tag memex8-smoke:local "$tag"
+            docker push "$tag"
+          done
