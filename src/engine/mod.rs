@@ -14,6 +14,7 @@ pub mod graph;
 pub mod ingester;
 pub mod lexical;
 pub mod memex8_md;
+pub mod person_lookup;
 pub mod providers;
 pub mod quantizer;
 pub mod query_intent;
@@ -920,6 +921,47 @@ impl Engine {
             results
         };
 
+        // Person lookup ("who is X"): long-lived memories naming X join the
+        // candidates even below `min_score` -- the name match is the evidence --
+        // and are ranked ahead of everything else below. Tag-filtered searches
+        // and every other query shape are unaffected.
+        let person_terms = if tags.is_none_or(|t| t.is_empty()) {
+            person_lookup::person_terms(query)
+        } else {
+            Vec::new()
+        };
+        let mut person_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let results = if person_terms.is_empty() {
+            results
+        } else {
+            let mut results = results;
+            match self
+                .store
+                .score_by_types(
+                    query_vector,
+                    person_lookup::LONG_LIVED_TYPES,
+                    person_lookup::CANDIDATES,
+                    realm,
+                    visibility,
+                )
+                .await
+            {
+                Ok(found) => {
+                    for r in found {
+                        if !person_lookup::names_all(&r.payload.content, &person_terms) {
+                            continue;
+                        }
+                        person_ids.insert(r.payload.id.clone());
+                        if !results.iter().any(|(_, p)| p.id == r.payload.id) {
+                            results.push((r.score, r.payload));
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("Person lookup skipped: {e}"),
+            }
+            results
+        };
+
         // Kept-and-remembered dreams are real memories of type `dream`; keep them out of
         // every search unless the caller explicitly filters on the `dream` tag.
         let results: Vec<_> = dream::exclude_dream_memories(results, tags)
@@ -976,6 +1018,10 @@ impl Engine {
             })
             .collect();
         results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        if !person_ids.is_empty() {
+            // Stable: each group keeps its score order.
+            results.sort_by_key(|(_, p)| !person_ids.contains(&p.id));
+        }
 
         // Apply pagination
         let results: Vec<_> = results.into_iter().skip(offset).take(limit).collect();
