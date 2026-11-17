@@ -211,7 +211,25 @@ pub struct GraphEdge {
 pub struct QdrantStore {
     client: Qdrant,
     /// Serialize certification with content replacement and local maintenance.
+    /// Readers take the shared side; short maintenance writers take the
+    /// exclusive side (after `maintenance_writer`) so a response is never built
+    /// from a memory an erasure is removing.
     certification_gate: Arc<super::gate::MaintenanceGate>,
+    /// Serializes maintenance writers with each other. Readers never take it.
+    /// Slumber holds only this lock for its whole run, so it excludes
+    /// certification, edits, deletes, undo and backups without stalling every
+    /// API read for the duration of the run (slumber refuses to run when
+    /// evidence is present, so it never needs the reader-facing exclusion).
+    /// Lock order: `maintenance_writer` before `certification_gate`.
+    maintenance_writer: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// Exclusive access for a short maintenance write: the writer lock (other
+/// maintenance writers, including slumber) plus the reader-facing gate.
+/// Fields drop in declaration order, releasing readers first.
+pub struct MaintenanceGuard<'a> {
+    _gate: tokio::sync::RwLockWriteGuard<'a, ()>,
+    _writer: tokio::sync::MutexGuard<'a, ()>,
 }
 
 const MEMORIES: &str = "memories";
@@ -528,6 +546,7 @@ impl QdrantStore {
         Ok(Self {
             client,
             certification_gate: Arc::new(super::gate::MaintenanceGate::new()),
+            maintenance_writer: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -871,9 +890,21 @@ impl QdrantStore {
         Ok(())
     }
 
-    /// Shared guard for local maintenance/content replacement.
-    pub async fn maintenance_guard(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
-        self.certification_gate.write().await
+    /// Exclusive guard for local maintenance/content replacement: waits for
+    /// any running slumber (or other maintenance writer), then for readers.
+    pub async fn maintenance_guard(&self) -> MaintenanceGuard<'_> {
+        let writer = self.maintenance_writer.lock().await;
+        let gate = self.certification_gate.write().await;
+        MaintenanceGuard {
+            _gate: gate,
+            _writer: writer,
+        }
+    }
+
+    /// Slumber's guard: excludes every other maintenance writer for the whole
+    /// run, but not readers, so searches and stats keep answering while it runs.
+    pub async fn slumber_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.maintenance_writer.lock().await
     }
     pub async fn maintenance_read_guard(&self) -> super::gate::ReadPermit<'_> {
         self.certification_gate.read().await
@@ -898,7 +929,9 @@ impl QdrantStore {
         note: Option<&str>,
     ) -> anyhow::Result<Option<MemoryPoint>> {
         self.refuse_evidence_mutation(id).await?;
-        let _guard = self.certification_gate.write().await;
+        // Certification must stay serialized with slumber's archive/decay
+        // writes, so it takes the writer lock as well as the gate.
+        let _guard = self.maintenance_guard().await;
         let Some(mut memory) = self.get_memory(id).await? else {
             return Ok(None);
         };

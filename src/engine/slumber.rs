@@ -111,7 +111,18 @@ impl SlumberEngine {
         if std::env::var("MEMEX8_TEST_PANIC_SLUMBER").is_ok() {
             panic!("injected slumber panic for the status-reset regression");
         }
-        let _certification_guard = self.store.maintenance_guard().await;
+        // Writer-only: excludes certification, edits, deletes, undo and backups
+        // for the whole run, but never blocks API reads (see `slumber_guard`).
+        let _maintenance_writer = self.store.slumber_guard().await;
+        // Debug-only failpoint: hold the run open so a test can prove reads are
+        // served while slumber runs and maintenance writers still wait for it.
+        #[cfg(debug_assertions)]
+        if let Some(ms) = std::env::var("MEMEX8_TEST_SLUMBER_HOLD_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
         let path = Path::new(&self.config.turbovec.index_path)
             .parent()
             .unwrap_or_else(|| Path::new("data"))

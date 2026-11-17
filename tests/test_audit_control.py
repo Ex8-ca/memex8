@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import socket
 import subprocess
+import threading
 import time
 import unittest
 import urllib.error
@@ -321,6 +322,48 @@ class AuditControlTests(unittest.TestCase):
             self.assertEqual({p["id"] for p in points(f)}, set(ids))
             self.assertIn(remaining, {p["id"] for p in points(f)})
 
+
+    def test_reads_are_served_while_slumber_runs_and_writers_wait(self):
+        """Slumber used to hold the reader-facing gate exclusively for its whole
+        run, so every gated API read (search, stats, GET) queued behind it: the
+        hourly run blacked out recall for its full duration and clients timed
+        out. Reads must answer while it runs; maintenance writers (archive here)
+        must still wait for it to finish."""
+        hold = 4.0
+        with fixture(extra_env={"MEMEX8_TEST_SLUMBER_HOLD_MS": str(int(hold * 1000))}) as f:
+            target = store(f, "Memory archived while slumber runs")
+            done = {}
+
+            def run_slumber():
+                done["started"] = time.monotonic()
+                f["api"]("/slumber/trigger", {}, "POST")
+                done["finished"] = time.monotonic()
+
+            runner = threading.Thread(target=run_slumber)
+            runner.start()
+            time.sleep(0.8)  # the run has taken its guard and is holding
+
+            start = time.monotonic()
+            f["api"]("/stats")
+            f["api"]("/memories/search", {"query": "archived", "limit": 5}, "POST")
+            read_seconds = time.monotonic() - start
+            self.assertLess(
+                read_seconds, hold / 2,
+                f"reads waited {read_seconds:.1f}s for slumber instead of answering",
+            )
+            self.assertTrue(runner.is_alive(), "slumber finished before the reads were measured")
+
+            # About `hold - 1s` of the run remains; an archive must wait it out.
+            archive_start = time.monotonic()
+            f["api"](f"/memories/{target}/archive", {}, "POST")
+            archive_wait = time.monotonic() - archive_start
+            runner.join(timeout=60)
+            self.assertIn("finished", done, "slumber trigger did not complete")
+            self.assertGreater(
+                archive_wait, 1.0,
+                f"archive finished in {archive_wait:.2f}s: a maintenance writer "
+                "ran concurrently with slumber",
+            )
 
     def test_archive_refuses_certified_but_explicit_delete_is_allowed(self):
         with fixture() as f:
