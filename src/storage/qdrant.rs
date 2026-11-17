@@ -572,7 +572,12 @@ impl QdrantStore {
 
         // Also install the index for existing collections; creation is idempotent.
         // `source_hash` backs idempotent webhook ingestion (exact-content lookup).
-        for field in ["verification_status", "related_memory_ids", "source_hash"] {
+        for field in [
+            "verification_status",
+            "related_memory_ids",
+            "source_hash",
+            "memory_type",
+        ] {
             self.client
                 .create_field_index(
                     CreateFieldIndexCollectionBuilder::new(MEMORIES, field, FieldType::Keyword)
@@ -1123,6 +1128,48 @@ impl QdrantStore {
     /// Cosine-score a given set of memory IDs against `vector`, applying the same
     /// realm/visibility filter as search. Missing or filtered-out IDs are simply
     /// absent. Used to give keyword-only candidates a real similarity score.
+    /// Score memories of the given types against `vector` (best first), under
+    /// the same realm/visibility retrieval filter as search. Used by person
+    /// lookup to reach long-lived facts that rank below the dense candidates.
+    pub async fn score_by_types(
+        &self,
+        vector: &[f32],
+        types: &[&str],
+        limit: usize,
+        realm: Option<&str>,
+        visibility: Option<&str>,
+    ) -> anyhow::Result<Vec<SearchResult>> {
+        if types.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut filter = Self::retrieval_filter(realm, None, visibility);
+        filter.must.push(Condition::matches(
+            "memory_type",
+            types.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+        ));
+        let result = self
+            .client
+            .search_points(
+                SearchPointsBuilder::new(MEMORIES, vector, limit as u64)
+                    .filter(filter)
+                    .with_payload(true)
+                    .with_vectors(false),
+            )
+            .await?;
+        Ok(result
+            .result
+            .into_iter()
+            .map(|r| {
+                let id = point_id_to_string(r.id.as_ref());
+                SearchResult {
+                    payload: memory_from_payload(&id, &map_to_json(&r.payload)),
+                    id,
+                    score: r.score,
+                }
+            })
+            .collect())
+    }
+
     pub async fn score_ids(
         &self,
         vector: &[f32],
