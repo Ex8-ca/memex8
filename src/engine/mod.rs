@@ -26,6 +26,7 @@ pub mod session;
 pub mod slumber;
 pub mod timeline;
 pub mod watcher;
+pub mod write;
 
 use crate::config::AppConfig;
 pub use crate::engine::watcher::{FileChangeEvent, FileWatcher};
@@ -35,6 +36,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+pub use write::{Dedup, NewMemory, Visibility};
 
 /// Whether a persisted compressed index may be trusted for the live corpus.
 ///
@@ -168,7 +170,7 @@ pub struct Engine {
     turbovec_index: Arc<RwLock<Option<LoadedIndex>>>,
     /// Bumped (under the `turbovec_index` write lock) by every invalidation.
     compressed_index_generation: Arc<AtomicU64>,
-    /// Per-content-hash locks for `store_memory_once`, so two identical
+    /// Per-content-hash locks for `write_memory` with `Dedup::Identical`, so two identical
     /// concurrent writes cannot both miss the existing-memory lookup.
     idempotency_locks: IdempotencyLocks,
     /// BM25 keyword index (a cache rebuilt from Qdrant; see `lexical`).
@@ -313,15 +315,14 @@ impl Engine {
             return self.dreams.keep(id);
         }
         let memory_id = self
-            .store_memory(
-                &dream::memory_text_for(&d),
-                Some(vec![dream::DREAM_TYPE.to_string()]),
-                None,
-                Some("dream"),
-                None,
-                Some(dream::DREAM_TYPE),
-            )
-            .await?;
+            .write_memory(NewMemory {
+                tags: vec![dream::DREAM_TYPE.to_string()],
+                source: Some("dream"),
+                memory_type: Some(dream::DREAM_TYPE),
+                ..NewMemory::new(&dream::memory_text_for(&d))
+            })
+            .await?
+            .id;
         self.dreams.keep_remembered(id, &memory_id)
     }
 
@@ -1738,210 +1739,6 @@ impl Engine {
         &self,
     ) -> anyhow::Result<crate::storage::qdrant::VerificationStatusCounts> {
         self.store.count_by_verification_status().await
-    }
-
-    pub async fn store_memory(
-        &self,
-        content: &str,
-        tags: Option<Vec<String>>,
-        realm_hint: Option<&str>,
-        source: Option<&str>,
-        visibility: Option<&str>,
-        memory_type: Option<&str>,
-    ) -> anyhow::Result<String> {
-        self.store_memory_with_certification(
-            content,
-            tags,
-            realm_hint,
-            source,
-            visibility,
-            memory_type,
-            false,
-        )
-        .await
-    }
-
-    pub async fn store_memory_with_certification(
-        &self,
-        content: &str,
-        tags: Option<Vec<String>>,
-        realm_hint: Option<&str>,
-        source: Option<&str>,
-        visibility: Option<&str>,
-        memory_type: Option<&str>,
-        certified: bool,
-    ) -> anyhow::Result<String> {
-        self.store_memory_inner(
-            content,
-            tags,
-            realm_hint,
-            source,
-            visibility,
-            memory_type,
-            certified,
-            "",
-        )
-        .await
-    }
-
-    /// Store `content` unless an identical memory already exists: same content,
-    /// `memory_type`, tags, source and visibility. Returns the memory ID and
-    /// whether a new memory was written.
-    ///
-    /// Callers that re-send the same record (a session archived again at every
-    /// compaction or cache eviction, or a host that fires its end-of-session
-    /// hook twice) otherwise store one copy per send. The stored `source_hash`
-    /// is the content hash, the same meaning import gives it, so slumber's
-    /// exact-duplicate detection also recognises these memories. Writes are
-    /// serialized per hash, so concurrent identical sends cannot both miss.
-    pub async fn store_memory_once(
-        &self,
-        content: &str,
-        tags: Vec<String>,
-        realm_hint: Option<&str>,
-        source: &str,
-        visibility: &str,
-        memory_type: Option<&str>,
-    ) -> anyhow::Result<(String, bool)> {
-        let content = redaction::required(content)?;
-        let hash = crate::storage::qdrant::content_hash(&content);
-        let lock = self.idempotency_locks.get(&hash);
-        let _held = lock.lock().await;
-
-        let source = redaction::text(source);
-        let memory_type = redaction::text(memory_type.unwrap_or("general"));
-        let visibility = crate::storage::qdrant::normalize_visibility(visibility).to_string();
-        let mut wanted_tags: Vec<String> = tags.iter().map(|t| redaction::text(t)).collect();
-        wanted_tags.sort();
-        wanted_tags.dedup();
-        let erased = self.erased_ids()?;
-        for existing in self.store.memories_with_source_hash(&hash, 16).await? {
-            let mut existing_tags = existing.tags.clone();
-            existing_tags.sort();
-            existing_tags.dedup();
-            if !erased.contains(&existing.id)
-                && existing.content == content
-                && existing.memory_type == memory_type
-                && existing.visibility == visibility
-                && existing.source_file.as_deref() == Some(source.as_str())
-                && existing_tags == wanted_tags
-            {
-                return Ok((existing.id, false));
-            }
-        }
-        let id = self
-            .store_memory_inner(
-                &content,
-                Some(tags),
-                realm_hint,
-                Some(&source),
-                Some(&visibility),
-                Some(&memory_type),
-                false,
-                &hash,
-            )
-            .await?;
-        Ok((id, true))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn store_memory_inner(
-        &self,
-        content: &str,
-        tags: Option<Vec<String>>,
-        realm_hint: Option<&str>,
-        source: Option<&str>,
-        visibility: Option<&str>,
-        memory_type: Option<&str>,
-        certified: bool,
-        source_hash: &str,
-    ) -> anyhow::Result<String> {
-        let clean_content = redaction::required(content)?;
-        let content = clean_content.as_str();
-        let tags = tags.map(|tags| {
-            tags.into_iter()
-                .map(|s| redaction::text(&s))
-                .collect::<Vec<_>>()
-        });
-        let clean_realm = realm_hint.map(redaction::text);
-        let realm_hint = clean_realm.as_deref();
-        let clean_source = source.map(redaction::text);
-        let source = clean_source.as_deref();
-        let clean_type = memory_type.map(redaction::text);
-        let memory_type = clean_type.as_deref();
-        let embedder = self.make_embedder()?;
-        let vector = embedder.embed(content).await?;
-
-        let id = uuid::Uuid::new_v4().to_string();
-
-        // Assign to realm
-        let realm_id = if let Some(hint) = realm_hint {
-            self.store.find_realm_by_name(hint).await?.map(|r| r.id)
-        } else {
-            None
-        };
-
-        let realm_id = match realm_id {
-            Some(rid) => rid,
-            None => self.auto_assign_realm(&vector).await?,
-        };
-
-        let realm = self.store.get_realm(&realm_id).await?;
-        let realm_name = realm.map(|r| r.name.clone()).unwrap_or_default();
-
-        let source_str = source.unwrap_or("manual");
-
-        // Infer reaction score from content
-        let reaction_score = crate::engine::reactions::infer_reaction(content);
-
-        // Default to "private" — callers must explicitly opt in to sharing.
-        let visibility_str =
-            crate::storage::qdrant::normalize_visibility(visibility.unwrap_or("private"));
-
-        // Caller-supplied memory_type wins; default to "general" only when
-        // omitted. The 7-day Weibull decay for "general" is too aggressive
-        // for personal-knowledge memories — callers should set type
-        // explicitly (profile, preference, entity, etc) for 365-day
-        // retention.
-        let memory_type_str = memory_type.unwrap_or("general");
-
-        // A new memory is not in any compressed index built earlier, and search
-        // prefers that index. Drop it before the write so the new memory is
-        // visible immediately instead of only after the next restart.
-        self.invalidate_compressed_index().await;
-        self.store
-            .store_memory_with_tags(
-                &id,
-                &vector,
-                content,
-                None,
-                Some(source_str),
-                &realm_id,
-                &realm_name,
-                source_hash,
-                "manual",
-                memory_type_str,
-                reaction_score,
-                visibility_str,
-                tags.as_deref().unwrap_or(&[]),
-                certified,
-            )
-            .await?;
-        // Invalidate again now the write is durable: a reload that verified the
-        // corpus before this write landed must not keep its map (see
-        // `reload_compressed_index`).
-        self.invalidate_compressed_index().await;
-
-        {
-            let mut text = content.to_string();
-            for t in tags.as_deref().unwrap_or(&[]) {
-                text.push(' ');
-                text.push_str(t);
-            }
-            self.lexical.write().await.upsert(&id, &text);
-        }
-
-        Ok(id)
     }
 
     pub async fn graph_search(

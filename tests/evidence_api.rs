@@ -982,11 +982,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     // Deterministic ordering: fetch -> writer queued -> response construction -> erase.
     let race_id = engine
         .store_with_evidence(
-            "publication race",
-            vec![],
-            None,
-            None,
-            None,
+            memex8::engine::NewMemory::new("publication race"),
             Some("publication-race"),
             &serde_json::from_value(request["evidence"].clone()).unwrap(),
         )
@@ -1088,11 +1084,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     ] {
         let race_id = engine
             .store_with_evidence(
-                "post publication race",
-                vec![],
-                None,
-                None,
-                None,
+                memex8::engine::NewMemory::new("post publication race"),
                 Some(path),
                 &serde_json::from_value(request["evidence"].clone()).unwrap(),
             )
@@ -1204,9 +1196,10 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .unwrap();
     // Pending intent keeps Qdrant payload but must not leak into timeline or graph.
     let neighbor = engine
-        .store_memory("graph neighbor", None, None, None, None, None)
+        .write_memory(memex8::engine::NewMemory::new("graph neighbor"))
         .await
-        .unwrap();
+        .unwrap()
+        .id;
     engine
         .store()
         .store_graph_edge(&memex8::storage::qdrant::GraphEdge {
@@ -1383,13 +1376,9 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .all(|m| m.id != crash_id));
     assert!(restarted
         .store_with_evidence(
-            "crash fixture unique phrase",
-            vec![],
-            None,
-            None,
-            None,
+            memex8::engine::NewMemory::new("crash fixture unique phrase"),
             Some("crash-fixture"),
-            &pending_capture
+            &pending_capture,
         )
         .await
         .is_err());

@@ -107,11 +107,15 @@ pub async fn call_tool(
                 .get("content")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Missing 'content' parameter"))?;
-            let tags = arguments.get("tags").and_then(|v| v.as_array()).map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            });
+            let tags: Vec<String> = arguments
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
             let realm_hint = arguments.get("realm_hint").and_then(|v| v.as_str());
             // MCP tool callers can opt in to public explicitly; default
             // to private so an MCP-driven capture session can't leak
@@ -121,18 +125,18 @@ pub async fn call_tool(
             let memory_type = arguments.get("memory_type").and_then(|v| v.as_str());
             let source = arguments.get("source").and_then(|v| v.as_str());
             let certified = super::tools::boolean_argument(&arguments, "certified")?;
-            let id = engine
-                .store_memory_with_certification(
-                    content,
+            let stored = engine
+                .write_memory(crate::engine::NewMemory {
                     tags,
                     realm_hint,
-                    source.or(Some("mcp")),
-                    visibility,
+                    source: source.or(Some("mcp")),
+                    visibility: crate::engine::Visibility::from_option(visibility),
                     memory_type,
                     certified,
-                )
+                    ..crate::engine::NewMemory::new(content)
+                })
                 .await?;
-            Ok(json!({ "id": id, "status": "stored" }))
+            Ok(json!({ "id": stored.id, "status": "stored" }))
         }
         "memex8_restore_duplicate" => {
             let operation_id = arguments

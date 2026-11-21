@@ -30,6 +30,10 @@ jobs:
         image: qdrant/qdrant:v1.17.0
         ports:
           - 6338:6334
+      write-qdrant:
+        image: qdrant/qdrant:v1.17.0
+        ports:
+          - 6339:6334
     steps:
       - uses: actions/checkout@v4
 
@@ -133,6 +137,11 @@ jobs:
         env:
           MCP_DISPATCH_QDRANT_URL: http://127.0.0.1:6338
         run: cargo test --test mcp_dispatch -- --ignored
+
+      - name: Test memory writes against disposable Qdrant
+        env:
+          MEMORY_WRITE_QDRANT_URL: http://127.0.0.1:6339
+        run: cargo test --test memory_write -- --ignored
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
