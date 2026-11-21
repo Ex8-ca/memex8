@@ -1856,8 +1856,36 @@ impl Engine {
         self.config.clone()
     }
 
-    /// Get the store reference.
-    pub fn store(&self) -> &QdrantStore {
+    /// The Qdrant store, for the modules inside `engine`. Code outside the
+    /// engine goes through Engine methods, [`Engine::gate`] for the maintenance
+    /// gate and [`Engine::set_certification`] for certification, so a change to
+    /// how memories are stored stays inside this module.
+    pub(in crate::engine) fn store(&self) -> &QdrantStore {
+        &self.store
+    }
+
+    /// The maintenance gate. Read-only transports hold its read side through
+    /// response construction so an erasure cannot commit between fetching a
+    /// memory and building the response (see `mcp::publish`).
+    pub fn gate(&self) -> &crate::storage::gate::MaintenanceGate {
+        self.store.gate()
+    }
+
+    /// Certify (or revoke certification of) a memory. `None` when it does not exist.
+    pub async fn set_certification(
+        &self,
+        id: &str,
+        revoke: bool,
+        by: Option<&str>,
+        note: Option<&str>,
+    ) -> anyhow::Result<Option<crate::storage::qdrant::MemoryPoint>> {
+        self.store.set_certification(id, revoke, by, note).await
+    }
+
+    /// Test-only access to the store, for asserting persisted state. Not for
+    /// production code: `tests/engine_seam.rs` fails if `src/` calls it.
+    #[doc(hidden)]
+    pub fn store_for_tests(&self) -> &QdrantStore {
         &self.store
     }
 

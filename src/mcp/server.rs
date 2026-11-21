@@ -78,7 +78,7 @@ pub async fn run_stdio(config: AppConfig) -> anyhow::Result<()> {
                 match super::publish::tool_name(&params) {
                     Ok(name) => {
                         super::publish::tool_response_line(
-                            e.store().gate(),
+                            e.gate(),
                             name,
                             id.as_ref(),
                             super::dispatch::call_tool(

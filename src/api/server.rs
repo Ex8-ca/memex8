@@ -46,7 +46,7 @@ pub async fn memory_read_response_gate(
     if request.method() != axum::http::Method::GET && !retrieval_post {
         return next.run(request).await;
     }
-    state.engine.store().read_gated(next.run(request)).await
+    state.engine.gate().read_gated(next.run(request)).await
 }
 
 pub async fn run(config: AppConfig, host: &str, port: u16) -> anyhow::Result<()> {

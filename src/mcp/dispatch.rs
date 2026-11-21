@@ -163,7 +163,6 @@ pub async fn call_tool(
             let by = arguments.get("by").and_then(|v| v.as_str());
             let note = arguments.get("note").and_then(|v| v.as_str());
             let memory = engine
-                .store()
                 .set_certification(memory_id, revoke, by, note)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", memory_id))?;

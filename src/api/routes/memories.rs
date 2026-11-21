@@ -153,7 +153,6 @@ pub async fn certify(
     let Json(req) = body.unwrap_or_default();
     let memory = state
         .engine
-        .store()
         .set_certification(&id, false, req.by.as_deref(), req.note.as_deref())
         .await?
         .ok_or_else(|| ApiError::NotFound(id))?;
@@ -166,7 +165,6 @@ pub async fn revoke_certification(
 ) -> Result<Json<crate::storage::qdrant::MemoryPoint>, ApiError> {
     let memory = state
         .engine
-        .store()
         .set_certification(&id, true, None, None)
         .await?
         .ok_or_else(|| ApiError::NotFound(id))?;

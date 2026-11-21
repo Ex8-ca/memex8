@@ -97,7 +97,7 @@ pub async fn sse_handler(
                     }
                     "tools/call" => match super::publish::tool_name(&params) {
                         Ok(name) => match super::publish::tool_response_line(
-                            engine.store().gate(),
+                            engine.gate(),
                             name,
                             id.as_ref(),
                             super::dispatch::call_tool(

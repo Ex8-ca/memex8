@@ -428,7 +428,7 @@ async fn main() -> anyhow::Result<()> {
             // erasure cannot commit between the fetch and this output string.
             // Standard output delivery afterwards is not covered by the guard.
             let output = engine
-                .store()
+                .gate()
                 .read_gated(async {
                     let results = engine
                         .search(&query, realm.as_deref(), None, limit, 0, min_score)
@@ -456,7 +456,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Get { id } => {
             let engine = engine::Engine::new(config).await?;
             let output = engine
-                .store()
+                .gate()
                 .read_gated(async {
                     let memory = engine.get_memory(&id).await?;
                     anyhow::Ok(serde_json::to_string_pretty(&memory)?)
@@ -467,7 +467,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Recall { limit, realm } => {
             let engine = engine::Engine::new(config).await?;
             let output = engine
-                .store()
+                .gate()
                 .read_gated(async {
                     let memories = engine.recall(limit, realm.as_deref()).await?;
                     let mut output = String::new();
