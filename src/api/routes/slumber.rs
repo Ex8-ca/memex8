@@ -36,7 +36,7 @@ pub async fn trigger(
 pub async fn pause(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, crate::api::error::ApiError> {
-    state.engine.pause_slumber().await?;
+    state.engine.slumber_pause().set(true)?;
     Ok(Json(status_body(&state, "slumber_paused").await))
 }
 
@@ -44,7 +44,7 @@ pub async fn pause(
 pub async fn resume(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, crate::api::error::ApiError> {
-    state.engine.resume_slumber().await?;
+    state.engine.slumber_pause().set(false)?;
     Ok(Json(status_body(&state, "slumber_resumed").await))
 }
 
@@ -54,6 +54,6 @@ async fn status_body(state: &Arc<AppState>, action: &str) -> serde_json::Value {
         "status": action,
         "paused": status.paused,
         "slumber_state": status.state,
-        "pause_file": state.engine.slumber_pause_path(),
+        "pause_file": state.engine.slumber_pause().path(),
     })
 }

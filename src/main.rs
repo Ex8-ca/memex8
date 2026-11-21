@@ -591,8 +591,9 @@ async fn main() -> anyhow::Result<()> {
             // an operator can stop maintenance precisely when the store is
             // degraded. The scheduler re-reads the flag on every tick.
             let paused = matches!(action, SlumberActions::Pause);
-            let path = engine::slumber_pause_path(&config);
-            engine::write_slumber_pause(&path, paused)?;
+            let pause = engine::slumber_pause::SlumberPause::for_config(&config);
+            pause.set(paused)?;
+            let path = pause.path();
             if paused {
                 println!("⏸️  Slumber paused for every process using {path}");
                 println!(
@@ -617,7 +618,7 @@ async fn main() -> anyhow::Result<()> {
                 SlumberActions::Status => {
                     let status = engine.slumber_status().await;
                     println!("{}", serde_json::to_string_pretty(&status)?);
-                    println!("pause file: {}", engine.slumber_pause_path());
+                    println!("pause file: {}", engine.slumber_pause().path());
                 }
                 SlumberActions::Trigger => {
                     println!("💤 Triggering slumber...");
