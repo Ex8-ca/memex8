@@ -1,5 +1,4 @@
 use crate::api::server::AppState;
-use crate::engine::Engine;
 use crate::mcp::tools;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -83,7 +82,9 @@ pub async fn sse_handler(
                 // read gate is held, so an erasure cannot commit between fetch and
                 // response construction. SSE delivery after that is not covered.
                 let response: String = match method {
-                    "initialize" => success_line(id.as_ref(), &handle_initialize()),
+                    "initialize" => {
+                        success_line(id.as_ref(), &Ok(super::dispatch::initialize_result()))
+                    }
                     "initialized" | "notifications/initialized" => {
                         if id.is_none() {
                             continue;
@@ -99,7 +100,11 @@ pub async fn sse_handler(
                             engine.store().gate(),
                             name,
                             id.as_ref(),
-                            handle_tool_call(&engine, &params),
+                            super::dispatch::call_tool(
+                                &engine,
+                                name,
+                                super::publish::tool_arguments(&params),
+                            ),
                         )
                         .await
                         {
@@ -225,253 +230,4 @@ fn error_line(id: Option<&serde_json::Value>, error: &anyhow::Error) -> String {
         "error": { "code": -32603, "message": error.to_string() },
     }))
     .unwrap_or_else(|_| "{}".into())
-}
-
-/// Handle MCP tool calls by dispatching to the Engine.
-async fn handle_tool_call(
-    engine: &Engine,
-    params: &serde_json::Value,
-) -> anyhow::Result<serde_json::Value> {
-    let name = params
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Missing tool name"))?;
-    let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-
-    match name {
-        "memex8_timeline" => {
-            let request = serde_json::from_value(arguments.clone())?;
-            Ok(serde_json::to_value(
-                engine.timeline_request(request).await?,
-            )?)
-        }
-        "memex8_search" => {
-            let compact = super::tools::boolean_argument(&arguments, "compact")?;
-            let query = arguments
-                .get("query")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Missing 'query' parameter"))?;
-            let limit = arguments
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(10) as usize;
-            let realm = arguments.get("realm").and_then(|v| v.as_str());
-            let min_score = arguments
-                .get("min_score")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.3) as f32;
-
-            let tags: Option<Vec<String>> = arguments
-                .get("tags")
-                .map(|v| serde_json::from_value(v.clone()))
-                .transpose()?;
-            let visibility = arguments.get("visibility").and_then(|v| v.as_str());
-            let outcome = engine
-                .search_with_coverage(
-                    query,
-                    realm,
-                    tags.as_deref(),
-                    limit,
-                    0,
-                    min_score,
-                    visibility,
-                )
-                .await?;
-            super::tools::with_coverage(format_results(outcome.results, compact), &outcome.coverage)
-        }
-        "memex8_store" | "memex8_remember" => {
-            let content = arguments
-                .get("content")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Missing 'content' parameter"))?;
-            let tags = arguments.get("tags").and_then(|v| v.as_array()).map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            });
-            let realm_hint = arguments.get("realm_hint").and_then(|v| v.as_str());
-            // MCP tool callers can opt in to public explicitly; default
-            // to private so an MCP-driven capture session can't leak
-            // everything it touches to the A2A bridge.
-            let visibility = arguments.get("visibility").and_then(|v| v.as_str());
-
-            let memory_type = arguments.get("memory_type").and_then(|v| v.as_str());
-            let source = arguments.get("source").and_then(|v| v.as_str());
-            let certified = super::tools::boolean_argument(&arguments, "certified")?;
-            let id = engine
-                .store_memory_with_certification(
-                    content,
-                    tags,
-                    realm_hint,
-                    source.or(Some("mcp")),
-                    visibility,
-                    memory_type,
-                    certified,
-                )
-                .await?;
-            Ok(json!({ "id": id, "status": "stored" }))
-        }
-        "memex8_restore_duplicate" => {
-            let operation_id = arguments
-                .get("operation_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("operation_id is required"))?;
-            let result = engine.restore_duplicate(operation_id).await?;
-            Ok(json!({"content": [{"type": "text", "text": serde_json::to_string(&result)?}]}))
-        }
-        "memex8_unconsolidate" => {
-            let memory_id = arguments
-                .get("memory_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("memory_id is required"))?;
-            let result = engine.unconsolidate(memory_id).await?;
-            Ok(json!({"content": [{"type": "text", "text": serde_json::to_string(&result)?}]}))
-        }
-        "memex8_certify" => {
-            let memory_id = arguments
-                .get("memory_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("memory_id is required"))?;
-            let revoke = super::tools::boolean_argument(&arguments, "revoke")?;
-            let by = arguments.get("by").and_then(|v| v.as_str());
-            let note = arguments.get("note").and_then(|v| v.as_str());
-            let memory = engine
-                .store()
-                .set_certification(memory_id, revoke, by, note)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", memory_id))?;
-            Ok(json!({"content": [{"type": "text", "text": serde_json::to_string(&memory)?}]}))
-        }
-        "memex8_recall" => {
-            let compact = super::tools::boolean_argument(&arguments, "compact")?;
-            let limit = arguments
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(10) as usize;
-            let realm = arguments.get("realm").and_then(|v| v.as_str());
-            let results = engine.recall(limit, realm).await?;
-            Ok(format_results(results, compact))
-        }
-        "memex8_get" => super::tools::get_memories(engine, &arguments).await,
-        "memex8_ingest" => {
-            let path = arguments
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
-            let chunk_by = arguments
-                .get("chunk_by")
-                .and_then(|v| v.as_str())
-                .unwrap_or("section");
-            let realm_hint = arguments.get("realm_hint").and_then(|v| v.as_str());
-
-            let report = engine.ingest_path(path, chunk_by, realm_hint).await?;
-            // Same receipt shape as POST /api/v1/memories/ingest: a partial or
-            // failed ingest must never be reported as a clean success.
-            Ok(crate::api::routes::memories::ingest_response(path, &report))
-        }
-        "memex8_realms_list" => {
-            let realms = engine.list_realms().await?;
-            let realms: Vec<crate::api::routes::realms::RealmSummary> =
-                realms.into_iter().map(Into::into).collect();
-            Ok(json!({ "realms": realms }))
-        }
-        "memex8_realms_show" => {
-            let name = arguments
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Missing 'name' parameter"))?;
-            let realm = engine.show_realm(name).await?;
-            let realm: crate::api::routes::realms::RealmSummary = realm.into();
-            Ok(json!({ "realm": realm }))
-        }
-        "memex8_upvote" => {
-            let id = arguments
-                .get("id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Missing 'id' parameter"))?;
-            engine.upvote(id).await?;
-            Ok(json!({ "upvoted": id }))
-        }
-        "memex8_stats" => {
-            let stats = engine.stats().await?;
-            Ok(json!({ "stats": stats }))
-        }
-        "memex8_slumber_status" => {
-            let status = engine.slumber_status().await;
-            Ok(json!({ "status": status }))
-        }
-        "memex8_graph_search" => {
-            let entity = arguments
-                .get("entity")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Missing 'entity' parameter"))?;
-            let relationship = arguments.get("relationship").and_then(|v| v.as_str());
-            let depth = arguments.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
-
-            let results = engine.graph_search(entity, relationship, depth).await?;
-            Ok(json!({ "results": results }))
-        }
-        "memex8_infer" => {
-            let topic = arguments.get("topic").and_then(|v| v.as_str());
-            let memory_id = arguments.get("memory_id").and_then(|v| v.as_str());
-            let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-
-            let suggestions = engine.infer_gaps(topic, memory_id, limit).await?;
-            Ok(json!({ "suggestions": suggestions }))
-        }
-        "memex8_graph_traverse" => {
-            let memory_id = arguments
-                .get("memory_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Missing 'memory_id' parameter"))?;
-            let depth = arguments.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
-
-            let results = engine.graph_traverse(memory_id, depth).await?;
-            Ok(json!({ "results": results, "count": results.len() }))
-        }
-        "memex8_graph_build" => {
-            let threshold = engine.config().slumber.association_min_strength;
-            let count = engine.build_graph(threshold).await?;
-            Ok(json!({ "status": "built", "edges_created": count }))
-        }
-        "memex8_graph_stats" => {
-            let stats = engine.graph_stats().await?;
-            Ok(json!({ "stats": stats }))
-        }
-        _ => anyhow::bail!("Unknown tool: {}", name),
-    }
-}
-
-fn format_results(results: Vec<crate::engine::MemoryResult>, compact: bool) -> serde_json::Value {
-    if compact {
-        let count = results.len();
-        return json!({"results": crate::engine::retrieval::RetrievalResults::new(results, true), "count": count});
-    }
-    json!({
-        "results": results
-            .iter()
-            .map(|r| json!({
-                "id": r.id,
-                "content": r.content,
-                "heading": r.heading,
-                "realm": r.realm_name,
-                "importance": r.importance,
-                "score": r.score,
-            }))
-            .collect::<Vec<_>>(),
-        "count": results.len(),
-    })
-}
-
-fn handle_initialize() -> anyhow::Result<serde_json::Value> {
-    Ok(json!({
-        "protocolVersion": "2024-11-05",
-        "capabilities": {
-            "tools": { "listChanged": false }
-        },
-        "serverInfo": {
-            "name": "memex8",
-            "version": "0.1.0"
-        }
-    }))
 }

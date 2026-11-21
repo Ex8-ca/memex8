@@ -26,6 +26,10 @@ jobs:
         image: qdrant/qdrant:v1.17.0
         ports:
           - 6335:6334
+      dispatch-qdrant:
+        image: qdrant/qdrant:v1.17.0
+        ports:
+          - 6338:6334
     steps:
       - uses: actions/checkout@v4
 
@@ -124,6 +128,11 @@ jobs:
           EVIDENCE_QDRANT_URL: http://127.0.0.1:6335
           EVIDENCE_RESTORE_QDRANT_URL: http://127.0.0.1:6337
         run: cargo test --test evidence_api -- --ignored
+
+      - name: Test MCP tool dispatch against disposable Qdrant
+        env:
+          MCP_DISPATCH_QDRANT_URL: http://127.0.0.1:6338
+        run: cargo test --test mcp_dispatch -- --ignored
 
       - name: Upload binary
         uses: actions/upload-artifact@v4

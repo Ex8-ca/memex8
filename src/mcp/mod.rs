@@ -1,3 +1,4 @@
+pub mod dispatch;
 pub mod http;
 pub mod publish;
 pub mod server;
