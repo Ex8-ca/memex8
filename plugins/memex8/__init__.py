@@ -252,7 +252,11 @@ class _PrivateRedactor:
     def text(self, text: str) -> str:
         out = []
         pos = 0
-        for match in re.finditer(r"</?private>", text, re.IGNORECASE):
+        # re.ASCII keeps tag matching ASCII-only, like the server's Rust parser.
+        # Without it, Unicode case folding makes `</prıvate>` (dotless i) match,
+        # and the code below treats any non-opening match as a closing tag, so
+        # a lookalike would end a private span early and expose what follows.
+        for match in re.finditer(r"</?private>", text, re.IGNORECASE | re.ASCII):
             if not self.depth:
                 out.append(text[pos:match.start()])
             if match.group().lower() == "<private>":
