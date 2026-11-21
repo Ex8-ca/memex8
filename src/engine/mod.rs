@@ -19,7 +19,6 @@ pub mod providers;
 pub mod quantizer;
 pub mod query_intent;
 pub mod reactions;
-pub mod realms;
 pub mod redaction;
 pub mod retrieval;
 pub mod scheduler;
