@@ -45,7 +45,7 @@ impl Engine {
                 }
                 // A loaded TurboVec index can still contain erased IDs; discard it
                 // and the files behind it, exactly like a normal deletion.
-                self.invalidate_compressed_index().await;
+                self.index.invalidate().await;
             }
         }
         Ok(())
@@ -177,13 +177,12 @@ impl Engine {
         // A captured memory is a new corpus member; a loaded index built before
         // this point would hide it. Invalidate before the projection write, the
         // same way `write_memory` does.
-        self.invalidate_compressed_index().await;
-        self.store
-            .restore_memory(&crate::storage::qdrant::MemoryWithVector { memory, vector })
+        self.index
+            .around_write(
+                self.store
+                    .restore_memory(&crate::storage::qdrant::MemoryWithVector { memory, vector }),
+            )
             .await?;
-        // Invalidate again now the projection is durable (see
-        // `reload_compressed_index`).
-        self.invalidate_compressed_index().await;
         self.lexical
             .write()
             .await

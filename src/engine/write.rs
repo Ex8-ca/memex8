@@ -200,11 +200,9 @@ impl Engine {
         let reaction_score = crate::engine::reactions::infer_reaction(memory.content);
 
         // A new memory is not in any compressed index built earlier, and search
-        // prefers that index. Drop it before the write so the new memory is
-        // visible immediately instead of only after the next restart.
-        self.invalidate_compressed_index().await;
-        self.store
-            .store_memory_with_tags(
+        // prefers that index, so the write happens between two invalidations.
+        self.index
+            .around_write(self.store.store_memory_with_tags(
                 &id,
                 &vector,
                 memory.content,
@@ -219,12 +217,8 @@ impl Engine {
                 memory.visibility.as_str(),
                 memory.tags,
                 memory.certified,
-            )
+            ))
             .await?;
-        // Invalidate again now the write is durable: a reload that verified the
-        // corpus before this write landed must not keep its map (see
-        // `reload_compressed_index`).
-        self.invalidate_compressed_index().await;
 
         {
             let mut text = memory.content.to_string();

@@ -355,7 +355,7 @@ impl SlumberEngine {
     /// storage-precision policy, and excluding hot memories from the search
     /// structure made semantic search blind to exactly the most-accessed ones.
     async fn rebuild_compressed_index(&self) -> anyhow::Result<usize> {
-        super::rebuild_compressed_index(&self.store, &self.config).await
+        super::compressed_index::rebuild(&self.store, &self.config).await
     }
 
     // ─── Phase 2b: Re-quantify All (no-op — full rebuild in the final phase) ──

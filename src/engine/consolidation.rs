@@ -123,7 +123,7 @@ impl Engine {
 
         // Invalidate both memory and disk caches before restoring sources. Search
         // falls back to Qdrant until slumber builds a fresh compressed index.
-        self.invalidate_compressed_index().await;
+        self.index.invalidate().await;
         let mut restored = 0;
         let mut retained = 0;
         let mut embedder = None;
@@ -211,7 +211,7 @@ impl Engine {
         // structures describe a corpus that no longer exists. The compressed index
         // is already gone; rebuild the keyword index from the restored corpus so
         // keyword-only hits (summaries, rare terms) follow the same change.
-        self.invalidate_compressed_index().await;
+        self.index.invalidate().await;
         if let Err(e) = self.rebuild_lexical_index().await {
             tracing::warn!("Lexical index rebuild after undo failed: {e}");
         }
