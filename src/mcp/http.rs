@@ -411,6 +411,33 @@ async fn handle_tool_call(
             let results = engine.graph_search(entity, relationship, depth).await?;
             Ok(json!({ "results": results }))
         }
+        "memex8_infer" => {
+            let topic = arguments.get("topic").and_then(|v| v.as_str());
+            let memory_id = arguments.get("memory_id").and_then(|v| v.as_str());
+            let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+
+            let suggestions = engine.infer_gaps(topic, memory_id, limit).await?;
+            Ok(json!({ "suggestions": suggestions }))
+        }
+        "memex8_graph_traverse" => {
+            let memory_id = arguments
+                .get("memory_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("Missing 'memory_id' parameter"))?;
+            let depth = arguments.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+
+            let results = engine.graph_traverse(memory_id, depth).await?;
+            Ok(json!({ "results": results, "count": results.len() }))
+        }
+        "memex8_graph_build" => {
+            let threshold = engine.config().slumber.association_min_strength;
+            let count = engine.build_graph(threshold).await?;
+            Ok(json!({ "status": "built", "edges_created": count }))
+        }
+        "memex8_graph_stats" => {
+            let stats = engine.graph_stats().await?;
+            Ok(json!({ "stats": stats }))
+        }
         _ => anyhow::bail!("Unknown tool: {}", name),
     }
 }
