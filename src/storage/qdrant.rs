@@ -1,9 +1,9 @@
 use qdrant_client::qdrant::{
     point_id::PointIdOptions, points_selector::PointsSelectorOneOf, vectors_output::VectorsOptions,
     Condition, CountPointsBuilder, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder,
-    DeletePointsBuilder, Distance, FieldType, Filter, GetPointsBuilder, PointStruct, PointsIdsList,
-    ScrollPointsBuilder, SearchPointsBuilder, SetPayloadPointsBuilder, UpsertPointsBuilder,
-    VectorParamsBuilder,
+    DeletePayloadPointsBuilder, DeletePointsBuilder, Distance, FieldType, Filter, GetPointsBuilder,
+    PointStruct, PointsIdsList, ScrollPointsBuilder, SearchPointsBuilder, SetPayloadPointsBuilder,
+    UpsertPointsBuilder, VectorParamsBuilder,
 };
 use qdrant_client::Payload;
 use qdrant_client::Qdrant;
@@ -416,6 +416,43 @@ fn memory_to_payload(mem: &MemoryPoint) -> Payload {
 /// Accepts: "private", "public". Case-insensitive. Unknown / empty
 /// values fall back to "private" so a malformed caller can never
 /// accidentally mark a memory shareable.
+/// Payload key used by the storage write check; never part of a memory.
+pub const WRITE_PROBE_KEY: &str = "memex8_write_probe";
+
+/// Error for a write Qdrant accepted but did not apply.
+#[derive(Debug)]
+pub struct IgnoredWriteError(pub String);
+
+impl std::fmt::Display for IgnoredWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Qdrant accepted the write to memory {} but it still reads back unchanged; \
+             the point is ignoring updates (run `memex8 doctor`)",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for IgnoredWriteError {}
+
+/// Confirm a replaced memory reads back with the content and verification
+/// status that were written.
+pub fn ensure_replacement_applied(
+    written: &MemoryPoint,
+    stored: Option<&MemoryPoint>,
+) -> anyhow::Result<()> {
+    match stored {
+        Some(s)
+            if s.content == written.content
+                && s.verification_status == written.verification_status =>
+        {
+            Ok(())
+        }
+        _ => Err(IgnoredWriteError(written.id.clone()).into()),
+    }
+}
+
 pub fn normalize_visibility(raw: &str) -> &'static str {
     match raw.trim().to_ascii_lowercase().as_str() {
         "public" => "public",
@@ -1045,7 +1082,9 @@ impl QdrantStore {
         self.client
             .upsert_points(UpsertPointsBuilder::new(MEMORIES, vec![point]).wait(true))
             .await?;
-        Ok(())
+        // Qdrant can accept a write and still not apply it (see `write_check`),
+        // so confirm the memory now reads back as written.
+        ensure_replacement_applied(&memory, self.get_memory(&memory.id).await?.as_ref())
     }
 
     pub async fn set_memory_importance(&self, id: &str, importance: f32) -> anyhow::Result<()> {
@@ -1930,6 +1969,78 @@ impl QdrantStore {
     }
 
     /// Update arbitrary payload fields on a memory point.
+    /// Every memory ID, without payloads or vectors.
+    pub async fn all_memory_ids(&self) -> anyhow::Result<Vec<String>> {
+        let mut ids = Vec::new();
+        let mut offset = None;
+        loop {
+            let mut builder = ScrollPointsBuilder::new(MEMORIES)
+                .limit(1000)
+                .with_payload(false)
+                .with_vectors(false);
+            if let Some(off) = offset.take() {
+                builder = builder.offset(off);
+            }
+            let page = self.client.scroll(builder).await?;
+            ids.extend(
+                page.result
+                    .iter()
+                    .map(|p| point_id_to_string(p.id.as_ref())),
+            );
+            match page.next_page_offset {
+                Some(next) => offset = Some(next),
+                None => return Ok(ids),
+            }
+        }
+    }
+
+    /// Write a marker into a memory's payload and wait for Qdrant to answer.
+    pub async fn set_write_probe(&self, id: &str, nonce: &str) -> anyhow::Result<()> {
+        let payload: Payload = serde_json::json!({ WRITE_PROBE_KEY: nonce })
+            .try_into()
+            .unwrap_or_default();
+        self.client
+            .set_payload(
+                SetPayloadPointsBuilder::new(MEMORIES, payload)
+                    .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
+                        ids: vec![id.into()],
+                    }))
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn read_write_probe(&self, id: &str) -> anyhow::Result<Option<String>> {
+        let resp = self
+            .client
+            .get_points(
+                GetPointsBuilder::new(MEMORIES, vec![id.into()])
+                    .with_payload(true)
+                    .with_vectors(false),
+            )
+            .await?;
+        Ok(resp.result.into_iter().next().and_then(|point| {
+            map_to_json(&point.payload)
+                .get(WRITE_PROBE_KEY)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        }))
+    }
+
+    pub async fn clear_write_probe(&self, id: &str) -> anyhow::Result<()> {
+        self.client
+            .delete_payload(
+                DeletePayloadPointsBuilder::new(MEMORIES, vec![WRITE_PROBE_KEY.to_string()])
+                    .points_selector(PointsSelectorOneOf::Points(PointsIdsList {
+                        ids: vec![id.into()],
+                    }))
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn update_memory_payload(&self, id: &str, payload: Payload) -> anyhow::Result<()> {
         self.refuse_evidence_mutation(id).await?;
         let value: serde_json::Value = payload.clone().into();
@@ -2520,5 +2631,46 @@ mod tests {
         assert!(decoded.certified_by.is_none());
         assert!(decoded.certification_note.is_none());
         assert_eq!(decoded.visibility, "private");
+    }
+}
+
+#[cfg(test)]
+mod replacement_tests {
+    use super::*;
+
+    fn point(content: &str, status: &str) -> MemoryPoint {
+        MemoryPoint {
+            id: "m1".into(),
+            content: content.into(),
+            verification_status: status.into(),
+            ..serde_json::from_value(serde_json::json!({
+                "id": "m1", "content": "", "summary": null, "source_file": null,
+                "realm_id": null, "realm_name": "", "importance": 0.0, "upvotes": 0,
+                "tags": [], "ingested_at": "", "last_accessed": "", "access_count": 0,
+                "chunk_type": "manual", "heading": null, "source_hash": ""
+            }))
+            .unwrap()
+        }
+    }
+
+    #[test]
+    fn a_replacement_that_reads_back_as_written_is_applied() {
+        let written = point("new", "unverified");
+        assert!(ensure_replacement_applied(&written, Some(&written.clone())).is_ok());
+    }
+
+    #[test]
+    fn a_replacement_that_reads_back_unchanged_is_reported() {
+        let written = point("new", "unverified");
+        let stale = point("old", "verified");
+        let err = ensure_replacement_applied(&written, Some(&stale)).unwrap_err();
+        assert!(err.downcast_ref::<IgnoredWriteError>().is_some());
+        assert!(err.to_string().contains("ignoring updates"));
+    }
+
+    #[test]
+    fn a_vanished_memory_is_reported() {
+        let written = point("new", "unverified");
+        assert!(ensure_replacement_applied(&written, None).is_err());
     }
 }

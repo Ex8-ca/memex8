@@ -30,6 +30,7 @@ pub mod timeline;
 pub mod vector_math;
 pub mod watcher;
 pub mod write;
+pub mod write_check;
 
 use crate::config::AppConfig;
 pub use crate::engine::watcher::{FileChangeEvent, FileWatcher};
