@@ -27,6 +27,7 @@ pub mod session;
 pub mod slumber;
 pub mod slumber_pause;
 pub mod timeline;
+pub mod vector_math;
 pub mod watcher;
 pub mod write;
 
@@ -36,6 +37,7 @@ use crate::storage::qdrant::{MemoryWithVector, QdrantStore};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use vector_math::cosine_similarity;
 pub use write::{Dedup, NewMemory, Visibility};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1987,17 +1989,6 @@ pub(crate) fn sort_memories(
         memories.sort_by(|a, b| key(b, a));
     } else {
         memories.sort_by(key);
-    }
-}
-
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        0.0
-    } else {
-        dot / (norm_a * norm_b)
     }
 }
 

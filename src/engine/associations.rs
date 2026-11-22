@@ -1,6 +1,7 @@
 //! Phase 2: Semantic Associations & Gap Detection
 //! Detects topic clusters, infers relationship types, and identifies knowledge gaps.
 
+use crate::engine::vector_math::cosine_similarity;
 use crate::storage::qdrant::MemoryPoint;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -120,22 +121,6 @@ impl Gap {
             detected_at: chrono::Utc::now().to_rfc3339(),
             resolved_at: None,
         }
-    }
-}
-
-/// Cosine similarity between two vectors.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let n = a.len().min(b.len());
-    if n == 0 {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b.iter()).take(n).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().take(n).map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().take(n).map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        0.0
-    } else {
-        dot / (norm_a * norm_b)
     }
 }
 

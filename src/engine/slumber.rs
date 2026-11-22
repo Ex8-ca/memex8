@@ -3,6 +3,7 @@ use crate::engine::decay;
 use crate::engine::embedder;
 use crate::engine::memex8_md::write_digest_md;
 use crate::engine::reactions::reaction_boost;
+use crate::engine::vector_math::cosine_similarity;
 use crate::storage::qdrant::{GapPoint, MemoryPoint, QdrantStore, VerificationStatusCounts};
 use std::path::{Path, PathBuf};
 
@@ -3057,22 +3058,6 @@ struct VerificationRating {
     confidence: f32,
     #[allow(dead_code)]
     reason: Option<String>,
-}
-
-/// Cosine similarity between two vectors.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let n = a.len().min(b.len());
-    if n == 0 {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b.iter()).take(n).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().take(n).map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().take(n).map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        0.0
-    } else {
-        dot / (norm_a * norm_b)
-    }
 }
 
 /// K-means with k=2 for splitting a realm into two.
