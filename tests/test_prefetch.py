@@ -24,8 +24,13 @@ def load_plugin():
     registry = types.ModuleType("tools.registry")
     registry.tool_error = lambda msg: json.dumps({"error": msg})
     with patch.dict(sys.modules, {"agent.memory_provider": host, "tools.registry": registry}):
-        spec = importlib.util.spec_from_file_location("prefetch_plugin", Path(__file__).parents[1] / "plugins" / "memex8" / "__init__.py")
+        plugin_init = Path(__file__).parents[1] / "plugins" / "memex8" / "__init__.py"
+        # Load as a package so the plugin's relative imports (client, redaction) resolve.
+        spec = importlib.util.spec_from_file_location(
+            "prefetch_plugin", plugin_init, submodule_search_locations=[str(plugin_init.parent)]
+        )
         module = importlib.util.module_from_spec(spec)
+        sys.modules["prefetch_plugin"] = module
         spec.loader.exec_module(module)
     return module
 

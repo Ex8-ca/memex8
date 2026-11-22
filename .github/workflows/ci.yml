@@ -173,7 +173,7 @@ jobs:
 
       - name: Compile with warnings as errors (3.12 only)
         if: matrix.python-version == '3.12'
-        run: python3 -W error -c "import py_compile; py_compile.compile('plugins/memex8/__init__.py', doraise=True); print('compile OK on 3.12')"
+        run: python3 -W error -c "import glob, py_compile; [py_compile.compile(f, doraise=True) for f in glob.glob('plugins/memex8/*.py')]; print('compile OK on 3.12')"
 
       - name: Run plugin path-confinement tests
         run: python3 tests/test_export_import_path.py
@@ -183,12 +183,12 @@ jobs:
           python3 integrations/shared-memory/test_bridge.py -v
           python3 tests/test_docker_backup.py -v
           python3 plugins/memex8/tests/test_visibility.py
-          python3 plugins/memex8/tests/test_certification.py
-          python3 plugins/memex8/tests/test_consolidation.py
-          python3 plugins/memex8/tests/test_dedup_removal.py
-          python3 plugins/memex8/tests/test_compact_retrieval.py
-          python3 plugins/memex8/tests/test_search_coverage.py
-          python3 plugins/memex8/tests/test_timeline.py
+          python3 plugins/memex8/tests/test_plugin_certification.py
+          python3 plugins/memex8/tests/test_plugin_consolidation.py
+          python3 plugins/memex8/tests/test_plugin_dedup_removal.py
+          python3 plugins/memex8/tests/test_plugin_compact_retrieval.py
+          python3 plugins/memex8/tests/test_plugin_search_coverage.py
+          python3 plugins/memex8/tests/test_plugin_timeline.py
           python3 plugins/memex8/tests/test_plugin_redaction_parity.py
 
       # These files existed but were named in no CI step, so they could rot
@@ -196,7 +196,7 @@ jobs:
       - name: Test dreams and cron findings
         run: |
           python3 tests/test_cron_filter.py
-          python3 plugins/memex8/tests/test_dreams.py
+          python3 plugins/memex8/tests/test_plugin_dreams.py
           python3 plugins/memex8/tests/test_cron_findings.py
 
       - name: Test query-aware prefetch isolation and deadlines
