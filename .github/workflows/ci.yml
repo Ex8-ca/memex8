@@ -141,7 +141,7 @@ jobs:
       - name: Test memory writes against disposable Qdrant
         env:
           MEMORY_WRITE_QDRANT_URL: http://127.0.0.1:6339
-        run: cargo test --test memory_write -- --ignored
+        run: cargo test --test memory_write -- --ignored --test-threads=1
 
       - name: Upload binary
         uses: actions/upload-artifact@v4

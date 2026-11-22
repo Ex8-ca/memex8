@@ -1,5 +1,5 @@
 //! Run with a disposable Qdrant only:
-//! MEMORY_WRITE_QDRANT_URL=http://127.0.0.1:PORT cargo test --test memory_write -- --ignored
+//! MEMORY_WRITE_QDRANT_URL=http://127.0.0.1:PORT cargo test --test memory_write -- --ignored --test-threads=1
 //!
 //! Behaviour of the one write entry point, `Engine::write_memory`, read back
 //! through the public Engine interface. Qdrant-free checks (visibility parsing,
@@ -149,5 +149,56 @@ async fn write_memory_defaults_redaction_dedup_and_certification() {
     let (x, y) = (plain(&name).await.unwrap(), plain(&name).await.unwrap());
     assert!(x.created && y.created && x.id != y.id);
 
+    fixture.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires explicit disposable loopback Qdrant"]
+async fn edited_memory_content_is_persisted() {
+    let (engine, _dir, fixture) = engine().await;
+    let tag = uuid::Uuid::new_v4().to_string();
+    let id = engine
+        .write_memory(NewMemory::new(&format!("Deanna Smith likes tea {tag}")))
+        .await
+        .unwrap()
+        .id;
+    engine
+        .edit_memory(&id, &format!("Deanna Chan likes tea {tag}"))
+        .await
+        .unwrap();
+    let m = engine.get_memory(&id).await.unwrap();
+    assert_eq!(m.content, format!("Deanna Chan likes tea {tag}"));
+    assert_eq!(m.verification_status, "unverified");
+    fixture.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires explicit disposable loopback Qdrant"]
+async fn a_healthy_store_passes_the_write_check_and_keeps_no_probe_markers() {
+    let (engine, _dir, fixture) = engine().await;
+    let tag = uuid::Uuid::new_v4().to_string();
+    for i in 0..5 {
+        engine
+            .write_memory(NewMemory::new(&format!("probe target {i} {tag}")))
+            .await
+            .unwrap();
+    }
+    let check = engine.check_storage_writes(200).await.unwrap();
+    assert!(check.checked >= 5);
+    assert!(check.is_healthy(), "{check:?}");
+    // No marker is left on any memory.
+    for m in engine
+        .store_for_tests()
+        .scroll_all_memories()
+        .await
+        .unwrap()
+    {
+        let leftover = engine
+            .store_for_tests()
+            .read_write_probe(&m.id)
+            .await
+            .unwrap();
+        assert_eq!(leftover, None, "probe marker left on {}", m.id);
+    }
     fixture.abort();
 }

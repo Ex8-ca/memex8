@@ -66,6 +66,39 @@ pub async fn run(config: &AppConfig) -> anyhow::Result<()> {
         println!("❌ Invalid dimensions: {}", config.embedding.dimensions);
     }
 
+    // Check that the store applies the writes it accepts
+    print!("  Storage writes ... ");
+    match super::Engine::new(config.clone()).await {
+        Ok(engine) => match engine.check_storage_writes(200).await {
+            Ok(check) if check.is_healthy() => {
+                println!(
+                    "✅ OK ({} memories sampled, every write applied)",
+                    check.checked
+                )
+            }
+            Ok(check) => {
+                println!(
+                    "❌ {} of {} sampled memories ignore writes (store errors: {})",
+                    check.ignored.len(),
+                    check.checked,
+                    check.errors
+                );
+                println!(
+                    "     Edits, deletes and access updates to them report success but change nothing."
+                );
+                println!(
+                    "     First affected: {:?}",
+                    check.ignored.iter().take(3).collect::<Vec<_>>()
+                );
+                println!(
+                    "     Rebuild the collection from a backup or a full point dump (see docs/RECOVERY.md)."
+                );
+            }
+            Err(e) => println!("⚠️  could not run: {e}"),
+        },
+        Err(e) => println!("⚠️  skipped (cannot open the store: {e})"),
+    }
+
     println!("\n✅ Doctor complete.");
     Ok(())
 }

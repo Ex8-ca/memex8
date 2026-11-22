@@ -62,6 +62,29 @@ pub async fn run_with_engine(
     host: &str,
     port: u16,
 ) -> anyhow::Result<()> {
+    // Qdrant can silently ignore writes to a point; look for that once at
+    // startup, in the background, so it is in the log instead of invisible.
+    let probe = engine.clone();
+    tokio::spawn(async move {
+        match probe.check_storage_writes(200).await {
+            Ok(check) if check.is_healthy() => {
+                tracing::info!(
+                    "Storage write check: {} memories sampled, all applied",
+                    check.checked
+                )
+            }
+            Ok(check) => tracing::error!(
+                "Storage write check: {} of {} sampled memories ignore writes (errors: {}); \
+                 edits, deletes and access updates to them silently do nothing. First: {:?}",
+                check.ignored.len(),
+                check.checked,
+                check.errors,
+                check.ignored.iter().take(3).collect::<Vec<_>>()
+            ),
+            Err(e) => tracing::warn!("Storage write check could not run: {e}"),
+        }
+    });
+
     let state = Arc::new(AppState {
         engine,
         config: config.clone(),
