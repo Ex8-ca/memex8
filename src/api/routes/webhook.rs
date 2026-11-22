@@ -1,5 +1,6 @@
 use crate::api::server::AppState;
 use crate::engine::redaction;
+use crate::engine::{Dedup, NewMemory, Visibility};
 use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -72,21 +73,23 @@ pub async fn conversation_end(
     // Idempotent: hosts re-send the same transcript (archived again at every
     // compaction or eviction, or an end-of-session hook fired twice), and each
     // send used to become another identical memory.
-    let (id, created) = state
+    let stored = state
         .engine
-        .store_memory_once(
-            &content,
+        .write_memory(NewMemory {
             tags,
-            realm_hint.as_deref(),
-            source,
+            realm_hint: realm_hint.as_deref(),
+            source: Some(source),
             // Webhook ingestion is for the agent's own records; never
             // share these with peers. Operators can mark individual
             // conversations public later via PATCH.
-            "private",
+            visibility: Visibility::Private,
             // None keeps the pre-existing default ("general").
             memory_type,
-        )
+            dedup: Dedup::Identical,
+            ..NewMemory::new(&content)
+        })
         .await?;
+    let (id, created) = (stored.id, stored.created);
 
     if created {
         tracing::info!("📥 Webhook: stored {} conversation (id: {})", platform, id);
@@ -133,16 +136,16 @@ pub async fn skill_executed(
 
     let id = state
         .engine
-        .store_memory(
-            &content,
-            Some(tags),
-            payload.realm_hint.as_deref(),
-            Some("openclaw"),
-            // Skill execution traces are operator-private by default.
-            Some("private"),
-            None, // memory_type: skill traces use the default "general"
-        )
-        .await?;
+        .write_memory(NewMemory {
+            tags,
+            realm_hint: payload.realm_hint.as_deref(),
+            source: Some("openclaw"),
+            // Skill execution traces are operator-private by default, and use
+            // the default memory type "general".
+            ..NewMemory::new(&content)
+        })
+        .await?
+        .id;
 
     tracing::info!(
         "📥 Webhook: stored skill execution (id: {}, skill: {})",

@@ -1,6 +1,7 @@
 use crate::api::error::ApiError;
 use crate::api::server::AppState;
 use crate::engine::retrieval::{validate_batch_ids, BatchGetResult, RetrievalResults};
+use crate::engine::{NewMemory, Visibility};
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -59,20 +60,30 @@ pub async fn store(
     State(state): State<Arc<AppState>>,
     Json(req): Json<StoreRequest>,
 ) -> Result<Json<StoreResponse>, crate::api::error::ApiError> {
+    let tags = req.tags.unwrap_or_default();
     if let Some(capture) = req.evidence {
-        if req.certified || req.memory_type.is_some() {
-            return Err(ApiError::BadRequest(
-                "evidence capture does not yet support certification or memory_type".into(),
-            ));
-        }
+        // Evidence capture keeps the ledger's strict contract: the visibility
+        // must be exactly "private" or "public", not fail-closed to private.
+        let visibility = match req.visibility.as_deref() {
+            None => Visibility::Private,
+            Some(raw) => Visibility::parse_strict(raw).ok_or_else(|| {
+                ApiError::BadRequest(
+                    "invalid evidence metadata or conflicting idempotency key".into(),
+                )
+            })?,
+        };
         let id = state
             .engine
             .store_with_evidence(
-                &req.content,
-                req.tags.unwrap_or_default(),
-                req.realm_hint.as_deref(),
-                req.source.as_deref(),
-                req.visibility.as_deref(),
+                NewMemory {
+                    tags,
+                    realm_hint: req.realm_hint.as_deref(),
+                    source: req.source.as_deref(),
+                    visibility,
+                    memory_type: req.memory_type.as_deref(),
+                    certified: req.certified,
+                    ..NewMemory::new(&req.content)
+                },
                 req.idempotency_key.as_deref(),
                 &capture,
             )
@@ -87,20 +98,20 @@ pub async fn store(
             "idempotency_key requires evidence capture".into(),
         ));
     }
-    let id = state
+    let stored = state
         .engine
-        .store_memory_with_certification(
-            &req.content,
-            req.tags,
-            req.realm_hint.as_deref(),
-            req.source.as_deref(),
-            req.visibility.as_deref(),
-            req.memory_type.as_deref(),
-            req.certified,
-        )
+        .write_memory(NewMemory {
+            tags,
+            realm_hint: req.realm_hint.as_deref(),
+            source: req.source.as_deref(),
+            visibility: Visibility::from_option(req.visibility.as_deref()),
+            memory_type: req.memory_type.as_deref(),
+            certified: req.certified,
+            ..NewMemory::new(&req.content)
+        })
         .await?;
     Ok(Json(StoreResponse {
-        id,
+        id: stored.id,
         status: "stored".into(),
     }))
 }
@@ -142,7 +153,6 @@ pub async fn certify(
     let Json(req) = body.unwrap_or_default();
     let memory = state
         .engine
-        .store()
         .set_certification(&id, false, req.by.as_deref(), req.note.as_deref())
         .await?
         .ok_or_else(|| ApiError::NotFound(id))?;
@@ -155,7 +165,6 @@ pub async fn revoke_certification(
 ) -> Result<Json<crate::storage::qdrant::MemoryPoint>, ApiError> {
     let memory = state
         .engine
-        .store()
         .set_certification(&id, true, None, None)
         .await?
         .ok_or_else(|| ApiError::NotFound(id))?;

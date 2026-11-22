@@ -1,8 +1,8 @@
 //! Phase 2: Semantic Associations & Gap Detection
 //! Detects topic clusters, infers relationship types, and identifies knowledge gaps.
 
+use crate::engine::vector_math::{cosine_similarity, kmeans};
 use crate::storage::qdrant::MemoryPoint;
-use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -121,148 +121,6 @@ impl Gap {
             resolved_at: None,
         }
     }
-}
-
-/// Cosine similarity between two vectors.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let n = a.len().min(b.len());
-    if n == 0 {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b.iter()).take(n).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().take(n).map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().take(n).map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        0.0
-    } else {
-        dot / (norm_a * norm_b)
-    }
-}
-
-/// K-means clustering for topic detection.
-/// Returns cluster assignments and centroids.
-pub fn kmeans_topic_clusters(
-    vectors: &[Vec<f32>],
-    _memory_ids: &[String],
-    k: usize,
-    max_iter: usize,
-) -> (Vec<Vec<f32>>, Vec<i32>) {
-    if vectors.is_empty() || k == 0 {
-        return (vec![], vec![]);
-    }
-
-    let n = vectors.len();
-    let dims = vectors[0].len();
-    let k = k.min(n);
-
-    // Initialize centroids using k-means++ style seeding
-    let mut centroids: Vec<Vec<f32>> = Vec::with_capacity(k);
-
-    // Pick first centroid at random
-    let first_idx = rand::distributions::Uniform::new(0.0, 1.0)
-        .sample_iter(rand::thread_rng())
-        .take(1)
-        .enumerate()
-        .find(|(_, r)| *r > 0.0)
-        .map(|(i, _)| i % n)
-        .unwrap_or(0);
-    centroids.push(vectors[first_idx].clone());
-
-    // Pick remaining k-1 centroids with probability proportional to distance squared
-    for _ in 1..k {
-        let mut best_d2 = -1.0f32;
-        let mut best_idx = 0;
-        for (i, v) in vectors.iter().enumerate() {
-            let min_d2: f32 = centroids
-                .iter()
-                .map(|c| {
-                    let d = 1.0 - cosine_similarity(v, c);
-                    d * d
-                })
-                .fold(f32::MAX, f32::min);
-            if min_d2 > best_d2 || best_d2 < 0.0 {
-                best_d2 = min_d2;
-                best_idx = i;
-            }
-        }
-        centroids.push(vectors[best_idx].clone());
-    }
-
-    // Cluster assignments: which centroid each point belongs to
-    let mut assignments = vec![0i32; n];
-
-    for _iter in 0..max_iter {
-        let mut changed = false;
-
-        // Assign each vector to nearest centroid
-        for (i, v) in vectors.iter().enumerate() {
-            let mut best_centroid = 0;
-            let mut best_sim = -1.0f32;
-            for (j, c) in centroids.iter().enumerate() {
-                let sim = cosine_similarity(v, c);
-                if sim > best_sim {
-                    best_sim = sim;
-                    best_centroid = j as i32;
-                }
-            }
-            if assignments[i] != best_centroid {
-                changed = true;
-            }
-            assignments[i] = best_centroid;
-        }
-
-        if !changed {
-            break;
-        }
-
-        // Recompute centroids
-        let mut sums = vec![vec![0.0f32; dims]; k];
-        let mut counts = vec![0usize; k];
-
-        for (i, v) in vectors.iter().enumerate() {
-            let cid = assignments[i] as usize;
-            for (j, x) in v.iter().enumerate() {
-                sums[cid][j] += x;
-            }
-            counts[cid] += 1;
-        }
-
-        for (j, c) in centroids.iter_mut().enumerate() {
-            if counts[j] > 0 {
-                for (component, sum) in c.iter_mut().zip(&sums[j]) {
-                    *component = *sum / counts[j] as f32;
-                }
-            }
-        }
-    }
-
-    // Fallback: recompute centroids cleanly one more time
-    let mut sums = vec![vec![0.0f32; dims]; k];
-    let mut counts = vec![0usize; k];
-    for (i, v) in vectors.iter().enumerate() {
-        let cid = assignments[i] as usize;
-        for (j, x) in v.iter().enumerate() {
-            sums[cid][j] += x;
-        }
-        counts[cid] += 1;
-    }
-    for (j, c) in centroids.iter_mut().enumerate() {
-        if counts[j] > 0 {
-            for (d, x) in c.iter_mut().enumerate() {
-                *x = sums[j][d] / counts[j] as f32;
-            }
-        }
-    }
-
-    tracing::debug!(
-        "kmeans: k={} n={} iters={} counts={:?}",
-        k,
-        n,
-        max_iter,
-        counts
-    );
-
-    (centroids, assignments)
 }
 
 /// Auto-generate a cluster label from member memory contents.
@@ -774,7 +632,7 @@ pub fn detect_topic_clusters(
         .map(|(_, m, _)| m.clone())
         .collect();
 
-    let (centroids, assignments) = kmeans_topic_clusters(&vectors, &ids, k, 50);
+    let (centroids, assignments) = kmeans(&vectors, k, 50);
 
     // Group memory IDs by cluster assignment
     let mut cluster_members: HashMap<i32, Vec<String>> = HashMap::new();
@@ -1080,6 +938,7 @@ pub fn detect_gaps(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::prelude::*;
 
     // Pre-optimization detect_gaps, kept verbatim as an oracle.
     #[allow(clippy::all)]
@@ -1333,55 +1192,6 @@ mod tests {
         let d = vec![0.707, 0.707, 0.0];
         let sim = cosine_similarity(&a, &d);
         assert!((sim - 0.707).abs() < 0.01);
-    }
-
-    #[test]
-    fn audit_kmeans_angular_clusters() {
-        // Distinct directions, not collinear vectors separated only by magnitude.
-        // Neither group is axis-aligned: corrupt intermediate means must not
-        // collapse both groups onto the same axis on the next iteration.
-        let vectors = vec![
-            vec![1.0, 3.0],
-            vec![2.0, 6.0],
-            vec![-1.0, 3.0],
-            vec![-2.0, 6.0],
-        ];
-        let ids = vec!["a".into(), "b".into(), "c".into(), "d".into()];
-        let (centroids, assignments) = kmeans_topic_clusters(&vectors, &ids, 2, 20);
-
-        assert_eq!(centroids.len(), 2);
-        // First two should be in one cluster, last two in another
-        assert_eq!(assignments[0], assignments[1]);
-        assert_eq!(assignments[2], assignments[3]);
-        assert_ne!(assignments[0], assignments[2]);
-        assert_eq!(centroids[assignments[0] as usize], vec![1.5, 4.5]);
-        assert_eq!(centroids[assignments[2] as usize], vec![-1.5, 4.5]);
-    }
-
-    #[test]
-    fn audit_kmeans_more_clusters_than_dimensions() {
-        let vectors = vec![
-            vec![1.0, 3.0],
-            vec![2.0, 6.0],
-            vec![-1.0, 3.0],
-            vec![-2.0, 6.0],
-            vec![0.0, -2.0],
-            vec![0.0, -4.0],
-        ];
-        let (centroids, assignments) = kmeans_topic_clusters(&vectors, &[], 3, 20);
-        for pair in 0..3 {
-            assert_eq!(assignments[pair * 2], assignments[pair * 2 + 1]);
-            let c = &centroids[assignments[pair * 2] as usize];
-            for d in 0..2 {
-                assert_eq!(
-                    c[d],
-                    (vectors[pair * 2][d] + vectors[pair * 2 + 1][d]) / 2.0
-                );
-            }
-        }
-        assert_ne!(assignments[0], assignments[2]);
-        assert_ne!(assignments[0], assignments[4]);
-        assert_ne!(assignments[2], assignments[4]);
     }
 
     #[test]

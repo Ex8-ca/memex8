@@ -428,7 +428,7 @@ async fn main() -> anyhow::Result<()> {
             // erasure cannot commit between the fetch and this output string.
             // Standard output delivery afterwards is not covered by the guard.
             let output = engine
-                .store()
+                .gate()
                 .read_gated(async {
                     let results = engine
                         .search(&query, realm.as_deref(), None, limit, 0, min_score)
@@ -456,7 +456,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Get { id } => {
             let engine = engine::Engine::new(config).await?;
             let output = engine
-                .store()
+                .gate()
                 .read_gated(async {
                     let memory = engine.get_memory(&id).await?;
                     anyhow::Ok(serde_json::to_string_pretty(&memory)?)
@@ -467,7 +467,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Recall { limit, realm } => {
             let engine = engine::Engine::new(config).await?;
             let output = engine
-                .store()
+                .gate()
                 .read_gated(async {
                     let memories = engine.recall(limit, realm.as_deref()).await?;
                     let mut output = String::new();
@@ -591,8 +591,9 @@ async fn main() -> anyhow::Result<()> {
             // an operator can stop maintenance precisely when the store is
             // degraded. The scheduler re-reads the flag on every tick.
             let paused = matches!(action, SlumberActions::Pause);
-            let path = engine::slumber_pause_path(&config);
-            engine::write_slumber_pause(&path, paused)?;
+            let pause = engine::slumber_pause::SlumberPause::for_config(&config);
+            pause.set(paused)?;
+            let path = pause.path();
             if paused {
                 println!("⏸️  Slumber paused for every process using {path}");
                 println!(
@@ -617,7 +618,7 @@ async fn main() -> anyhow::Result<()> {
                 SlumberActions::Status => {
                     let status = engine.slumber_status().await;
                     println!("{}", serde_json::to_string_pretty(&status)?);
-                    println!("pause file: {}", engine.slumber_pause_path());
+                    println!("pause file: {}", engine.slumber_pause().path());
                 }
                 SlumberActions::Trigger => {
                     println!("💤 Triggering slumber...");

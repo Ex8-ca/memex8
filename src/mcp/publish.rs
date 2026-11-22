@@ -86,3 +86,11 @@ pub fn tool_name(params: &Value) -> anyhow::Result<&str> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing tool name"))
 }
+
+/// Read the tool arguments from JSON-RPC `params`; an absent value means no arguments.
+pub fn tool_arguments(params: &Value) -> Value {
+    params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}))
+}

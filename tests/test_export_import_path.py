@@ -55,10 +55,13 @@ sys.modules["tools.registry"] = _regStub
 import importlib.util as _ilu
 
 _spec = _ilu.spec_from_file_location(
-    "memex8_plugin_under_test", _PLUGIN_DIR / "__init__.py"
+    "memex8_plugin_under_test",
+    _PLUGIN_DIR / "__init__.py",
+    submodule_search_locations=[str(_PLUGIN_DIR)],
 )
 assert _spec is not None and _spec.loader is not None, "plugin file missing"
 plugin = _ilu.module_from_spec(_spec)
+sys.modules["memex8_plugin_under_test"] = plugin
 _spec.loader.exec_module(plugin)
 
 

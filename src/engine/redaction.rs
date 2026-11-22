@@ -147,6 +147,33 @@ mod tests {
         }
         assert!(required("public <private>secret</private>").is_ok());
     }
+    /// The Python plugin redactor runs the same cases from the same file
+    /// (plugins/memex8/tests/test_plugin_redaction_parity.py).
+    #[test]
+    fn shared_fixture_cases_match() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/redaction_cases.json"))
+                .expect("fixture parses");
+        let cases = fixture["cases"].as_array().expect("cases array");
+        assert!(cases.len() >= 10);
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let mut parser = Redactor {
+                depth: case["depth_in"].as_u64().unwrap() as usize,
+            };
+            assert_eq!(
+                parser.redact(case["input"].as_str().unwrap()),
+                case["expected"].as_str().unwrap(),
+                "case: {name}"
+            );
+            assert_eq!(
+                parser.depth,
+                case["depth_out"].as_u64().unwrap() as usize,
+                "depth after case: {name}"
+            );
+        }
+    }
+
     #[test]
     fn conversation_state_survives_message_boundaries() {
         let mut parser = Redactor::default();

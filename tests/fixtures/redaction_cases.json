@@ -1,0 +1,23 @@
+{
+  "_comment": "Shared by the Rust Redactor (src/engine/redaction.rs) and the Python _PrivateRedactor (plugins/memex8). A private-span tag is ASCII case-insensitive only: <prıvate> and <prİvate> are NOT tags. depth_in/depth_out are the span nesting depth carried across messages.",
+  "cases": [
+    {"name": "plain text", "input": "hello world", "depth_in": 0, "expected": "hello world", "depth_out": 0},
+    {"name": "simple span", "input": "hello <private>secret</private> world", "depth_in": 0, "expected": "hello [private] world", "depth_out": 0},
+    {"name": "case-insensitive multiline", "input": "a<PRIVATE>one\ntwo</PrIvAtE>b<private>three</private>c", "depth_in": 0, "expected": "a[private]b[private]c", "depth_out": 0},
+    {"name": "nested spans", "input": "\u00e9\ud83e\udd80<private>inner<private>nested</private>tail</private>\u754c", "depth_in": 0, "expected": "\u00e9\ud83e\udd80[private]\u754c", "depth_out": 0},
+    {"name": "unclosed span fails closed", "input": "public<private>unclosed", "depth_in": 0, "expected": "public[private]", "depth_out": 1},
+    {"name": "unclosed nested span", "input": "public<private>a<private>b</private>tail", "depth_in": 0, "expected": "public[private]", "depth_out": 1},
+    {"name": "unmatched close tag is kept literally", "input": "a</private>b", "depth_in": 0, "expected": "a</private>b", "depth_out": 0},
+    {"name": "unmatched close tag, upper case", "input": "a</PRIVATE>b", "depth_in": 0, "expected": "a</PRIVATE>b", "depth_out": 0},
+    {"name": "span closes in a later message", "input": "secret tail</private> safe", "depth_in": 1, "expected": " safe", "depth_out": 0},
+    {"name": "span continues across a whole message", "input": "still secret", "depth_in": 1, "expected": "", "depth_out": 1},
+    {"name": "two spans", "input": "a<private>b</private>c<private>d</private>e", "depth_in": 0, "expected": "a[private]c[private]e", "depth_out": 0},
+    {"name": "dotless i is not a tag", "input": "x<pr\u0131vate>secret</pr\u0131vate>y", "depth_in": 0, "expected": "x<pr\u0131vate>secret</pr\u0131vate>y", "depth_out": 0},
+    {"name": "dotted capital I is not a tag", "input": "x<pr\u0130vate>secret</pr\u0130vate>y", "depth_in": 0, "expected": "x<pr\u0130vate>secret</pr\u0130vate>y", "depth_out": 0},
+    {"name": "dotless i cannot close a span", "input": "<private>secret</pr\u0131vate>leak", "depth_in": 0, "expected": "[private]", "depth_out": 1},
+    {"name": "dotted capital I cannot close a span", "input": "<private>secret</PR\u0130VATE>leak", "depth_in": 0, "expected": "[private]", "depth_out": 1},
+    {"name": "dotless i cannot close a carried-in span", "input": "secret</pr\u0131vate>leak", "depth_in": 1, "expected": "", "depth_out": 1},
+    {"name": "similar tag is not a tag", "input": "literal <privacy>ok</privacy>", "depth_in": 0, "expected": "literal <privacy>ok</privacy>", "depth_out": 0},
+    {"name": "tag with space is not a tag", "input": "a<private >b</private >c", "depth_in": 0, "expected": "a<private >b</private >c", "depth_out": 0}
+  ]
+}

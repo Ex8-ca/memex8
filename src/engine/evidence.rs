@@ -1,5 +1,5 @@
 //! Explicit REST evidence slice; intentionally refuses unsupported lifecycle operations.
-use super::Engine;
+use super::{Engine, NewMemory};
 use crate::api::error::ApiError;
 use crate::storage::evidence::{CaptureRequest, EvidenceRef, EvidenceStore, SourceRecord};
 
@@ -45,7 +45,7 @@ impl Engine {
                 }
                 // A loaded TurboVec index can still contain erased IDs; discard it
                 // and the files behind it, exactly like a normal deletion.
-                self.invalidate_compressed_index().await;
+                self.index.invalidate().await;
             }
         }
         Ok(())
@@ -69,24 +69,27 @@ impl Engine {
         anyhow::ensure!(memories.iter().all(|m| m.evidence_refs.is_empty()), "evidence references present: paired SQLite state required; logical transfer unsupported");
         Ok(())
     }
-    #[allow(clippy::too_many_arguments)]
+    /// Store a memory with captured source evidence. Takes the same
+    /// [`NewMemory`] as `write_memory`, but this slice supports only content,
+    /// tags and visibility: every other field is rejected, so a retry cannot
+    /// silently change what a legacy field means.
     pub async fn store_with_evidence(
         &self,
-        content: &str,
-        tags: Vec<String>,
-        realm: Option<&str>,
-        source: Option<&str>,
-        visibility: Option<&str>,
+        memory: NewMemory<'_>,
         key: Option<&str>,
         capture: &CaptureRequest,
     ) -> Result<String, ApiError> {
+        let (content, tags, visibility) = (memory.content, memory.tags.clone(), memory.visibility);
         let _guard = self.store.maintenance_guard().await;
         if !self.config.evidence.enabled {
             return Err(ApiError::BadRequest("evidence capture is disabled".into()));
         }
-        // Limit this slice to a single well-defined request contract; legacy fields
-        // cannot silently change semantics on a retry.
-        if realm.is_some() || source.is_some() {
+        if memory.certified || memory.memory_type.is_some() {
+            return Err(ApiError::BadRequest(
+                "evidence capture does not yet support certification or memory_type".into(),
+            ));
+        }
+        if memory.realm_hint.is_some() || memory.source.is_some() {
             return Err(ApiError::BadRequest(
                 "evidence capture does not support source or realm_hint; use tags for scope".into(),
             ));
@@ -95,13 +98,7 @@ impl Engine {
             key.ok_or_else(|| ApiError::BadRequest("evidence requires idempotency_key".into()))?;
         let ledger = EvidenceStore::open(&self.evidence_path())?;
         let record = ledger
-            .prepare(
-                key,
-                content,
-                capture,
-                &tags,
-                visibility.unwrap_or("private"),
-            )
+            .prepare(key, content, capture, &tags, visibility.as_str())
             .map_err(|_| {
                 ApiError::BadRequest(
                     "invalid evidence metadata or conflicting idempotency key".into(),
@@ -179,14 +176,13 @@ impl Engine {
         let lexical_text = crate::engine::lexical::memory_text(&memory);
         // A captured memory is a new corpus member; a loaded index built before
         // this point would hide it. Invalidate before the projection write, the
-        // same way `store_memory` does.
-        self.invalidate_compressed_index().await;
-        self.store
-            .restore_memory(&crate::storage::qdrant::MemoryWithVector { memory, vector })
+        // same way `write_memory` does.
+        self.index
+            .around_write(
+                self.store
+                    .restore_memory(&crate::storage::qdrant::MemoryWithVector { memory, vector }),
+            )
             .await?;
-        // Invalidate again now the projection is durable (see
-        // `reload_compressed_index`).
-        self.invalidate_compressed_index().await;
         self.lexical
             .write()
             .await

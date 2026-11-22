@@ -4,7 +4,7 @@
 //! Hard rule: a dream is fiction built from memories, not a memory. Dreams live in
 //! their own files (`<data dir>/dreams/`), never in the `memories` collection, so
 //! search, recall, timeline, MCP and prefetch cannot return them. Nothing in this
-//! module calls `store_memory*`.
+//! module calls `Engine::write_memory`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

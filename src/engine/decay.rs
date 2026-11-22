@@ -46,6 +46,11 @@ pub fn weibull_params() -> HashMap<&'static str, (f64, f64)> {
     m
 }
 
+/// Whether `memory_type` has its own decay curve. Other types decay like `general`.
+pub fn is_known_memory_type(memory_type: &str) -> bool {
+    weibull_params().contains_key(memory_type)
+}
+
 /// Compute Weibull-based temporal decay multiplier.
 ///
 /// Returns a value in (0.0, 1.0] — multiplied into a base score to discount
@@ -76,6 +81,22 @@ pub fn weibull_boost(timestamp: &str, query_time: DateTime<Utc>, memory_type: &s
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn known_memory_types_are_the_weibull_table() {
+        for known in [
+            "general",
+            "profile",
+            "preference",
+            "dream",
+            "artifact",
+            "event",
+        ] {
+            assert!(super::is_known_memory_type(known), "{known}");
+        }
+        assert!(!super::is_known_memory_type("prefrence"));
+        assert!(!super::is_known_memory_type(""));
+    }
+
     use super::*;
     use chrono::TimeZone;
 

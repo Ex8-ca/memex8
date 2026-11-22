@@ -87,7 +87,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .to_string()
         .contains("evidence"));
     assert!(clean
-        .store()
+        .store_for_tests()
         .get_memory(&forged_id)
         .await
         .unwrap()
@@ -224,7 +224,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
             )
             .unwrap();
     engine
-        .store()
+        .store_for_tests()
         .store_realm(
             &uuid::Uuid::new_v4().to_string(),
             &[1., 0., 0., 0., 0., 0., 0., 0.],
@@ -247,7 +247,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         embedding_model: "fixture".into(),
         embedding_dimensions: 8,
         sources: vec![engine
-            .store()
+            .store_for_tests()
             .get_memory_snapshot(legacy_id)
             .await
             .unwrap()
@@ -255,15 +255,15 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         cooldown_until: None,
     };
     engine
-        .store()
+        .store_for_tests()
         .archive_consolidation(&journal)
         .await
         .unwrap();
-    let expected_realms = engine.store().list_realms().await.unwrap();
+    let expected_realms = engine.store_for_tests().list_realms().await.unwrap();
     let graph_from = legacy_id.to_owned();
     let graph_to = id.to_owned();
     engine
-        .store()
+        .store_for_tests()
         .store_graph_edge(&memex8::storage::qdrant::GraphEdge {
             from_memory_id: graph_from.clone(),
             to_memory_id: graph_to.clone(),
@@ -272,7 +272,15 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         })
         .await
         .unwrap();
-    assert_eq!(engine.store().get_all_graph_edges().await.unwrap().len(), 1);
+    assert_eq!(
+        engine
+            .store_for_tests()
+            .get_all_graph_edges()
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     std::env::remove_var("MEMEX8_BACKUP_WRITERS_STOPPED");
     assert!(engine
         .backup(Some(dir.path().join("refused-backup").to_str().unwrap()))
@@ -296,7 +304,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     let target = Arc::new(Engine::new(target_config.clone()).await.unwrap());
     let legacy_archive = target_dir.path().join("legacy.tar.gz");
     let legacy_snapshot = engine
-        .store()
+        .store_for_tests()
         .get_memory_snapshot(legacy_id)
         .await
         .unwrap()
@@ -369,20 +377,25 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
             .await
             .is_err());
         assert!(target
-            .store()
+            .store_for_tests()
             .scroll_all_memories()
             .await
             .unwrap()
             .is_empty());
-        assert!(target.store().list_realms().await.unwrap().is_empty());
         assert!(target
-            .store()
+            .store_for_tests()
+            .list_realms()
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(target
+            .store_for_tests()
             .get_all_graph_edges()
             .await
             .unwrap()
             .is_empty());
         assert!(target
-            .store()
+            .store_for_tests()
             .list_consolidations()
             .await
             .unwrap()
@@ -477,7 +490,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
             "{kind}"
         );
         assert!(target
-            .store()
+            .store_for_tests()
             .scroll_all_memories()
             .await
             .unwrap()
@@ -561,12 +574,29 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .contains("previous restore may be partial"));
     proxy_task.abort();
     // No Qdrant projection is guaranteed before transport loss; reset any that arrived.
-    for memory in target.store().scroll_all_memories().await.unwrap() {
-        target.store().delete_memory(&memory.id).await.unwrap();
+    for memory in target
+        .store_for_tests()
+        .scroll_all_memories()
+        .await
+        .unwrap()
+    {
+        target
+            .store_for_tests()
+            .delete_memory(&memory.id)
+            .await
+            .unwrap();
     }
     assert!(target.restore(&paired_backup, true, false).await.unwrap() >= 2);
-    assert_eq!(target.store().get_all_graph_edges().await.unwrap().len(), 1);
-    let restored_realms = target.store().list_realms().await.unwrap();
+    assert_eq!(
+        target
+            .store_for_tests()
+            .get_all_graph_edges()
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let restored_realms = target.store_for_tests().list_realms().await.unwrap();
     assert_eq!(restored_realms.len(), expected_realms.len());
     for expected in &expected_realms {
         let actual = restored_realms
@@ -581,7 +611,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     assert_eq!(
         serde_json::to_value(
             target
-                .store()
+                .store_for_tests()
                 .get_consolidation(&journal.summary_id)
                 .await
                 .unwrap()
@@ -703,7 +733,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .contains("evidence"));
     let maintenance = memex8::engine::slumber::SlumberEngine::new(
         engine.config().clone(),
-        engine.store().clone_store(),
+        engine.store_for_tests().clone_store(),
     );
     assert!(maintenance
         .run_full_pipeline(false)
@@ -718,48 +748,48 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .to_string()
         .contains("evidence"));
     assert!(engine
-        .store()
+        .store_for_tests()
         .set_certification(id, false, None, None)
         .await
         .unwrap_err()
         .to_string()
         .contains("evidence"));
     assert!(engine
-        .store()
+        .store_for_tests()
         .delete_unprotected_memory(id)
         .await
         .unwrap_err()
         .to_string()
         .contains("evidence"));
     assert!(engine
-        .store()
+        .store_for_tests()
         .update_unprotected_payload(id, json!({"tags":[]}).try_into().unwrap())
         .await
         .unwrap_err()
         .to_string()
         .contains("evidence"));
     assert!(engine
-        .store()
+        .store_for_tests()
         .delete_consolidation_snapshot(&engine.get_memory(id).await.unwrap())
         .await
         .unwrap_err()
         .to_string()
         .contains("evidence"));
     assert!(engine
-        .store()
+        .store_for_tests()
         .batch_update_payload(&[(id, json!({"tags":[]}).try_into().unwrap())])
         .await
         .unwrap_err()
         .to_string()
         .contains("evidence"));
     let snapshot = engine
-        .store()
+        .store_for_tests()
         .get_memory_snapshot(id)
         .await
         .unwrap()
         .unwrap();
     assert!(engine
-        .store()
+        .store_for_tests()
         .restore_memory(&snapshot)
         .await
         .unwrap_err()
@@ -923,7 +953,12 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
             .status(),
         404
     );
-    assert!(engine.store().get_memory(id).await.unwrap().is_none());
+    assert!(engine
+        .store_for_tests()
+        .get_memory(id)
+        .await
+        .unwrap()
+        .is_none());
     assert!(engine.read_evidence(id, source).await.is_err());
     assert_eq!(
         client
@@ -982,11 +1017,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     // Deterministic ordering: fetch -> writer queued -> response construction -> erase.
     let race_id = engine
         .store_with_evidence(
-            "publication race",
-            vec![],
-            None,
-            None,
-            None,
+            memex8::engine::NewMemory::new("publication race"),
             Some("publication-race"),
             &serde_json::from_value(request["evidence"].clone()).unwrap(),
         )
@@ -1088,11 +1119,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     ] {
         let race_id = engine
             .store_with_evidence(
-                "post publication race",
-                vec![],
-                None,
-                None,
-                None,
+                memex8::engine::NewMemory::new("post publication race"),
                 Some(path),
                 &serde_json::from_value(request["evidence"].clone()).unwrap(),
             )
@@ -1177,7 +1204,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .unwrap();
     let crash_id = crash["id"].as_str().unwrap();
     let crash_source = engine
-        .store()
+        .store_for_tests()
         .get_memory(crash_id)
         .await
         .unwrap()
@@ -1189,7 +1216,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     // Persist a stale TurboVec index containing the doomed point; startup must
     // still reconcile and searches must not return its Qdrant payload.
     let snapshot = engine
-        .store()
+        .store_for_tests()
         .get_memory_snapshot(crash_id)
         .await
         .unwrap()
@@ -1204,11 +1231,12 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .unwrap();
     // Pending intent keeps Qdrant payload but must not leak into timeline or graph.
     let neighbor = engine
-        .store_memory("graph neighbor", None, None, None, None, None)
+        .write_memory(memex8::engine::NewMemory::new("graph neighbor"))
         .await
-        .unwrap();
+        .unwrap()
+        .id;
     engine
-        .store()
+        .store_for_tests()
         .store_graph_edge(&memex8::storage::qdrant::GraphEdge {
             from_memory_id: crash_id.to_owned(),
             to_memory_id: neighbor.clone(),
@@ -1221,7 +1249,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     assert!(graph_before.iter().any(|r| r.memory_id == crash_id));
     // A read waiting behind the writer cannot observe a stale Qdrant point
     // once the durable intent is committed, even while deletion is delayed.
-    let write = engine.store().maintenance_guard().await;
+    let write = engine.store_for_tests().maintenance_guard().await;
     let racing_engine = engine.clone();
     let racing_id = crash_id.to_owned();
     let racing = tokio::spawn(async move { racing_engine.get_memory(&racing_id).await });
@@ -1229,7 +1257,12 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     ledger.begin_erase(crash_id).unwrap();
     drop(write);
     assert!(racing.await.unwrap().is_err());
-    assert!(engine.store().get_memory(crash_id).await.unwrap().is_some());
+    assert!(engine
+        .store_for_tests()
+        .get_memory(crash_id)
+        .await
+        .unwrap()
+        .is_some());
     assert!(engine
         .timeline(
             memex8::engine::timeline::Anchor::MemoryId(crash_id.to_owned()),
@@ -1369,7 +1402,7 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
     server.abort();
     let restarted = Engine::new(engine.config().clone()).await.unwrap();
     assert!(restarted
-        .store()
+        .store_for_tests()
         .get_memory(crash_id)
         .await
         .unwrap()
@@ -1383,13 +1416,9 @@ async fn explicit_rest_capture_links_reads_retries_and_fails_closed() {
         .all(|m| m.id != crash_id));
     assert!(restarted
         .store_with_evidence(
-            "crash fixture unique phrase",
-            vec![],
-            None,
-            None,
-            None,
+            memex8::engine::NewMemory::new("crash fixture unique phrase"),
             Some("crash-fixture"),
-            &pending_capture
+            &pending_capture,
         )
         .await
         .is_err());

@@ -3,6 +3,7 @@ use crate::engine::decay;
 use crate::engine::embedder;
 use crate::engine::memex8_md::write_digest_md;
 use crate::engine::reactions::reaction_boost;
+use crate::engine::vector_math::{cosine_similarity, kmeans};
 use crate::storage::qdrant::{GapPoint, MemoryPoint, QdrantStore, VerificationStatusCounts};
 use std::path::{Path, PathBuf};
 
@@ -355,7 +356,7 @@ impl SlumberEngine {
     /// storage-precision policy, and excluding hot memories from the search
     /// structure made semantic search blind to exactly the most-accessed ones.
     async fn rebuild_compressed_index(&self) -> anyhow::Result<usize> {
-        super::rebuild_compressed_index(&self.store, &self.config).await
+        super::compressed_index::rebuild(&self.store, &self.config).await
     }
 
     // ─── Phase 2b: Re-quantify All (no-op — full rebuild in the final phase) ──
@@ -486,7 +487,9 @@ impl SlumberEngine {
             }
 
             // Run k-means with k=2
-            let (c1, c2, assignments) = kmeans_split_2(&realm_vectors, 20);
+            let (centroids, labels) = kmeans(&realm_vectors, 2, 20);
+            let (c1, c2) = (centroids[0].clone(), centroids[1].clone());
+            let assignments: Vec<bool> = labels.iter().map(|&l| l == 1).collect();
 
             let count_a = assignments.iter().filter(|&&a| !a).count();
             let count_b = assignments.iter().filter(|&&a| a).count();
@@ -3057,101 +3060,6 @@ struct VerificationRating {
     confidence: f32,
     #[allow(dead_code)]
     reason: Option<String>,
-}
-
-/// Cosine similarity between two vectors.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let n = a.len().min(b.len());
-    if n == 0 {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b.iter()).take(n).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().take(n).map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().take(n).map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        0.0
-    } else {
-        dot / (norm_a * norm_b)
-    }
-}
-
-/// K-means with k=2 for splitting a realm into two.
-fn kmeans_split_2(vectors: &[Vec<f32>], max_iter: usize) -> (Vec<f32>, Vec<f32>, Vec<bool>) {
-    let dims = vectors[0].len();
-    let n = vectors.len();
-
-    // Initialize centroids: first vector and farthest from first
-    let mut c1 = vectors[0].clone();
-    let mut best_dist = -1.0f32;
-    let mut farthest_idx = 1;
-    for (i, v) in vectors.iter().enumerate().skip(1) {
-        let d = cosine_similarity(&c1, v);
-        if d < best_dist || best_dist < 0.0 {
-            best_dist = d;
-            farthest_idx = i;
-        }
-    }
-    let mut c2 = vectors[farthest_idx].clone();
-
-    let mut assignments = vec![false; n];
-
-    for _iter in 0..max_iter {
-        // Assign each vector to nearest centroid
-        let mut changed = false;
-        for (i, v) in vectors.iter().enumerate() {
-            let d1 = cosine_similarity(&c1, v);
-            let d2 = cosine_similarity(&c2, v);
-            let new_assignment = d2 > d1; // higher cosine = closer
-            if assignments[i] != new_assignment {
-                changed = true;
-            }
-            assignments[i] = new_assignment;
-        }
-
-        if !changed {
-            break;
-        }
-
-        // Recompute centroids
-        let mut sum1 = vec![0.0f32; dims];
-        let mut count1 = 0usize;
-        let mut sum2 = vec![0.0f32; dims];
-        let mut count2 = 0usize;
-
-        for (i, v) in vectors.iter().enumerate() {
-            if assignments[i] {
-                for (j, x) in v.iter().enumerate() {
-                    sum2[j] += x;
-                }
-                count2 += 1;
-            } else {
-                for (j, x) in v.iter().enumerate() {
-                    sum1[j] += x;
-                }
-                count1 += 1;
-            }
-        }
-
-        if count1 > 0 {
-            for x in sum1.iter_mut() {
-                *x /= count1 as f32;
-            }
-            c1 = sum1;
-        }
-        if count2 > 0 {
-            for x in sum2.iter_mut() {
-                *x /= count2 as f32;
-            }
-            c2 = sum2;
-        }
-
-        // If one cluster is empty, stop
-        if count1 == 0 || count2 == 0 {
-            break;
-        }
-    }
-
-    (c1, c2, assignments)
 }
 
 #[cfg(test)]

@@ -105,7 +105,7 @@ impl Scheduler {
                     // restart. The activity timer is deliberately not reset, so
                     // unpausing triggers on the very next tick instead of waiting
                     // out another full idle timeout.
-                    if self.engine.refresh_slumber_pause().await {
+                    if self.engine.slumber_pause().refresh() {
                         if !pause_announced {
                             tracing::info!("⏸️  Slumber paused — idle and cron triggers skipped");
                             pause_announced = true;
@@ -171,7 +171,7 @@ impl Scheduler {
                 _ = cron_check.tick() => {
                     // Same pause gate as the idle path: a paused engine runs no
                     // scheduled slumber at all.
-                    if self.engine.refresh_slumber_pause().await {
+                    if self.engine.slumber_pause().refresh() {
                         if !pause_announced {
                             tracing::info!("⏸️  Slumber paused — cron trigger skipped");
                             pause_announced = true;

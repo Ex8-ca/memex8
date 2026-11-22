@@ -46,8 +46,13 @@ def _load_plugin_module():
     sys.modules["tools"] = tools_stub
     sys.modules["tools.registry"] = tools_stub.registry
     try:
-        spec = importlib.util.spec_from_file_location("memex8_plugin", PLUGIN_PATH)
+        # Load as a package so the plugin's relative imports (client, redaction) resolve.
+        spec = importlib.util.spec_from_file_location(
+            "memex8_plugin", PLUGIN_PATH,
+            submodule_search_locations=[os.path.dirname(PLUGIN_PATH)],
+        )
         module = importlib.util.module_from_spec(spec)
+        sys.modules["memex8_plugin"] = module
         spec.loader.exec_module(module)
         return module
     finally:
