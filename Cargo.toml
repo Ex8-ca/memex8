@@ -1,6 +1,6 @@
 [package]
 name = "memex8"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.94"
 description = "Self-hosted AI memory system with Qdrant, TurboVec compression, and auto-discovered knowledge realms"
